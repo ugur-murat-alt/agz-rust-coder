@@ -14,6 +14,11 @@ This migration baseline is pinned to the read-only reference repository at
 No paid model benchmark was run. Public release, publish, or pull-request
 operations are outside this baseline and require explicit user approval.
 
+The MCP SDK contract is pinned to annotated tag `rmcp-v3.1.4` (tag object
+`2b7ea69be1701fd39de53161055212c4041ebf06`, peeled commit
+`4a738b9dd99eaca418b614afa433a0cbdaf8d056`). API behavior is taken from that
+tag rather than an unpinned default branch.
+
 ## Frozen contracts
 
 - The reviewed TypeScript tool schema fixture is preserved semantically in
