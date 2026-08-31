@@ -1,0 +1,144 @@
+{
+  "check": {
+    "type": "object",
+    "properties": {
+      "dir": {
+        "type": "string",
+        "description": "Absolute path to a Rust project/workspace, or to a parent containing one unambiguous nested Cargo project."
+      },
+      "target": {
+        "type": "string",
+        "enum": ["check", "clippy", "test", "doc", "fmt", "all"],
+        "description": "Every target is read-only. check: cargo check; clippy: Clippy with -D warnings; test: cargo test; doc: documentation tests; fmt: cargo fmt --check only and NEVER rewrites files; all: formatting check, workspace Clippy, all-target tests, then applicable documentation tests. If fmt fails, run cargo fmt --all in the terminal before another check."
+      },
+      "timings": {
+        "type": "boolean",
+        "description": "Optional diagnostic mode. Adds stable Cargo --timings to build-capable steps, reads only the bounded report under the selected target directory, and reports critical units/linker time when Cargo exposes them. It never changes Cargo config and does not grant extra authority."
+      },
+      "detail": {
+        "type": "string",
+        "enum": ["compact", "standard", "full"],
+        "description": "Output detail. compact (default): at most 5 root diagnostics, patch summary, no raw tail; standard: bounded rendered details; full: bounded raw tail for explicit debugging."
+      }
+    },
+    "required": ["dir"],
+    "additionalProperties": false
+  },
+  "docs": {
+    "type": "object",
+    "properties": {
+      "dir": {
+        "type": "string",
+        "description": "Absolute Rust workspace or package directory containing Cargo.lock."
+      },
+      "crate": {
+        "type": "string",
+        "description": "Package/crate name to document."
+      },
+      "symbol": {
+        "type": "string",
+        "description": "Optional Rust item name, for example Widget or widget."
+      },
+      "version": {
+        "type": "string",
+        "description": "Optional exact version from Cargo.lock. Required when the lock file has multiple matching versions."
+      },
+      "source": {
+        "type": "string",
+        "description": "Optional Cargo.lock source selector (registry, git, path, or exact source URL) when name and version are still ambiguous."
+      },
+      "expensiveFallback": {
+        "type": "boolean",
+        "description": "Explicitly allow bounded cargo doc generation after cache, source, and docs.rs routes fail. Default false."
+      }
+    },
+    "required": ["dir", "crate"],
+    "additionalProperties": false
+  },
+  "crate_lookup": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "Crate name to verify (e.g. serde_json). Also detects standard-library modules that should not become crates."
+      },
+      "version": {
+        "type": "string",
+        "description": "Optional exact version to check against crates.io (e.g. 1.0.140)."
+      }
+    },
+    "required": ["name"],
+    "additionalProperties": false
+  },
+  "symbol": {
+    "type": "object",
+    "properties": {
+      "dir": { "type": "string", "description": "Absolute path to the Rust project directory (workspace root or member)." },
+      "path": { "type": "string", "description": "Path to the .rs file, relative to dir (or absolute within the workspace)." },
+      "symbol": { "type": "string", "minLength": 1, "description": "Symbol name (fn/struct/trait) to query." },
+      "line": { "type": "integer", "minimum": 1, "description": "1-based line containing the symbol; used with symbol to resolve the exact position." }
+    },
+    "required": ["dir", "path", "symbol"],
+    "additionalProperties": false
+  },
+  "symbols": {
+    "type": "object",
+    "properties": {
+      "dir": { "type": "string", "description": "Absolute path to the Rust project directory." },
+      "path": { "type": "string", "description": "Path to the .rs file within the workspace." }
+    },
+    "required": ["dir", "path"],
+    "additionalProperties": false
+  },
+  "implementations": {
+    "type": "object",
+    "properties": {
+      "dir": { "type": "string" },
+      "path": { "type": "string" },
+      "symbol": { "type": "string", "minLength": 1 },
+      "line": { "type": "integer", "minimum": 1 },
+      "includeContents": { "type": "boolean", "description": "Include full contents for at most three workspace files." }
+    },
+    "required": ["dir", "path", "symbol"],
+    "additionalProperties": false
+  },
+  "hierarchy": {
+    "type": "object",
+    "properties": {
+      "dir": { "type": "string" },
+      "path": { "type": "string" },
+      "symbol": { "type": "string", "minLength": 1 },
+      "line": { "type": "integer", "minimum": 1 },
+      "direction": { "type": "string", "enum": ["incoming", "outgoing", "both"] },
+      "depth": { "type": "integer", "minimum": 1, "maximum": 2 }
+    },
+    "required": ["dir", "path", "symbol"],
+    "additionalProperties": false
+  },
+  "rename": {
+    "type": "object",
+    "properties": {
+      "dir": { "type": "string" },
+      "path": { "type": "string" },
+      "symbol": { "type": "string", "minLength": 1 },
+      "line": { "type": "integer", "minimum": 1 },
+      "newName": { "type": "string", "minLength": 1 },
+      "includeContents": { "type": "boolean" }
+    },
+    "required": ["dir", "path", "symbol", "newName"],
+    "additionalProperties": false
+  },
+  "refactor": {
+    "type": "object",
+    "properties": {
+      "dir": { "type": "string" },
+      "path": { "type": "string" },
+      "symbol": { "type": "string", "minLength": 1 },
+      "line": { "type": "integer", "minimum": 1 },
+      "only": { "type": "array", "items": { "type": "string" }, "maxItems": 10 },
+      "includeContents": { "type": "boolean" }
+    },
+    "required": ["dir", "path", "symbol"],
+    "additionalProperties": false
+  }
+}
