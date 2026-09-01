@@ -32,7 +32,7 @@ fn compile_semantic_binary(name: &str) -> PathBuf {
     let output = output_dir.join(name);
     let rustc = env::var_os("RUSTC")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/home/ugur/.cargo/bin/rustc"));
+        .unwrap_or_else(|| PathBuf::from("rustc"));
     let status = Command::new(rustc)
         .args(["--edition=2024"])
         .arg(source)

@@ -34,6 +34,34 @@ fn repository_root() -> PathBuf {
 }
 
 #[test]
+fn live_checkpoint_cleanup_distinguishes_missing_and_unsafe_roots() {
+    let root = std::env::temp_dir().join(format!(
+        "stage7-checkpoint-cleanup-test-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+
+    remove_live_checkpoints(&root, "missing").expect("missing checkpoint root is clean");
+
+    let results = root.join("benchmark/results");
+    let stage7 = results.join("stage7");
+    fs::create_dir_all(&results).expect("create benchmark results parent");
+    fs::write(&stage7, b"not a directory").expect("write unsafe checkpoint root");
+    assert!(remove_live_checkpoints(&root, "file").is_err());
+    fs::remove_file(&stage7).expect("remove unsafe checkpoint file");
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(root.join("missing-target"), &stage7)
+            .expect("create dangling checkpoint symlink");
+        assert!(remove_live_checkpoints(&root, "symlink").is_err());
+        fs::remove_file(&stage7).expect("remove checkpoint symlink");
+    }
+
+    fs::remove_dir_all(root).expect("remove checkpoint cleanup test root");
+}
+
+#[test]
 fn live_guard_rejects_before_side_effects() {
     let root = std::env::temp_dir().join(format!("stage7-guard-test-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);

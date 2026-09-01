@@ -921,7 +921,16 @@ fn write_live_checkpoint_locked(
 pub(crate) fn remove_live_checkpoints(root: &Path, run_id: &str) -> Result<()> {
     let results_root = root.join("benchmark").join("results").join("stage7");
     let prefix = format!(".live-{run_id}-checkpoint-");
-    for entry in fs::read_dir(&results_root).context("read live checkpoint directory")? {
+    let metadata = match fs::symlink_metadata(&results_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context("inspect live checkpoint directory"),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("live checkpoint root is unsafe");
+    }
+    let entries = fs::read_dir(&results_root).context("read live checkpoint directory")?;
+    for entry in entries {
         let entry = entry.context("read live checkpoint entry")?;
         if entry.file_name().to_string_lossy().starts_with(&prefix) {
             let metadata = fs::symlink_metadata(entry.path()).context("inspect live checkpoint")?;

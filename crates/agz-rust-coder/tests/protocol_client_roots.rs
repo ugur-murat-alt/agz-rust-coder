@@ -1,7 +1,10 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -15,6 +18,16 @@ use rmcp::{
     },
     service::{MaybeSendFuture, Peer, RequestContext, RoleClient},
 };
+
+static NEXT_STATE_ID: AtomicU64 = AtomicU64::new(0);
+
+struct IsolatedState(PathBuf);
+
+impl Drop for IsolatedState {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
 
 #[derive(Clone)]
 struct MockClient {
@@ -109,6 +122,25 @@ fn fixture_root() -> PathBuf {
     .expect("canonical stage7 clean fixture")
 }
 
+fn isolated_config(root: PathBuf) -> (Config, IsolatedState) {
+    let state_id = NEXT_STATE_ID.fetch_add(1, Ordering::Relaxed);
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the Unix epoch")
+        .as_nanos();
+    let state = std::env::temp_dir().join(format!(
+        "agz-rust-coder-roots-state-{}-{stamp}-{state_id}",
+        std::process::id()
+    ));
+    let mut config = Config::defaults_at(root);
+    config.gate.cache_dir = state.join("gate");
+    config.gate.lease_dir = state.join("leases");
+    config.docs.cache_dir = state.join("docs");
+    config.telemetry.enabled = false;
+    config.telemetry.path = state.join("activity.jsonl");
+    (config, IsolatedState(state))
+}
+
 fn client_info(capabilities: ClientCapabilities) -> ClientInfo {
     ClientInfo::new(
         capabilities,
@@ -163,7 +195,8 @@ async fn unsupported_client_roots_use_the_configured_allowlist() -> Result<()> {
         client_info(ClientCapabilities::default()),
         vec![root.clone()],
     );
-    let (transport, server) = spawn_server(Config::defaults_at(root.clone()));
+    let (config, _state) = isolated_config(root.clone());
+    let (transport, server) = spawn_server(config);
     let client = mock
         .clone()
         .serve_with_lifecycle(
@@ -187,7 +220,8 @@ async fn unsupported_client_roots_use_the_configured_allowlist() -> Result<()> {
 async fn advertised_empty_roots_fail_closed_without_configured_fallback() -> Result<()> {
     let root = fixture_root();
     let mock = MockClient::new(advertised_client_info(), Vec::new());
-    let (transport, server) = spawn_server(Config::defaults_at(root));
+    let (config, _state) = isolated_config(root);
+    let (transport, server) = spawn_server(config);
     let client = mock
         .clone()
         .serve_with_lifecycle(
@@ -213,7 +247,8 @@ async fn advertised_root_errors_fail_closed() -> Result<()> {
     let root = fixture_root();
     let mock = MockClient::new(advertised_client_info(), vec![root.clone()]);
     mock.set_error();
-    let (transport, server) = spawn_server(Config::defaults_at(root));
+    let (config, _state) = isolated_config(root);
+    let (transport, server) = spawn_server(config);
     let client = mock
         .clone()
         .serve_with_lifecycle(
@@ -239,7 +274,8 @@ async fn advertised_invalid_root_uri_fails_closed() -> Result<()> {
     let root = fixture_root();
     let mock = MockClient::new(advertised_client_info(), vec![root.clone()]);
     mock.set_uris(vec!["https://example.invalid/workspace".to_owned()]);
-    let (transport, server) = spawn_server(Config::defaults_at(root));
+    let (config, _state) = isolated_config(root);
+    let (transport, server) = spawn_server(config);
     let client = mock
         .clone()
         .serve_with_lifecycle(
@@ -265,7 +301,8 @@ async fn advertised_root_timeout_fails_closed() -> Result<()> {
     let root = fixture_root();
     let mock = MockClient::new(advertised_client_info(), vec![root.clone()]);
     mock.set_delay(Duration::from_secs(6));
-    let (transport, server) = spawn_server(Config::defaults_at(root));
+    let (config, _state) = isolated_config(root);
+    let (transport, server) = spawn_server(config);
     let client = mock
         .clone()
         .serve_with_lifecycle(
@@ -292,7 +329,8 @@ async fn advertised_roots_narrow_the_configured_allowlist_and_singleflight() -> 
     let narrowed = root.join("src");
     let mock = MockClient::new(advertised_client_info(), vec![narrowed.clone()]);
     mock.set_delay(Duration::from_millis(25));
-    let (transport, server) = spawn_server(Config::defaults_at(root));
+    let (config, _state) = isolated_config(root);
+    let (transport, server) = spawn_server(config);
     let client = mock
         .clone()
         .serve_with_lifecycle(
@@ -332,7 +370,8 @@ async fn roots_changed_invalidates_the_epoch_cache() -> Result<()> {
     let root = fixture_root();
     let narrowed = root.join("src");
     let mock = MockClient::new(advertised_client_info(), vec![narrowed.clone()]);
-    let (transport, server) = spawn_server(Config::defaults_at(root.clone()));
+    let (config, _state) = isolated_config(root.clone());
+    let (transport, server) = spawn_server(config);
     let client = mock
         .clone()
         .serve_with_lifecycle(
@@ -420,7 +459,7 @@ impl Drop for SlowProject {
 #[tokio::test]
 async fn roots_changed_cancels_an_active_workspace_check() -> Result<()> {
     let project = SlowProject::new();
-    let mut config = Config::defaults_at(project.root.clone());
+    let (mut config, _state) = isolated_config(project.root.clone());
     config.gate.cache_dir = project.base.join("cache");
     config.gate.lease_dir = project.base.join("leases");
     config.gate.hard_timeout_ms = 30_000;
