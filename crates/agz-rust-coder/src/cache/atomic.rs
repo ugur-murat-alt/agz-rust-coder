@@ -11,12 +11,16 @@ use cap_std::fs::OpenOptionsExt;
 use cap_std::fs::{Dir, OpenOptions as CapabilityOpenOptions};
 use fs4::{FileExt, TryLockError};
 use std::{
+    collections::HashSet,
     ffi::{OsStr, OsString},
     fmt,
     fs::{self, File},
     io::{self, Write},
     path::{Component, Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
     time::{Duration, Instant, SystemTime},
 };
@@ -30,6 +34,7 @@ const DEFAULT_MAX_BACKOFF: Duration = Duration::from_millis(50);
 const DEFAULT_STALE_TEMP_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_TEMP_ATTEMPTS: u64 = 64;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static ACTIVE_LOCKS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 /// A cancellation source that can be checked without coupling this primitive
 /// to a particular async runtime.
@@ -466,11 +471,26 @@ struct CacheDirectory {
 
 struct AdvisoryLock {
     file: File,
+    _process: ProcessLock,
+}
+
+struct ProcessLock {
+    path: PathBuf,
 }
 
 impl Drop for AdvisoryLock {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self.file);
+    }
+}
+
+impl Drop for ProcessLock {
+    fn drop(&mut self) {
+        let mut active = ACTIVE_LOCKS
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        active.remove(&self.path);
     }
 }
 
@@ -509,6 +529,7 @@ fn acquire_lock(
     path: &Path,
     options: PublishOptions<'_>,
 ) -> Result<AdvisoryLock, PublishError> {
+    let process_lock = acquire_process_lock(path, options)?;
     let file = open_lock(parent, name, path)?;
     let attempts = options.lock.max_attempts.max(1);
     let mut backoff = options.lock.initial_backoff;
@@ -517,7 +538,12 @@ fn acquire_lock(
     for attempt in 0..attempts {
         check_abort(&options)?;
         match FileExt::try_lock(&file) {
-            Ok(()) => return Ok(AdvisoryLock { file }),
+            Ok(()) => {
+                return Ok(AdvisoryLock {
+                    file,
+                    _process: process_lock,
+                });
+            }
             Err(TryLockError::WouldBlock) if attempt + 1 < attempts => {
                 let mut delay = backoff;
                 if let Some(deadline) = options.deadline {
@@ -546,6 +572,55 @@ fn acquire_lock(
                 return Err(PublishError::io(Some(path.to_path_buf()), error));
             }
         }
+    }
+
+    Err(PublishError::LockContended {
+        path: path.to_path_buf(),
+    })
+}
+
+fn acquire_process_lock(
+    path: &Path,
+    options: PublishOptions<'_>,
+) -> Result<ProcessLock, PublishError> {
+    let attempts = options.lock.max_attempts.max(1);
+    let mut backoff = options.lock.initial_backoff;
+    let maximum_backoff = options.lock.max_backoff.max(backoff);
+
+    for attempt in 0..attempts {
+        check_abort(&options)?;
+        {
+            let mut active = ACTIVE_LOCKS
+                .get_or_init(|| Mutex::new(HashSet::new()))
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !active.contains(path) {
+                let path = path.to_path_buf();
+                active.insert(path.clone());
+                return Ok(ProcessLock { path });
+            }
+        }
+        if attempt + 1 == attempts {
+            break;
+        }
+
+        let mut delay = backoff;
+        if let Some(deadline) = options.deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(PublishError::DeadlineExceeded);
+            }
+            if delay > remaining {
+                delay = remaining;
+            }
+        }
+        if !delay.is_zero() {
+            thread::sleep(delay);
+        }
+        backoff = backoff
+            .checked_mul(2)
+            .unwrap_or(maximum_backoff)
+            .min(maximum_backoff);
     }
 
     Err(PublishError::LockContended {

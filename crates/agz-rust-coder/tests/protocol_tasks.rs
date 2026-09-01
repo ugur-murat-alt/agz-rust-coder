@@ -9,6 +9,42 @@ use rmcp::{
     },
 };
 use serde_json::{Map, Value};
+use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+static NEXT_STATE_ID: AtomicU64 = AtomicU64::new(0);
+
+struct IsolatedState(PathBuf);
+
+impl Drop for IsolatedState {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn isolated_config(root: PathBuf) -> (Config, IsolatedState) {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the Unix epoch")
+        .as_nanos();
+    let state = std::fs::canonicalize(std::env::temp_dir())
+        .expect("canonical temp directory")
+        .join(format!(
+            "agz-rust-coder-task-state-{}-{stamp}-{}",
+            std::process::id(),
+            NEXT_STATE_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+    let mut config = Config::defaults_at(root);
+    config.gate.cache_dir = state.join("gate");
+    config.gate.lease_dir = state.join("leases");
+    config.docs.cache_dir = state.join("docs");
+    config.telemetry.enabled = false;
+    config.telemetry.path = state.join("activity.jsonl");
+    (config, IsolatedState(state))
+}
 
 fn spawn_server_for(
     fixture: &'static str,
@@ -19,14 +55,17 @@ fn spawn_server_for(
             .join(fixture),
     )
     .expect("canonical task fixture");
-    spawn_configured_server(Config::defaults_at(root))
+    let (config, state) = isolated_config(root);
+    spawn_configured_server(config, state)
 }
 
 fn spawn_configured_server(
     config: Config,
+    state: IsolatedState,
 ) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<Result<()>>) {
     let (server_transport, client_transport) = tokio::io::duplex(1 << 20);
     let task = tokio::spawn(async move {
+        let _state = state;
         let service = RustCoderServer::new(config)?
             .serve(server_transport)
             .await?;
@@ -42,7 +81,8 @@ fn spawn_local_docs_server(
 ) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<Result<()>>) {
     let (server_transport, client_transport) = tokio::io::duplex(1 << 20);
     let task = tokio::spawn(async move {
-        let mut config = Config::defaults_at(root);
+        let (mut config, state) = isolated_config(root);
+        let _state = state;
         config.docs.fallback = agz_rust_coder::config::DocsFallback::Local;
         config.docs.cache_dir = cache;
         config.docs.timeout_ms = 30_000;
@@ -171,9 +211,9 @@ async fn typed_tool_error_completes_the_task_instead_of_failing_it() -> Result<(
     let root = std::fs::canonicalize(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/stage7/clean"),
     )?;
-    let mut config = Config::defaults_at(root.clone());
+    let (mut config, state) = isolated_config(root.clone());
     config.cargo.path = Some(root.join("missing-cargo"));
-    let (transport, server) = spawn_configured_server(config);
+    let (transport, server) = spawn_configured_server(config, state);
     let client = client_info(ClientCapabilities::builder().enable_tasks().build())
         .serve_with_lifecycle(
             transport,

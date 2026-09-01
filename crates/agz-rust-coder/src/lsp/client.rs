@@ -1436,8 +1436,13 @@ async fn wait_for_child(
         tokio::select! {
             _ = kill_receiver.recv() => {
                 let mut child = child.lock().await;
-                child.start_kill()?;
-                kill_requested = true;
+                match child.start_kill() {
+                    Ok(()) => kill_requested = true,
+                    Err(kill_error) => match child.try_wait() {
+                        Ok(Some(status)) => return Ok(status),
+                        Ok(None) | Err(_) => return Err(kill_error),
+                    },
+                }
             }
             _ = time::sleep(Duration::from_millis(10)) => {}
         }
