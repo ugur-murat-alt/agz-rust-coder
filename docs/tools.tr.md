@@ -79,7 +79,7 @@ platformun path-list ayırıcısını kullanır.
 | `gate.scope` | `shadow` | `workspace`, `shadow` veya `affected`. |
 | `gate.cache` | `auto` | `auto`, `project` veya `isolated`. |
 | `gate.min_free_disk_mb` | `1024` | Ön kontrol disk tabanı. |
-| `gate.min_available_memory_mb` | `512` | Ön kontrol bellek tabanı. |
+| `gate.min_available_memory_mb` | `512` | İşletim sistemi güvenilir kullanılabilir bellek ölçümü sağladığında uygulanan ön kontrol tabanı (şu anda Linux). |
 | `gate.cache_dir` | platform `agz-rust-coder/state/gate` | Sunucuya ait Cargo cache. |
 | `gate.lease_dir` | platform `agz-rust-coder/state/leases` | Host lease ve süreç journal'ı. |
 | `rust_analyzer.path` | PATH or rustup | İsteğe bağlı binary değişimi. |

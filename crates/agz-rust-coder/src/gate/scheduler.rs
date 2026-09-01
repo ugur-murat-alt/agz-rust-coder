@@ -21,6 +21,7 @@ use super::{
 const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(500);
 const DEFAULT_HARD_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_HEARTBEAT: Duration = Duration::from_secs(8);
+#[cfg(target_os = "linux")]
 const RESOURCE_MEMORY_PATH: &str = "/proc/meminfo";
 
 #[derive(Debug, Clone)]
@@ -497,10 +498,14 @@ impl GateScheduler {
                 snapshot.free_disk_mb, self.options.min_free_disk_mb
             ));
         }
-        if snapshot.available_memory_mb < self.options.min_available_memory_mb {
+        if memory_below_floor(
+            snapshot.available_memory_mb,
+            self.options.min_available_memory_mb,
+        ) {
             reasons.push(format!(
                 "available memory {} MiB < {} MiB",
-                snapshot.available_memory_mb, self.options.min_available_memory_mb
+                snapshot.available_memory_mb.unwrap_or_default(),
+                self.options.min_available_memory_mb
             ));
         }
         if reasons.is_empty() {
@@ -788,7 +793,7 @@ fn cancellation_error(job: &JobState, fallback: SchedulerError) -> SchedulerErro
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResourceSnapshot {
     pub free_disk_mb: u64,
-    pub available_memory_mb: u64,
+    pub available_memory_mb: Option<u64>,
 }
 
 fn resource_snapshot(path: &Path) -> std::io::Result<ResourceSnapshot> {
@@ -796,11 +801,15 @@ fn resource_snapshot(path: &Path) -> std::io::Result<ResourceSnapshot> {
     let available_memory = available_memory_bytes()?;
     Ok(ResourceSnapshot {
         free_disk_mb: free_disk / (1024 * 1024),
-        available_memory_mb: available_memory / (1024 * 1024),
+        available_memory_mb: available_memory.map(|bytes| bytes / (1024 * 1024)),
     })
 }
 
-fn available_memory_bytes() -> std::io::Result<u64> {
+fn memory_below_floor(available_memory_mb: Option<u64>, minimum_mb: u64) -> bool {
+    available_memory_mb.is_some_and(|available| available < minimum_mb)
+}
+
+fn available_memory_bytes() -> std::io::Result<Option<u64>> {
     #[cfg(target_os = "linux")]
     {
         let contents = std::fs::read_to_string(RESOURCE_MEMORY_PATH)?;
@@ -810,20 +819,15 @@ fn available_memory_bytes() -> std::io::Result<u64> {
                 .then(|| parts.next()?.parse::<u64>().ok())
                 .flatten()
         }) {
-            return Ok(value.saturating_mul(1024));
+            return Ok(Some(value.saturating_mul(1024)));
         }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "MemAvailable was missing from /proc/meminfo",
+        ))
     }
-    Ok(available_memory_fallback())
-}
-
-#[cfg(target_os = "linux")]
-fn available_memory_fallback() -> u64 {
-    0
-}
-
-#[cfg(not(target_os = "linux"))]
-fn available_memory_fallback() -> u64 {
-    0
+    #[cfg(not(target_os = "linux"))]
+    Ok(None)
 }
 
 fn composite_key(root: &Path, key: &str, generation: u64) -> String {
@@ -963,5 +967,12 @@ mod scheduler_tests {
             scheduler.close().await;
             let _ = std::fs::remove_dir_all(lease_dir);
         }
+    }
+
+    #[test]
+    fn unknown_memory_does_not_block_resource_admission() {
+        assert!(!memory_below_floor(None, 512));
+        assert!(memory_below_floor(Some(511), 512));
+        assert!(!memory_below_floor(Some(512), 512));
     }
 }

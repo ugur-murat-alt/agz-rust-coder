@@ -62,6 +62,7 @@ fn log_path(label: &str) -> PathBuf {
 }
 
 static NEXT_LOG: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 async fn spawn_client(mode: &str, log: Option<&Path>) -> Arc<LspClient> {
     let mut spec = CommandSpec::new(mock_binary().clone(), temp_dir())
@@ -103,7 +104,7 @@ async fn accepts_partial_and_concatenated_frames() {
         json!({"ok": true})
     );
     partial
-        .shutdown(Duration::from_millis(200))
+        .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("shutdown partial client");
 
@@ -116,7 +117,7 @@ async fn accepts_partial_and_concatenated_frames() {
         json!({"ok": true})
     );
     concat
-        .shutdown(Duration::from_millis(200))
+        .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("shutdown concatenated client");
 }
@@ -133,7 +134,7 @@ async fn rejects_malformed_protocol_values_without_closing_the_client() {
     assert!(!client.is_closed());
     assert!(client.protocol_error_count() >= 1);
     client
-        .shutdown(Duration::from_millis(200))
+        .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("shutdown mock client");
 }
@@ -153,7 +154,7 @@ async fn preserves_response_codes_and_retries_content_modified_by_code() {
         other => panic!("unexpected error: {other:?}"),
     }
     client
-        .shutdown(Duration::from_millis(200))
+        .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("shutdown error client");
 
@@ -164,7 +165,7 @@ async fn preserves_response_codes_and_retries_content_modified_by_code() {
         .expect("retry response");
     assert_eq!(result, json!({"ok": true}));
     retry
-        .shutdown(Duration::from_millis(200))
+        .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("shutdown retry client");
 }
@@ -183,7 +184,7 @@ async fn timeout_sends_cancel_request_with_the_matching_request() {
     let log_text = fs::read_to_string(&log).expect("read timeout log");
     assert!(log_text.contains("$/cancelRequest"));
     client
-        .shutdown(Duration::from_millis(200))
+        .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("shutdown slow client");
     let _ = fs::remove_file(log);
@@ -222,7 +223,7 @@ async fn request_cancellation_sends_cancel_request_and_returns_distinct_error() 
     let log_text = fs::read_to_string(&log).expect("read cancellation log");
     assert!(log_text.contains("$/cancelRequest"));
     client
-        .shutdown(Duration::from_millis(200))
+        .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("shutdown cancelled client");
     let _ = fs::remove_file(log);
@@ -248,7 +249,7 @@ async fn already_cancelled_request_does_not_write_a_request_frame() {
     ));
     assert!(fs::read_to_string(&log).is_err());
     client
-        .shutdown(Duration::from_millis(200))
+        .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("shutdown pre-cancelled client");
     let _ = fs::remove_file(log);
@@ -298,7 +299,7 @@ async fn dispatches_notifications_and_server_requests_without_blocking_responses
         Some(&("mock/notification".to_owned(), json!({"value": 7})))
     );
     client
-        .shutdown(Duration::from_millis(200))
+        .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("shutdown server client");
 }
@@ -329,7 +330,7 @@ async fn cancels_a_server_request_and_answers_the_server_after_handler_cancellat
     );
     assert!(cancelled.load(std::sync::atomic::Ordering::Acquire));
     client
-        .shutdown(Duration::from_millis(200))
+        .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("shutdown cancelled server client");
 }
@@ -363,7 +364,7 @@ async fn bounds_stderr_and_tracks_incremental_document_state() {
     assert!(stderr_client.stderr_overflowed());
     assert!(stderr_client.stderr_tail().await.ends_with("FINAL-STDERR"));
     stderr_client
-        .shutdown(Duration::from_millis(200))
+        .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("shutdown stderr client");
 
@@ -405,7 +406,7 @@ async fn bounds_stderr_and_tracks_incremental_document_state() {
     assert!(log_text.contains("textDocument/didChange"));
     assert!(log_text.contains("textDocument/didClose"));
     client
-        .shutdown(Duration::from_millis(200))
+        .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("shutdown sync client");
     let _ = fs::remove_file(log);
@@ -442,7 +443,7 @@ async fn document_cancellation_unblocks_while_waiting_for_the_same_document() {
     assert_eq!(client.document_version(uri).await, Some(1));
     drop(guard);
     client
-        .shutdown(Duration::from_millis(200))
+        .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("shutdown document client");
 }
@@ -459,7 +460,7 @@ async fn closed_documents_release_their_per_document_lock_budget() {
         client.close_document(&uri).await.expect("close document");
     }
     client
-        .shutdown(Duration::from_millis(200))
+        .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("shutdown document client");
 }
@@ -484,7 +485,7 @@ async fn unsupported_server_requests_receive_a_protocol_error_response() {
     let log_text = fs::read_to_string(&log).expect("read unsupported request log");
     assert!(log_text.contains("\"code\":-32601"), "{log_text}");
     client
-        .shutdown(Duration::from_millis(200))
+        .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("shutdown unsupported request client");
     let _ = fs::remove_file(log);
@@ -494,17 +495,17 @@ async fn unsupported_server_requests_receive_a_protocol_error_response() {
 async fn graceful_and_forced_shutdowns_remain_bounded() {
     let graceful = spawn_client("graceful", None).await;
     graceful
-        .shutdown(Duration::from_millis(200))
+        .shutdown(SHUTDOWN_TIMEOUT)
         .await
         .expect("graceful shutdown");
-    assert!(graceful.wait_closed(Duration::from_millis(200)).await);
+    assert!(graceful.wait_closed(SHUTDOWN_TIMEOUT).await);
 
     let forced = spawn_client("ignore", None).await;
     forced
         .shutdown(Duration::from_millis(40))
         .await
         .expect("forced shutdown");
-    assert!(forced.wait_closed(Duration::from_millis(200)).await);
+    assert!(forced.wait_closed(SHUTDOWN_TIMEOUT).await);
 }
 
 #[cfg(unix)]

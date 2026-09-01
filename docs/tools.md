@@ -80,7 +80,7 @@ use the platform path-list separator.
 | `gate.scope` | `shadow` | `workspace`, `shadow`, or `affected`. |
 | `gate.cache` | `auto` | `auto`, `project`, or `isolated`. |
 | `gate.min_free_disk_mb` | `1024` | Preflight disk floor. |
-| `gate.min_available_memory_mb` | `512` | Preflight memory floor. |
+| `gate.min_available_memory_mb` | `512` | Preflight memory floor when the host exposes a reliable available-memory measurement (currently Linux). |
 | `gate.cache_dir` | platform `agz-rust-coder/state/gate` | Server-owned Cargo cache. |
 | `gate.lease_dir` | platform `agz-rust-coder/state/leases` | Host leases and process journal. |
 | `rust_analyzer.path` | PATH or rustup | Optional binary override. |

@@ -1,4 +1,12 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use agz_rust_coder::{Config, RustCoderServer};
 use anyhow::{Context, Result};
@@ -11,12 +19,39 @@ use rmcp::{
     },
 };
 
-fn fixture_config() -> Config {
+static NEXT_STATE_ID: AtomicU64 = AtomicU64::new(0);
+
+struct IsolatedState(PathBuf);
+
+impl Drop for IsolatedState {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn fixture_config() -> (Config, IsolatedState) {
     let root = std::fs::canonicalize(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/stage7/clean"),
     )
     .expect("canonical stage7 clean fixture");
-    Config::defaults_at(root)
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the Unix epoch")
+        .as_nanos();
+    let state = fs::canonicalize(std::env::temp_dir())
+        .expect("canonical temp directory")
+        .join(format!(
+            "agz-rust-coder-lifecycle-state-{}-{stamp}-{}",
+            std::process::id(),
+            NEXT_STATE_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+    let mut config = Config::defaults_at(root);
+    config.gate.cache_dir = state.join("gate");
+    config.gate.lease_dir = state.join("leases");
+    config.docs.cache_dir = state.join("docs");
+    config.telemetry.enabled = false;
+    config.telemetry.path = state.join("activity.jsonl");
+    (config, IsolatedState(state))
 }
 
 fn spawn_server(config: Config) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<Result<()>>) {
@@ -40,7 +75,7 @@ fn client_info(capabilities: ClientCapabilities) -> ClientInfo {
 
 #[tokio::test]
 async fn initialize_lists_the_static_surface_and_guidance() -> Result<()> {
-    let config = fixture_config();
+    let (config, _state) = fixture_config();
     let (transport, server_task) = spawn_server(config);
     let client = client_info(ClientCapabilities::default())
         .serve(transport)
@@ -127,7 +162,8 @@ async fn initialize_lists_the_static_surface_and_guidance() -> Result<()> {
 
 #[tokio::test]
 async fn discover_selects_the_requested_2026_version() -> Result<()> {
-    let (transport, server_task) = spawn_server(fixture_config());
+    let (config, _state) = fixture_config();
+    let (transport, server_task) = spawn_server(config);
     let client = client_info(ClientCapabilities::default())
         .serve_with_lifecycle(
             transport,
@@ -152,7 +188,8 @@ async fn discover_selects_the_requested_2026_version() -> Result<()> {
 
 #[tokio::test]
 async fn missing_resource_code_tracks_the_negotiated_protocol() -> Result<()> {
-    let (legacy_transport, legacy_server) = spawn_server(fixture_config());
+    let (legacy_config, _legacy_state) = fixture_config();
+    let (legacy_transport, legacy_server) = spawn_server(legacy_config);
     let legacy = client_info(ClientCapabilities::default())
         .serve(legacy_transport)
         .await?;
@@ -165,7 +202,8 @@ async fn missing_resource_code_tracks_the_negotiated_protocol() -> Result<()> {
     legacy.cancel().await?;
     legacy_server.await??;
 
-    let (modern_transport, modern_server) = spawn_server(fixture_config());
+    let (modern_config, _modern_state) = fixture_config();
+    let (modern_transport, modern_server) = spawn_server(modern_config);
     let modern = client_info(ClientCapabilities::default())
         .serve_with_lifecycle(
             modern_transport,
@@ -194,7 +232,8 @@ fn mcp_error_code(error: ServiceError) -> ErrorCode {
 
 #[tokio::test]
 async fn shutdown_continues_after_a_waiter_is_cancelled_and_is_reusable() -> Result<()> {
-    let server = RustCoderServer::new(fixture_config())?;
+    let (config, _state) = fixture_config();
+    let server = RustCoderServer::new(config)?;
     let state = Arc::clone(server.state());
     let first_state = Arc::clone(&state);
     let first = tokio::spawn(async move { first_state.shutdown_async().await });
