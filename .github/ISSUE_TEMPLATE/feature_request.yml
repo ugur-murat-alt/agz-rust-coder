@@ -1,0 +1,49 @@
+name: Feature request
+description: Propose a narrowly scoped improvement to the standalone MCP server.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Requests must respect the stdio-only MCP boundary, source-write-free edit behavior,
+        and the documented limits. Do not include private prompts or source dumps.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem is not solved today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Describe the smallest useful behavior and its MCP surface.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and compatibility impact
+      description: Explain path, child-process, network, output, protocol, and bilingual-doc effects.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: I understand a pure MCP server cannot observe arbitrary OpenCode host hooks.
+          required: true
+        - label: I removed secrets, private source, raw paths, and raw session IDs.
+          required: true

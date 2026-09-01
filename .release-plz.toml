@@ -1,0 +1,26 @@
+[workspace]
+allow_dirty = false
+changelog_update = false
+dependencies_update = false
+git_release_enable = true
+git_release_draft = true
+git_release_latest = false
+git_tag_enable = true
+git_tag_name = "agz-rust-coder-v{{ version }}"
+git_release_name = "agz-rust-coder-v{{ version }}"
+# Registry publication is owned by the protected manual release workflow.
+publish = false
+publish_allow_dirty = false
+publish_no_verify = false
+publish_timeout = "10m"
+release_always = false
+repo_url = "https://github.com/ugur-murat-alt/agz-rust-coder"
+semver_check = false
+
+[[package]]
+name = "agz-rust-coder"
+publish = false
+git_release_enable = true
+git_release_draft = true
+git_tag_name = "agz-rust-coder-v{{ version }}"
+git_release_name = "agz-rust-coder-v{{ version }}"

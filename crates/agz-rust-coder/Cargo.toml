@@ -1,0 +1,52 @@
+[package]
+name = "agz-rust-coder"
+description = "A bounded, source-write-free Rust correctness MCP server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["mcp", "rust", "rust-analyzer", "cargo", "developer-tools"]
+categories = ["development-tools"]
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE"]
+
+[lib]
+name = "agz_rust_coder"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agz-rust-coder"
+path = "src/main.rs"
+
+[dependencies]
+cap-std.workspace = true
+cargo-platform.workspace = true
+cargo-lock.workspace = true
+cargo_metadata.workspace = true
+clap.workspace = true
+directories.workspace = true
+fs4.workspace = true
+futures.workspace = true
+process-wrap.workspace = true
+reqwest.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+
+[lints]
+workspace = true

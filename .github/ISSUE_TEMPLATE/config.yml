@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/ugur-murat-alt/agz-rust-coder/security/advisories/new
+    about: Do not disclose an unpatched vulnerability in a public issue or pull request.
+  - name: Ask a usage question
+    url: https://github.com/ugur-murat-alt/agz-rust-coder/discussions
+    about: Use Discussions for setup and usage questions that are not security reports.

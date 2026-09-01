@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "run_id": "stage6-legacy-historical",
+  "mode": "historical",
+  "arms": ["legacy"],
+  "fixtures": ["legacy-reference"],
+  "repetitions": 3,
+  "executed": false,
+  "execution": "not-run-after-rust-cut"
+}

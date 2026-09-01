@@ -1,0 +1,4 @@
+Compiling demo v0.1.0
+src/main.rs:5:19: error[E0382]: use of moved value: `data`
+src/main.rs:12:7: warning: unused variable: `x`
+src/lib.rs:1:1: error[E0502]: cannot borrow `foo` as immutable because it is also borrowed as mutable

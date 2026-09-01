@@ -1,0 +1,349 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Exact tag to create, for example agz-rust-coder-v0.1.0"
+        required: true
+        type: string
+      publish:
+        description: "Publish the verified crate, MCP metadata, and GitHub release after approval"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify release artifact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the dispatched commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal \
+            --component rustfmt \
+            --component clippy \
+            --component rust-analyzer
+
+      - name: Install pinned OpenCode V2
+        shell: bash
+        run: |
+          npm install --global @opencode-ai/cli@0.0.0-beta-18743
+          test "$(opencode2 --version)" = "opencode2 v0.0.0-beta-18743"
+
+      - name: Verify clean source and full gate
+        shell: bash
+        run: |
+          test -z "$(git status --porcelain)"
+          cargo +1.88.0 fmt --all --check
+          cargo +1.88.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo +1.88.0 test --workspace --all-targets --all-features --locked --no-fail-fast
+          cargo +1.88.0 check --workspace --all-targets --all-features --locked
+          cargo +1.88.0 build --release --locked
+
+      - name: Verify protocol and benchmark smoke
+        shell: bash
+        run: |
+          cargo +1.88.0 run --locked -p xtask -- protocol-smoke
+          cargo +1.88.0 run --locked -p xtask -- opencode-smoke
+          cargo +1.88.0 run --locked -p xtask -- benchmark-smoke
+
+      - name: Validate MCP Registry metadata
+        shell: bash
+        run: |
+          test "$(wc -c < server.json)" -le 4096
+          STATUS="$(curl --silent --show-error \
+            --header 'Content-Type: application/json' \
+            --data-binary @server.json \
+            --output registry-validation.json \
+            --write-out '%{http_code}' \
+            https://registry.modelcontextprotocol.io/v0.1/validate)"
+          test "$STATUS" = "200"
+          jq -e '.valid == true and (.issues | length == 0)' \
+            registry-validation.json >/dev/null
+
+      - name: Verify pinned real Rust Analyzer
+        shell: bash
+        run: |
+          RA_BIN="$(rustup which --toolchain 1.88.0 rust-analyzer)"
+          test -x "$RA_BIN"
+          "$RA_BIN" --version
+          AGZ_RUST_CODER_RUST_ANALYZER__PATH="$RA_BIN" \
+            cargo +1.88.0 test -p agz-rust-coder --test lsp_real --locked -- --ignored
+
+      - name: Package, fresh-install, and dry-run publish
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: 1
+          CARGO_INCREMENTAL: 0
+        run: |
+          cargo +1.88.0 package -p agz-rust-coder --locked
+          cargo +1.88.0 publish -p agz-rust-coder --dry-run --locked
+          VERSION="$(cargo +1.88.0 metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "agz-rust-coder") | .version')"
+          PACKAGE_DIR="$(mktemp -d)"
+          INSTALL_ROOT="$(mktemp -d)"
+          tar -xzf "target/package/agz-rust-coder-${VERSION}.crate" -C "$PACKAGE_DIR"
+          cargo +1.88.0 install \
+            --path "$PACKAGE_DIR/agz-rust-coder-${VERSION}" \
+            --root "$INSTALL_ROOT" \
+            --locked \
+            --offline
+          "$INSTALL_ROOT/bin/agz-rust-coder" --version
+          AGZ_RUST_CODER_BIN="$INSTALL_ROOT/bin/agz-rust-coder" \
+            cargo +1.88.0 run --locked -p xtask -- protocol-smoke
+          AGZ_RUST_CODER_BIN="$INSTALL_ROOT/bin/agz-rust-coder" \
+            cargo +1.88.0 run --locked -p xtask -- opencode-smoke
+          AGZ_RUST_CODER_BIN="$INSTALL_ROOT/bin/agz-rust-coder" \
+            cargo +1.88.0 run --locked -p xtask -- benchmark-smoke
+          git bundle create target/package/agz-rust-coder-source.bundle HEAD
+          printf '%s\n' "$GITHUB_SHA" > target/package/SOURCE_SHA
+          (cd target/package && sha256sum agz-rust-coder-*.crate agz-rust-coder-source.bundle > SHA256SUMS)
+
+      - name: Upload verified package artifact
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: artifact-package-${{ github.sha }}
+          path: |
+            target/package/agz-rust-coder-*.crate
+            target/package/agz-rust-coder-source.bundle
+            target/package/SHA256SUMS
+            target/package/SOURCE_SHA
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false
+
+      - name: Run dependency policy
+        shell: bash
+        run: |
+          cargo +1.88.0 install cargo-deny --version 0.20.2 --locked
+          cargo +1.88.0 deny check
+
+  release-binaries:
+    name: Build release binary (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+            binary: agz-rust-coder
+          - os: macos-14
+            platform: macos-arm64
+            binary: agz-rust-coder
+          - os: windows-2025
+            platform: windows-x86_64
+            binary: agz-rust-coder.exe
+    steps:
+      - name: Check out the dispatched commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: rustup toolchain install 1.88.0 --profile minimal
+
+      - name: Build release binary
+        shell: bash
+        run: cargo +1.88.0 build --release -p agz-rust-coder --locked
+
+      - name: Package binary and checksum
+        shell: bash
+        env:
+          BINARY: ${{ matrix.binary }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          test -f "target/release/$BINARY"
+          cd target/release
+          ARCHIVE="agz-rust-coder-${PLATFORM}.tar.gz"
+          tar -czf "$ARCHIVE" "$BINARY"
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: artifact-binary-${{ matrix.platform }}-${{ github.sha }}
+          path: |
+            target/release/agz-rust-coder-${{ matrix.platform }}.tar.gz
+            target/release/agz-rust-coder-${{ matrix.platform }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false
+
+  publish:
+    name: Publish approved release
+    if: inputs.publish == true
+    needs:
+      - verify
+      - release-binaries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: release
+      url: https://github.com/ugur-murat-alt/agz-rust-coder/releases
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+    steps:
+      - name: Download verified package artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: artifact-*-${{ github.sha }}
+          path: release-artifact
+          merge-multiple: true
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: rustup toolchain install 1.88.0 --profile minimal
+
+      - name: Verify artifact checksum and release tag
+        id: metadata
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: 1
+          CARGO_INCREMENTAL: 0
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          (cd release-artifact && sha256sum --check SHA256SUMS)
+          mapfile -t BINARY_CHECKSUMS < <(find release-artifact -maxdepth 1 -name '*.tar.gz.sha256' -print)
+          test "${#BINARY_CHECKSUMS[@]}" -eq 3
+          for checksum in "${BINARY_CHECKSUMS[@]}"; do
+            (cd "$(dirname "$checksum")" && sha256sum --check "$(basename "$checksum")")
+          done
+          test "$(cat release-artifact/SOURCE_SHA)" = "$GITHUB_SHA"
+          git clone release-artifact/agz-rust-coder-source.bundle release-source
+          test "$(git -C release-source rev-parse HEAD)" = "$GITHUB_SHA"
+          cargo +1.88.0 package --manifest-path release-source/Cargo.toml -p agz-rust-coder --locked
+          ARTIFACT_SHA="$(awk 'NR == 1 {print $1}' release-artifact/SHA256SUMS)"
+          BUILT_SHA="$(sha256sum release-source/target/package/agz-rust-coder-*.crate | awk 'NR == 1 {print $1}')"
+          test "$ARTIFACT_SHA" = "$BUILT_SHA"
+          VERSION="$(cargo +1.88.0 metadata --manifest-path release-source/Cargo.toml --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "agz-rust-coder") | .version')"
+          EXPECTED_TAG="agz-rust-coder-v${VERSION}"
+          test "$REQUESTED_TAG" = "$EXPECTED_TAG"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify release tag is unused
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Refusing to reuse or move existing tag ${RELEASE_TAG}." >&2
+            exit 1
+          fi
+
+      - name: Publish the verified package
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: 1
+          CARGO_INCREMENTAL: 0
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+          VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          RESPONSE="$(mktemp)"
+          STATUS="$(curl --silent --show-error --location \
+            --output "$RESPONSE" \
+            --write-out '%{http_code}' \
+            --user-agent 'agz-rust-coder-release/0.1.0' \
+            "https://crates.io/api/v1/crates/agz-rust-coder/${VERSION}")"
+          case "$STATUS" in
+            200)
+              EXPECTED_SHA="$(awk 'NR == 1 {print $1}' release-artifact/SHA256SUMS)"
+              PUBLISHED_SHA="$(jq -er '.version.checksum' "$RESPONSE")"
+              test "$PUBLISHED_SHA" = "$EXPECTED_SHA"
+              echo "agz-rust-coder ${VERSION} is already published with the verified checksum."
+              ;;
+            404)
+              cargo +1.88.0 publish \
+                --manifest-path release-source/Cargo.toml \
+                -p agz-rust-coder \
+                --locked
+              ;;
+            *)
+              echo "crates.io version lookup failed with HTTP ${STATUS}." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Install pinned MCP Registry publisher
+        shell: bash
+        run: |
+          ARCHIVE="mcp-publisher_linux_amd64.tar.gz"
+          curl --fail --location --silent --show-error \
+            "https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/${ARCHIVE}" \
+            --output "$ARCHIVE"
+          echo "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc  ${ARCHIVE}" \
+            | sha256sum --check
+          tar -xzf "$ARCHIVE" mcp-publisher
+          test "$(./mcp-publisher --version 2>&1 | sed -n 's/.*mcp-publisher \([^ ]*\).*/\1/p')" = "1.8.1"
+
+      - name: Publish MCP Registry metadata
+        shell: bash
+        env:
+          VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          SERVER_NAME="io.github.ugur-murat-alt%2Fagz-rust-coder"
+          ENDPOINT="https://registry.modelcontextprotocol.io/v0.1/servers/${SERVER_NAME}/versions/${VERSION}"
+          STATUS="$(curl --silent --show-error --output registry-response.json --write-out '%{http_code}' "$ENDPOINT")"
+          case "$STATUS" in
+            200)
+              jq --sort-keys . release-source/server.json > expected-server.json
+              jq --sort-keys .server registry-response.json > published-server.json
+              cmp --silent expected-server.json published-server.json
+              ;;
+            404)
+              ./mcp-publisher login github-oidc
+              for attempt in 1 2 3 4 5 6; do
+                if ./mcp-publisher publish release-source/server.json; then
+                  break
+                fi
+                test "$attempt" -lt 6
+                sleep $((attempt * 10))
+              done
+              ;;
+            *)
+              echo "MCP Registry lookup failed with HTTP ${STATUS}." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Create immutable GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            release-artifact/*.crate \
+            release-artifact/*.tar.gz \
+            release-artifact/*.tar.gz.sha256 \
+            release-artifact/SHA256SUMS \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_TAG" \
+            --generate-notes

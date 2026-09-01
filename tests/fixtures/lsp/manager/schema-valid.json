@@ -1,0 +1,20 @@
+[
+  {
+    "title": "cargo",
+    "properties": {
+      "rust-analyzer.cargo.buildScripts.enable": {"type": "boolean"}
+    }
+  },
+  {
+    "title": "procMacro",
+    "properties": {
+      "rust-analyzer.procMacro.enable": {"type": "boolean"}
+    }
+  },
+  {
+    "title": "checkOnSave",
+    "properties": {
+      "rust-analyzer.checkOnSave": {"type": "boolean"}
+    }
+  }
+]

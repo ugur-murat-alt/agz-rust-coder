@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "default_protocol": "2025-11-25",
+  "discover_protocol": "2026-07-28",
+  "server": "agz-rust-coder",
+  "tools": [
+    "check",
+    "audit",
+    "crate_lookup",
+    "docs",
+    "symbol",
+    "references",
+    "definition",
+    "symbols",
+    "implementations",
+    "hierarchy",
+    "rename",
+    "refactor"
+  ],
+  "prompts": ["workflow"],
+  "resource_count": 4,
+  "provider_requests": 0
+}

@@ -24,6 +24,21 @@
     "required": ["dir"],
     "additionalProperties": false
   },
+  "audit": {
+    "type": "object",
+    "properties": {
+      "dir": {
+        "type": "string",
+        "description": "Absolute path to the Rust project directory (or the file's directory when path is given)."
+      },
+      "path": {
+        "type": "string",
+        "description": "Optional single file (relative to dir) to audit instead of the whole tree."
+      }
+    },
+    "required": ["dir"],
+    "additionalProperties": false
+  },
   "docs": {
     "type": "object",
     "properties": {

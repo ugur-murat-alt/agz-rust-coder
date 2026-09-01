@@ -1,0 +1,92 @@
+name: Bug report
+description: Report a reproducible defect in the MCP server or its documentation.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please remove secrets, private source, raw session IDs, and unbounded logs.
+        Use the private security advisory path for vulnerabilities.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Include the binary version, crate version, or exact commit.
+      placeholder: agz-rust-coder-v0.1.0 or abc1234
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: rust
+    attributes:
+      label: Rust toolchain
+      description: Include rustc/Cargo and rust-analyzer versions when relevant.
+      placeholder: 1.88.0
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: MCP client
+      description: Name and version of OpenCode or another MCP client.
+      placeholder: OpenCode beta-18743
+    validations:
+      required: true
+  - type: input
+    id: tool
+    attributes:
+      label: Tool and configuration
+      description: Name of the short MCP tool and relevant config profile.
+      placeholder: check, workspace_code=deny
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Give the smallest safe fixture, input, and exact command or MCP call.
+      placeholder: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Bounded diagnostics
+      description: Paste a short, redacted excerpt only. Do not include secrets or source dumps.
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: I removed secrets, private source, raw paths, and raw session IDs.
+          required: true
+        - label: This is not an unpatched security vulnerability report.
+          required: true

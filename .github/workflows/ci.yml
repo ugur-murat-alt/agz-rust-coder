@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  platform:
+    name: Smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - macos-14
+          - windows-2025
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal \
+            --component rustfmt \
+            --component clippy \
+            --component rust-analyzer
+          rustup run 1.88.0 rustc --version --verbose
+
+      - name: Install pinned OpenCode V2
+        shell: bash
+        run: |
+          npm install --global @opencode-ai/cli@0.0.0-beta-18743
+          test "$(opencode2 --version)" = "opencode2 v0.0.0-beta-18743"
+
+      - name: Check formatting
+        shell: bash
+        run: cargo +1.88.0 fmt --all --check
+
+      - name: Run workspace tests
+        shell: bash
+        run: cargo +1.88.0 test --workspace --all-targets --all-features --locked --no-fail-fast
+
+      - name: Run protocol smoke
+        shell: bash
+        run: cargo +1.88.0 run --locked -p xtask -- protocol-smoke
+
+      - name: Run OpenCode integration smoke
+        shell: bash
+        run: cargo +1.88.0 run --locked -p xtask -- opencode-smoke
+
+      - name: Run benchmark smoke
+        shell: bash
+        run: cargo +1.88.0 run --locked -p xtask -- benchmark-smoke
+
+      - name: Run Linux full gate
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cargo +1.88.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo +1.88.0 check --workspace --all-targets --all-features --locked
+          cargo +1.88.0 build --release --locked
+
+      - name: Run pinned Linux Rust Analyzer smoke
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          RA_BIN="$(rustup which --toolchain 1.88.0 rust-analyzer)"
+          test -x "$RA_BIN"
+          "$RA_BIN" --version
+          AGZ_RUST_CODER_RUST_ANALYZER__PATH="$RA_BIN" \
+            cargo +1.88.0 test -p agz-rust-coder --test lsp_real --locked -- --ignored
+
+  dependency-policy:
+    name: Dependency policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: rustup toolchain install 1.88.0 --profile minimal
+
+      - name: Install cargo-deny
+        shell: bash
+        run: cargo +1.88.0 install cargo-deny --version 0.20.2 --locked
+
+      - name: Check advisories, licenses, bans, and sources
+        shell: bash
+        run: cargo +1.88.0 deny check

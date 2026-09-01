@@ -1,0 +1,108 @@
+{
+  "audit": {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "inputSchemaHash": "fnv1a64:ca577e7aa95df8a5",
+    "outputSchemaHash": "fnv1a64:70e2a6fdc654e1e8"
+  },
+  "check": {
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": true
+    },
+    "inputSchemaHash": "fnv1a64:aa6152d0c1ec6e8e",
+    "outputSchemaHash": "fnv1a64:b15f001428fb24e0"
+  },
+  "crate_lookup": {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "inputSchemaHash": "fnv1a64:261452d73c2172b5",
+    "outputSchemaHash": "fnv1a64:bf629c2e8af06aab"
+  },
+  "definition": {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "inputSchemaHash": "fnv1a64:f3becd23da3f6bf8",
+    "outputSchemaHash": "fnv1a64:eeaf84b47f98d84f"
+  },
+  "docs": {
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": true
+    },
+    "inputSchemaHash": "fnv1a64:81c3a0964d395caf",
+    "outputSchemaHash": "fnv1a64:19c3c672779aab23"
+  },
+  "hierarchy": {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "inputSchemaHash": "fnv1a64:9b86b2c7c6009f6e",
+    "outputSchemaHash": "fnv1a64:eeaf84b47f98d84f"
+  },
+  "implementations": {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "inputSchemaHash": "fnv1a64:4d9d4b3f0649d4e4",
+    "outputSchemaHash": "fnv1a64:eeaf84b47f98d84f"
+  },
+  "refactor": {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "inputSchemaHash": "fnv1a64:b0a70809e72dfaf5",
+    "outputSchemaHash": "fnv1a64:f6c8a3a7308d5a62"
+  },
+  "references": {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "inputSchemaHash": "fnv1a64:f3becd23da3f6bf8",
+    "outputSchemaHash": "fnv1a64:eeaf84b47f98d84f"
+  },
+  "rename": {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "inputSchemaHash": "fnv1a64:4fd265c45d85fd86",
+    "outputSchemaHash": "fnv1a64:f6c8a3a7308d5a62"
+  },
+  "symbol": {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "inputSchemaHash": "fnv1a64:f3becd23da3f6bf8",
+    "outputSchemaHash": "fnv1a64:eeaf84b47f98d84f"
+  },
+  "symbols": {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "inputSchemaHash": "fnv1a64:707bec7ec26c5fc8",
+    "outputSchemaHash": "fnv1a64:eeaf84b47f98d84f"
+  }
+}

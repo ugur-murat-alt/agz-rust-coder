@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "legacy_source_tests_sha256": "3c06340561bb83ed398b53e218c7071aae5a4c370473b85b88f5dd8ac3d00e27",
+  "legacy_tool_schemas_sha256": "b5449ba823c589b98a9e230c4e27e6fa50daba628d3766bf907bd24ebb999307",
+  "rust_tool_schema_fingerprints_sha256": "8e2143b1b9163a9ae100ec6b7029fe56a2ce05e32bfd8c7551c0809058f15841"
+}

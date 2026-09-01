@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ugur-murat-alt/agz-rust-coder",
+  "title": "AGZ Rust Coder",
+  "description": "Bounded, source-write-free Rust correctness tools grounded in Cargo and rustc output.",
+  "repository": {
+    "url": "https://github.com/ugur-murat-alt/agz-rust-coder",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "cargo",
+      "registryBaseUrl": "https://crates.io",
+      "identifier": "agz-rust-coder",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

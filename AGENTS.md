@@ -1,40 +1,24 @@
-# AGENTS.md - mcp-rust-coder
+# AGENTS.md - agz-rust-coder
 
-## Workflow
+## Delivery
 
-- Rust edition 2024, MSRV 1.88.0, `#![forbid(unsafe_code)]`.
-- Focused checks must be followed by the delivery gate:
-  `cargo fmt --all --check`,
-  `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`,
-  `cargo test --workspace --all-features --locked`,
-  `cargo +1.88.0 check --workspace --all-targets --all-features --locked`, and
-  `cargo build --release --locked`.
-- After `xtask` exists, also run `protocol-smoke`, `opencode-smoke`, and
-  `benchmark-smoke` before release claims.
-- Do not run live/model benchmarks, publish, create a release, push, or open a
-  pull request without explicit user approval.
+- Use Rust 2024 with MSRV 1.88.0 and keep `#![forbid(unsafe_code)]`.
+- Run formatting, workspace Clippy with `-D warnings`, all-target tests, MSRV
+  check, release build, and all three `xtask` smoke commands before a release.
+- Keep actions and release tooling pinned. Do not weaken artifact, checksum,
+  tag, package, or registry identity checks.
 
-## Invariants
+## Product Boundaries
 
-- The executable, crate, and MCP server name is `mcp-rust-coder`.
-- The stdio transport owns stdout. Logs, panic diagnostics, and child output go
-  to stderr or bounded typed results.
-- Cargo/rustc output is authoritative. Rust Analyzer and static audit output is
+- Crate, library, executable, and MCP identities are `agz-rust-coder` and
+  `agz_rust_coder`; configuration uses `AGZ_RUST_CODER_*`.
+- Stdout belongs exclusively to MCP stdio framing. Diagnostics and logs go to
+  stderr or bounded tool results.
+- Cargo/rustc output is authoritative. Audit and Rust Analyzer output is
   advisory.
-- `rename`, `refactor`, and compiler suggestions return write-free edit
-  packages and never modify workspace source files.
-- Workspace, dependency, cache, process, and LSP paths fail closed on escape or
-  unverifiable symlink state.
-- External crates.io/docs.rs failures return bounded typed unavailable states;
-  they do not crash the server.
-- Completed validation PASS results are never reused as authority by a later
-  explicit `check` call. Only an active identical job may be joined.
-- Every tool result keeps deterministic structured JSON and equivalent text
-  fallback within the configured wire-byte limit.
-
-## Reference
-
-The previous TypeScript implementation at
-`/home/ugur/Projects/opencode-rust-coder` is read-only migration evidence. Its
-checksums and invariant mapping are under `tests/reference/`. Never edit,
-format, or delete files in that repository from this project.
+- `rename`, `refactor`, and compiler suggestions return edit packages but never
+  write workspace source.
+- Workspace and dependency roots fail closed on path escape or unverifiable
+  symlink state. Client roots may narrow configured access but never widen it.
+- Completed checks are not reused as authority for a later explicit request.
+- External registry or documentation failures return typed bounded states.
