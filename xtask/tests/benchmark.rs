@@ -33,9 +33,13 @@ fn repository_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn temp_dir() -> PathBuf {
+    fs::canonicalize(std::env::temp_dir()).expect("canonical temp directory")
+}
+
 #[test]
 fn live_checkpoint_cleanup_distinguishes_missing_and_unsafe_roots() {
-    let root = std::env::temp_dir().join(format!(
+    let root = temp_dir().join(format!(
         "stage7-checkpoint-cleanup-test-{}",
         std::process::id()
     ));
@@ -63,7 +67,7 @@ fn live_checkpoint_cleanup_distinguishes_missing_and_unsafe_roots() {
 
 #[test]
 fn live_guard_rejects_before_side_effects() {
-    let root = std::env::temp_dir().join(format!("stage7-guard-test-{}", std::process::id()));
+    let root = temp_dir().join(format!("stage7-guard-test-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir(&root).expect("guard test directory");
     let sentinel = root.join("sentinel");
@@ -85,7 +89,7 @@ fn live_guard_requires_manifest_and_separate_approval() {
 
 #[test]
 fn live_guard_accepts_only_a_complete_frozen_manifest() {
-    let root = std::env::temp_dir().join(format!("stage7-manifest-test-{}", std::process::id()));
+    let root = temp_dir().join(format!("stage7-manifest-test-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir(&root).expect("manifest test directory");
     let manifest = root.join("frozen.json");
@@ -255,7 +259,7 @@ async fn source_checksum_changes_when_harness_source_changes() {
     let source = repository_root();
     let first = relevant_source_checksum(&source, &evidence).expect("first source checksum");
 
-    let temp = std::env::temp_dir().join(format!("stage7-source-test-{}", std::process::id()));
+    let temp = temp_dir().join(format!("stage7-source-test-{}", std::process::id()));
     let _ = fs::remove_dir_all(&temp);
     fs::create_dir_all(temp.join("crates/agz-rust-coder/src")).expect("crate source dir");
     fs::create_dir_all(temp.join("xtask/src")).expect("xtask source dir");
@@ -379,7 +383,7 @@ fn legacy_manifest_is_validated_without_execution() {
 
 #[test]
 fn evidence_publication_is_atomic_and_private() {
-    let root = std::env::temp_dir().join(format!("stage7-evidence-test-{}", std::process::id()));
+    let root = temp_dir().join(format!("stage7-evidence-test-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir(&root).expect("evidence test directory");
     let run = json!({"schema_version": 1, "run_id": "test-bundle"});

@@ -45,7 +45,9 @@ impl TestDir {
             .duration_since(UNIX_EPOCH)
             .expect("system clock is after the Unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("agz-rust-coder-metadata-{label}-{stamp}"));
+        let path = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!("agz-rust-coder-metadata-{label}-{stamp}"));
         fs::create_dir(&path).expect("create temporary root");
         fs::write(path.join(".git"), b"fixture worktree marker").expect("write marker");
         Self(path)
@@ -206,7 +208,11 @@ fn metadata_command_spec_is_locked_and_manifest_scoped() {
     let selected =
         select_workspace(&snapshot, Some(manifest.parent().unwrap())).expect("select package");
 
-    let spec = MetadataCommandSpec::for_selection(&selected, "/usr/bin/cargo");
+    let spec = MetadataCommandSpec::for_selection(
+        &selected,
+        root.path()
+            .join(format!("cargo{}", std::env::consts::EXE_SUFFIX)),
+    );
     assert!(spec.locked);
     assert!(spec.args.iter().any(|arg| arg == "--locked"));
     assert_eq!(spec.manifest_path, manifest);

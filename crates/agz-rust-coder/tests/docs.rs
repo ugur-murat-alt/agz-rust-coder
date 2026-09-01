@@ -25,10 +25,12 @@ impl TempRoot {
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
         let nonce = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "agz-rust-coder-docs-{}-{stamp}-{nonce}",
-            std::process::id()
-        ));
+        let path = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!(
+                "agz-rust-coder-docs-{}-{stamp}-{nonce}",
+                std::process::id()
+            ));
         fs::create_dir(&path).expect("create docs temp root");
         Self(path)
     }

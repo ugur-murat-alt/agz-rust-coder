@@ -24,10 +24,12 @@ impl TestProject {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
-        let base = std::env::temp_dir().join(format!(
-            "agz-rust-coder-check-{label}-{}-{stamp}",
-            std::process::id()
-        ));
+        let base = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!(
+                "agz-rust-coder-check-{label}-{}-{stamp}",
+                std::process::id()
+            ));
         let root = base.join("workspace");
         let state = base.join("state");
         fs::create_dir_all(root.join("src")).expect("create project source directory");
@@ -143,7 +145,7 @@ impl Drop for TestProject {
 }
 
 fn git(root: &Path, arguments: &[&str]) {
-    let status = Command::new("/usr/bin/git")
+    let status = Command::new("git")
         .args(arguments)
         .current_dir(root)
         .status()

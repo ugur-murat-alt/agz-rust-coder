@@ -1,6 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agz_rust_coder::tools::audit::{
@@ -12,12 +15,20 @@ use tokio_util::sync::CancellationToken;
 
 struct TestRoot(PathBuf);
 
+static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
+
 impl TestRoot {
     fn new(label: &str) -> Self {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
-        let path = std::env::temp_dir().join(format!("agz-rust-coder-audit-{label}-{stamp}"));
+        let sequence = NEXT_ROOT.fetch_add(1, Ordering::Relaxed);
+        let path = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!(
+                "agz-rust-coder-audit-{label}-{}-{stamp}-{sequence}",
+                std::process::id()
+            ));
         fs::create_dir(&path).expect("create audit test root");
         Self(path)
     }

@@ -4,6 +4,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(windows)]
+use agz_rust_coder::lsp::NormalizeError;
+use agz_rust_coder::lsp::path_to_file_uri;
 use agz_rust_coder::workspace::{
     ClientRoots, RootError, RootGuard, WalkIssueKind, WalkLimits, WorkspaceRoot, parse_file_uri,
 };
@@ -16,7 +19,9 @@ impl TestDir {
             .duration_since(UNIX_EPOCH)
             .expect("system clock is after the Unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("agz-rust-coder-roots-{label}-{stamp}"));
+        let path = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!("agz-rust-coder-roots-{label}-{stamp}"));
         fs::create_dir(&path).expect("create temporary root");
         Self(path)
     }
@@ -84,11 +89,16 @@ fn advertised_root_failure_is_fail_closed_and_invalidates_epoch() {
 fn file_uris_are_local_and_preserve_absolute_paths() {
     let root = TestDir::new("uri");
     let path = root.path().join("name with spaces");
-    let uri_path = path.to_string_lossy().replace(' ', "%20");
+    fs::create_dir(&path).expect("create URI fixture");
+    let uri = path_to_file_uri(&path).expect("local file URI");
+    let localhost_uri = uri.replacen("file://", "file://localhost", 1);
 
-    assert_eq!(parse_file_uri(&format!("file://{uri_path}")).unwrap(), path);
     assert_eq!(
-        parse_file_uri(&format!("file://localhost{uri_path}")).unwrap(),
+        fs::canonicalize(parse_file_uri(&uri).unwrap()).unwrap(),
+        path
+    );
+    assert_eq!(
+        fs::canonicalize(parse_file_uri(&localhost_uri).unwrap()).unwrap(),
         path
     );
     assert!(matches!(
@@ -101,6 +111,26 @@ fn file_uris_are_local_and_preserve_absolute_paths() {
     ));
     assert!(matches!(
         parse_file_uri("file:///tmp/project?query"),
+        Err(RootError::InvalidFileUri(_))
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn file_uri_generation_rejects_windows_network_paths() {
+    for path in [
+        Path::new(r"\\server\share\source.rs"),
+        Path::new("//server/share/source.rs"),
+        Path::new(r"\\?\UNC\server\share\source.rs"),
+        Path::new(r"\\?\unc\server\share\source.rs"),
+    ] {
+        assert!(matches!(
+            path_to_file_uri(path),
+            Err(NormalizeError::InvalidFileUri(_))
+        ));
+    }
+    assert!(matches!(
+        parse_file_uri("file:////server/share/source.rs"),
         Err(RootError::InvalidFileUri(_))
     ));
 }

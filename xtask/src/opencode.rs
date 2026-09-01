@@ -1190,7 +1190,8 @@ fn cargo_path(
 }
 
 fn unique_directory(label: &str) -> Result<PathBuf> {
-    let base = std::env::temp_dir();
+    let base = fs::canonicalize(std::env::temp_dir())
+        .context("canonical isolated OpenCode temp directory")?;
     for _ in 0..16 {
         let nonce = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let timestamp = SystemTime::now()

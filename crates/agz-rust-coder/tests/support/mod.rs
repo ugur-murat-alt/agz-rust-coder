@@ -16,10 +16,12 @@ impl TestRoot {
             .expect("clock after epoch")
             .as_nanos();
         let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "agz-rust-coder-{label}-{}-{nonce}-{sequence}",
-            std::process::id()
-        ));
+        let path = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!(
+                "agz-rust-coder-{label}-{}-{nonce}-{sequence}",
+                std::process::id()
+            ));
         fs::create_dir(&path).expect("create test root");
         Self(path)
     }

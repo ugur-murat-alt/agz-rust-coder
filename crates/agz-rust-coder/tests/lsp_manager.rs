@@ -45,11 +45,13 @@ struct TestRoot {
 
 impl TestRoot {
     fn new(label: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "agz-rust-coder-lsp-{label}-{}-{}",
-            std::process::id(),
-            NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let path = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!(
+                "agz-rust-coder-lsp-{label}-{}-{}",
+                std::process::id(),
+                NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+            ));
         fs::create_dir(&path).expect("create test root");
         Self { path }
     }

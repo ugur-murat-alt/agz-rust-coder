@@ -48,7 +48,9 @@ impl TestDir {
             .duration_since(UNIX_EPOCH)
             .expect("system clock is after the Unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("agz-rust-coder-identity-{label}-{stamp}"));
+        let path = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!("agz-rust-coder-identity-{label}-{stamp}"));
         fs::create_dir(&path).expect("create temporary root");
         fs::write(
             path.join("Cargo.toml"),
@@ -58,6 +60,11 @@ impl TestDir {
         fs::create_dir(path.join("src")).expect("create source directory");
         fs::write(path.join("src/lib.rs"), b"pub fn identity() -> u8 { 1 }\n")
             .expect("write source");
+        fs::write(
+            path.join(format!("cargo{}", std::env::consts::EXE_SUFFIX)),
+            b"test cargo executable",
+        )
+        .expect("write Cargo fixture");
         Self(path)
     }
 
@@ -89,20 +96,17 @@ fn identity_input<'a>(
     limits: IdentityLimits,
 ) -> IdentityInput<'a> {
     let manifest: &'a Path = Box::leak(root.path().join("Cargo.toml").into_boxed_path());
+    let cargo: &'a Path = Box::leak(
+        root.path()
+            .join(format!("cargo{}", std::env::consts::EXE_SUFFIX))
+            .into_boxed_path(),
+    );
     let command = Box::leak(vec![OsString::from("check")].into_boxed_slice());
     let environment = Box::leak(Box::new(BTreeMap::from([(
         OsString::from("HOME"),
         root.path().as_os_str().to_owned(),
     )])));
-    IdentityInput::new(
-        workspace,
-        manifest,
-        Path::new("/usr/bin/cargo"),
-        command,
-        environment,
-        git,
-    )
-    .with_limits(limits)
+    IdentityInput::new(workspace, manifest, cargo, command, environment, git).with_limits(limits)
 }
 
 #[test]
@@ -211,14 +215,10 @@ fn cargo_home_config_rejects_a_symlinked_parent_directory() {
         home.path().join(".cargo").into_os_string(),
     )]);
     let manifest = root.path().join("Cargo.toml");
-    let input = IdentityInput::new(
-        &workspace,
-        &manifest,
-        Path::new("/usr/bin/cargo"),
-        &command,
-        &environment,
-        &git,
-    );
+    let cargo = root
+        .path()
+        .join(format!("cargo{}", std::env::consts::EXE_SUFFIX));
+    let input = IdentityInput::new(&workspace, &manifest, &cargo, &command, &environment, &git);
 
     let identity = compute_input_identity(&input).expect("compute identity");
 

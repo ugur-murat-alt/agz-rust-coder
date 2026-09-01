@@ -16,7 +16,7 @@ struct TestRoot(PathBuf);
 
 impl TestRoot {
     fn new(label: &str) -> Self {
-        let base = std::env::temp_dir();
+        let base = fs::canonicalize(std::env::temp_dir()).expect("canonical temp directory");
         for attempt in 0..100 {
             let path = base.join(format!(
                 "agz-rust-coder-retention-{label}-{}-{attempt}",

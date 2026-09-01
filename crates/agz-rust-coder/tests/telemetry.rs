@@ -16,10 +16,12 @@ impl TempRoot {
         let stamp = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
-        let path = std::env::temp_dir().join(format!(
-            "agz-rust-coder-telemetry-{}-{stamp}",
-            std::process::id()
-        ));
+        let path = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!(
+                "agz-rust-coder-telemetry-{}-{stamp}",
+                std::process::id()
+            ));
         fs::create_dir_all(&path).expect("create telemetry temp root");
         Self(path)
     }

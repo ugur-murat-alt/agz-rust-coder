@@ -304,11 +304,12 @@ async fn cancelling_a_docs_task_stops_the_real_local_cargo_process() -> Result<(
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
-    let root = std::env::temp_dir().join(format!(
+    let temp = std::fs::canonicalize(std::env::temp_dir())?;
+    let root = temp.join(format!(
         "agz-rust-coder-docs-task-{}-{stamp}",
         std::process::id()
     ));
-    let cache = std::env::temp_dir().join(format!(
+    let cache = temp.join(format!(
         "agz-rust-coder-docs-task-cache-{}-{stamp}",
         std::process::id()
     ));

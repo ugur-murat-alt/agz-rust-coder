@@ -18,7 +18,7 @@ use crate::{
         ClientRef, LspClientLike, LspError, ManagerError, Position, Range, RustAnalyzerManager,
         incremental_change, normalize, value_range,
     },
-    workspace::{ClientRoots, RootError, RootGuard},
+    workspace::{ClientRoots, RootError, RootGuard, parse_file_uri},
 };
 
 const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
@@ -215,23 +215,7 @@ pub fn display_path(root: &Path, path: &Path) -> String {
 }
 
 pub fn file_path_from_uri(uri: &str) -> Option<PathBuf> {
-    let rest = uri.strip_prefix("file://")?;
-    if rest.contains('?') || rest.contains('#') {
-        return None;
-    }
-    let path = if rest.starts_with('/') {
-        rest.to_owned()
-    } else {
-        let (host, path) = rest.split_once('/')?;
-        if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
-            return None;
-        }
-        format!("/{path}")
-    };
-    let decoded = percent_decode(path.as_bytes())?;
-    let decoded = String::from_utf8(decoded).ok()?;
-    let path = PathBuf::from(decoded);
-    path.is_absolute().then_some(path)
+    parse_file_uri(uri).ok()
 }
 
 pub fn flatten_symbols(raw: &Value) -> Vec<SymbolEntry> {
@@ -720,32 +704,6 @@ fn canonical_root(root: &Path) -> Result<PathBuf, String> {
 
 fn path_to_slashes(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
-}
-
-fn percent_decode(bytes: &[u8]) -> Option<Vec<u8>> {
-    let mut output = Vec::with_capacity(bytes.len());
-    let mut index = 0usize;
-    while index < bytes.len() {
-        if bytes[index] == b'%' {
-            let high = hex(bytes.get(index + 1).copied()?)?;
-            let low = hex(bytes.get(index + 2).copied()?)?;
-            output.push((high << 4) | low);
-            index = index.saturating_add(3);
-        } else {
-            output.push(bytes[index]);
-            index = index.saturating_add(1);
-        }
-    }
-    Some(output)
-}
-
-fn hex(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn position_value(position: &Position) -> Value {

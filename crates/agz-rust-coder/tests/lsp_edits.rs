@@ -1,4 +1,10 @@
-use std::{collections::HashMap, fs, path::PathBuf, time::SystemTime};
+use std::{
+    collections::HashMap,
+    fs,
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+    time::SystemTime,
+};
 
 use agz_rust_coder::{
     lsp::{Position, Range, path_to_file_uri},
@@ -8,15 +14,20 @@ use serde_json::Value;
 
 struct TempRoot(PathBuf);
 
+static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
+
 impl TempRoot {
     fn new(source: &str) -> Self {
         let stamp = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
-        let root = std::env::temp_dir().join(format!(
-            "agz-rust-coder-lsp-edits-{}-{stamp}",
-            std::process::id()
-        ));
+        let sequence = NEXT_ROOT.fetch_add(1, Ordering::Relaxed);
+        let root = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!(
+                "agz-rust-coder-lsp-edits-{}-{stamp}-{sequence}",
+                std::process::id()
+            ));
         fs::create_dir_all(root.join("src")).expect("create edit fixture");
         fs::write(root.join("src/lib.rs"), source).expect("write edit fixture");
         Self(fs::canonicalize(root).expect("canonical fixture"))
@@ -70,7 +81,7 @@ fn changes_and_document_changes_normalize_with_limits_and_resource_operations() 
     });
 
     let normalized = normalize_workspace_edit(&root.0, &raw, 2, Some(&versions));
-    assert_eq!(normalized.edits.len(), 2);
+    assert_eq!(normalized.edits.len(), 2, "{normalized:#?}");
     assert!(normalized.omitted >= 1);
     assert!(
         normalized
@@ -113,7 +124,7 @@ fn stale_version_and_workspace_escape_are_rejected() {
     let versions = HashMap::from([(PathBuf::from("src/lib.rs"), 1)]);
 
     let normalized = normalize_workspace_edit(&root.0, &raw, 10, Some(&versions));
-    assert!(normalized.edits.is_empty());
+    assert!(normalized.edits.is_empty(), "{normalized:#?}");
     assert!(
         normalized
             .unsupported_operations
@@ -242,7 +253,7 @@ fn workspace_edit_input_and_context_scans_remain_bounded() {
         usize::MAX,
         None,
     );
-    assert_eq!(normalized.edits.len(), 200);
+    assert_eq!(normalized.edits.len(), 200, "{normalized:#?}");
     assert!(normalized.omitted >= 100);
     assert!(normalized.unsupported_operations.len() <= 128);
 

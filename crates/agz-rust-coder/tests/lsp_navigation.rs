@@ -17,6 +17,10 @@ use agz_rust_coder::{
 
 static SEMANTIC_BINARY: OnceLock<PathBuf> = OnceLock::new();
 
+fn temp_dir() -> PathBuf {
+    fs::canonicalize(env::temp_dir()).expect("canonical temp directory")
+}
+
 fn semantic_binary() -> &'static PathBuf {
     SEMANTIC_BINARY.get_or_init(|| compile_semantic_binary("semantic-ra"))
 }
@@ -24,12 +28,12 @@ fn semantic_binary() -> &'static PathBuf {
 fn compile_semantic_binary(name: &str) -> PathBuf {
     let source =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/lsp/semantic_ra.rs");
-    let output_dir = env::temp_dir().join(format!(
+    let output_dir = temp_dir().join(format!(
         "agz-rust-coder-semantic-fixture-{}",
         std::process::id()
     ));
     fs::create_dir_all(&output_dir).expect("create fixture output directory");
-    let output = output_dir.join(name);
+    let output = output_dir.join(format!("{name}{}", env::consts::EXE_SUFFIX));
     let rustc = env::var_os("RUSTC")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("rustc"));
@@ -48,7 +52,7 @@ struct TestRoot(PathBuf);
 
 impl TestRoot {
     fn new(label: &str) -> Self {
-        let path = env::temp_dir().join(format!(
+        let path = temp_dir().join(format!(
             "agz-rust-coder-navigation-{label}-{}",
             std::process::id()
         ));

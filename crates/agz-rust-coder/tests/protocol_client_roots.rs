@@ -8,7 +8,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use agz_rust_coder::{Config, RustCoderServer};
+use agz_rust_coder::{Config, RustCoderServer, lsp::path_to_file_uri};
 use anyhow::{Context, Result};
 use rmcp::{
     ClientHandler, ClientLifecycleMode, ClientServiceExt, ErrorData as McpError, ServiceExt,
@@ -112,7 +112,7 @@ impl ClientHandler for MockClient {
 }
 
 fn file_uri(path: &Path) -> String {
-    format!("file://{}", path.display())
+    path_to_file_uri(path).expect("local file URI")
 }
 
 fn fixture_root() -> PathBuf {
@@ -128,10 +128,12 @@ fn isolated_config(root: PathBuf) -> (Config, IsolatedState) {
         .duration_since(UNIX_EPOCH)
         .expect("system clock is after the Unix epoch")
         .as_nanos();
-    let state = std::env::temp_dir().join(format!(
-        "agz-rust-coder-roots-state-{}-{stamp}-{state_id}",
-        std::process::id()
-    ));
+    let state = fs::canonicalize(std::env::temp_dir())
+        .expect("canonical temp directory")
+        .join(format!(
+            "agz-rust-coder-roots-state-{}-{stamp}-{state_id}",
+            std::process::id()
+        ));
     let mut config = Config::defaults_at(root);
     config.gate.cache_dir = state.join("gate");
     config.gate.lease_dir = state.join("leases");
@@ -417,10 +419,12 @@ impl SlowProject {
             .duration_since(UNIX_EPOCH)
             .expect("system clock is after the Unix epoch")
             .as_nanos();
-        let base = std::env::temp_dir().join(format!(
-            "agz-rust-coder-roots-cancel-{}-{stamp}",
-            std::process::id()
-        ));
+        let base = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!(
+                "agz-rust-coder-roots-cancel-{}-{stamp}",
+                std::process::id()
+            ));
         let root = base.join("workspace");
         fs::create_dir_all(root.join("src")).expect("create slow project");
         fs::write(

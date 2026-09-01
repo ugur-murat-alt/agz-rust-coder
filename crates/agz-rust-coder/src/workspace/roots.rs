@@ -14,6 +14,9 @@ use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+#[cfg(windows)]
+use std::path::Prefix;
+
 use cap_std::fs::{Dir, File as CapabilityFile};
 
 const DEFAULT_WALK_MAX_FILES: usize = 20_000;
@@ -1116,12 +1119,20 @@ pub fn parse_file_uri(uri: &str) -> Result<PathBuf, RootError> {
         percent_decode(path.as_bytes()).ok_or_else(|| RootError::InvalidFileUri(uri.to_owned()))?;
     let decoded =
         String::from_utf8(decoded).map_err(|_| RootError::InvalidFileUri(uri.to_owned()))?;
-    let path =
-        if cfg!(windows) && decoded.starts_with('/') && decoded.as_bytes().get(2) == Some(&b':') {
-            PathBuf::from(&decoded[1..])
-        } else {
-            PathBuf::from(decoded)
-        };
+    #[cfg(windows)]
+    let path = if decoded.starts_with('/') && decoded.as_bytes().get(2) == Some(&b':') {
+        PathBuf::from(format!(r"\\?\{}", decoded[1..].replace('/', r"\")))
+    } else {
+        PathBuf::from(decoded)
+    };
+    #[cfg(windows)]
+    match path.components().next() {
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)) => {}
+        _ => return Err(RootError::InvalidFileUri(uri.to_owned())),
+    }
+    #[cfg(not(windows))]
+    let path = PathBuf::from(decoded);
     if !path.is_absolute() {
         return Err(RootError::InvalidFileUri(uri.to_owned()));
     }

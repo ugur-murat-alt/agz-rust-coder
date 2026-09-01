@@ -8,6 +8,9 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+#[cfg(windows)]
+use std::path::Prefix;
+
 use serde_json::Value;
 use thiserror::Error;
 
@@ -220,14 +223,30 @@ pub fn path_to_file_uri(path: &Path) -> Result<String, NormalizeError> {
     if !path.is_absolute() {
         return Err(NormalizeError::RelativePath(path.to_owned()));
     }
-    let path = path
+    let raw = path
         .to_str()
         .ok_or_else(|| NormalizeError::NonUtf8Path(path.to_owned()))?;
-    let path = if cfg!(windows) {
-        path.replace('\\', "/")
-    } else {
-        path.to_owned()
+    #[cfg(windows)]
+    let path = {
+        match path.components().next() {
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)) => {}
+            _ => {
+                return Err(NormalizeError::InvalidFileUri(raw.to_owned()));
+            }
+        }
+        let local = raw
+            .strip_prefix(r"\\?\")
+            .or_else(|| raw.strip_prefix("//?/"))
+            .unwrap_or(raw);
+        let local = local.replace('\\', "/");
+        if local.as_bytes().get(1) != Some(&b':') {
+            return Err(NormalizeError::InvalidFileUri(raw.to_owned()));
+        }
+        format!("/{local}")
     };
+    #[cfg(not(windows))]
+    let path = raw.to_owned();
     let mut uri = String::from("file://");
     for byte in path.as_bytes() {
         if byte.is_ascii_alphanumeric()

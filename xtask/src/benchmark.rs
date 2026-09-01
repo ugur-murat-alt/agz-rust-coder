@@ -1657,7 +1657,8 @@ struct TemporaryDirectory {
 
 impl TemporaryDirectory {
     fn new(label: &str) -> Result<Self> {
-        let base = std::env::temp_dir();
+        let base =
+            fs::canonicalize(std::env::temp_dir()).context("canonical benchmark temp directory")?;
         for _ in 0..16 {
             let nonce = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
             let timestamp = SystemTime::now()

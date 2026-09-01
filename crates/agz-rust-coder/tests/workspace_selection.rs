@@ -16,7 +16,9 @@ impl TestDir {
             .duration_since(UNIX_EPOCH)
             .expect("system clock is after the Unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("agz-rust-coder-selection-{label}-{stamp}"));
+        let path = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!("agz-rust-coder-selection-{label}-{stamp}"));
         fs::create_dir(&path).expect("create temporary root");
         fs::write(path.join(".git"), b"fixture worktree marker").expect("write worktree marker");
         Self(path)

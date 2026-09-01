@@ -1390,10 +1390,12 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock is after the Unix epoch")
             .as_nanos();
-        env::temp_dir().join(format!(
-            "agz-rust-coder-config-{stamp}-{}-{suffix}",
-            std::process::id()
-        ))
+        fs::canonicalize(env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!(
+                "agz-rust-coder-config-{stamp}-{}-{suffix}",
+                std::process::id()
+            ))
     }
 
     fn config_for_path_tests(root: PathBuf, safe_base: &Path) -> Config {
@@ -1432,17 +1434,25 @@ mod tests {
     #[test]
     fn list_layers_replace_instead_of_append() {
         let cli = cli();
+        let toml_root = test_path("toml-root");
+        let env_a = test_path("env-a");
+        let env_b = test_path("env-b");
+        let toml = format!(
+            "[server]\nallow_roots = [{}]\n",
+            toml::Value::String(toml_root.display().to_string())
+        );
+        let environment = env::join_paths([&env_a, &env_b])
+            .expect("join environment paths")
+            .into_string()
+            .expect("UTF-8 environment paths");
         let config = Config::from_sources(
-            "/default",
-            Some("[server]\nallow_roots = [\"/toml\"]\n"),
-            [("AGZ_RUST_CODER_SERVER__ALLOW_ROOTS", "/env-a:/env-b")],
+            test_path("default"),
+            Some(&toml),
+            [("AGZ_RUST_CODER_SERVER__ALLOW_ROOTS", environment)],
             &cli,
         )
         .unwrap();
-        assert_eq!(
-            config.server.allow_roots,
-            vec![PathBuf::from("/env-a"), PathBuf::from("/env-b")]
-        );
+        assert_eq!(config.server.allow_roots, vec![env_a, env_b]);
     }
 
     #[test]

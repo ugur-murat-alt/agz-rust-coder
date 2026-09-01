@@ -914,11 +914,13 @@ mod scheduler_tests {
     #[tokio::test]
     async fn completed_or_cancelled_jobs_are_not_joined_while_retained() {
         for cancelled in [false, true] {
-            let lease_dir = std::env::temp_dir().join(format!(
-                "agz-rust-coder-scheduler-retained-{}-{}",
-                std::process::id(),
-                i32::from(cancelled)
-            ));
+            let lease_dir = std::fs::canonicalize(std::env::temp_dir())
+                .expect("canonical temp directory")
+                .join(format!(
+                    "agz-rust-coder-scheduler-retained-{}-{}",
+                    std::process::id(),
+                    i32::from(cancelled)
+                ));
             let mut options = SchedulerOptions::new(&lease_dir);
             options.debounce = Duration::ZERO;
             options.hard_timeout = Duration::from_secs(5);

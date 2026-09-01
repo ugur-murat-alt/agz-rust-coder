@@ -17,19 +17,22 @@ use tokio_util::sync::CancellationToken;
 
 static MOCK_BINARY: OnceLock<PathBuf> = OnceLock::new();
 
+fn temp_dir() -> PathBuf {
+    fs::canonicalize(env::temp_dir()).expect("canonical temp directory")
+}
+
 fn mock_binary() -> &'static PathBuf {
     MOCK_BINARY.get_or_init(|| {
         let source =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/lsp/mock_ra.rs");
-        let output_dir = env::temp_dir().join(format!(
+        let output_dir = temp_dir().join(format!(
             "agz-rust-coder-mock-fixture-{}",
             std::process::id()
         ));
         fs::create_dir_all(&output_dir).expect("create mock fixture directory");
-        let output = output_dir.join("mock-ra");
+        let output = output_dir.join(format!("mock-ra{}", env::consts::EXE_SUFFIX));
         let rustc = [
             env::var_os("RUSTC").map(PathBuf::from),
-            Some(PathBuf::from("/home/ugur/.cargo/bin/rustc")),
             Some(PathBuf::from("rustc")),
         ]
         .into_iter()
@@ -49,7 +52,7 @@ fn mock_binary() -> &'static PathBuf {
 }
 
 fn log_path(label: &str) -> PathBuf {
-    let path = env::temp_dir().join(format!(
+    let path = temp_dir().join(format!(
         "agz-rust-coder-lsp-client-{label}-{}-{}.log",
         std::process::id(),
         NEXT_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -61,7 +64,7 @@ fn log_path(label: &str) -> PathBuf {
 static NEXT_LOG: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 async fn spawn_client(mode: &str, log: Option<&Path>) -> Arc<LspClient> {
-    let mut spec = CommandSpec::new(mock_binary().clone(), env::temp_dir())
+    let mut spec = CommandSpec::new(mock_binary().clone(), temp_dir())
         .arg("--mode")
         .arg(mode);
     if let Some(log) = log {
@@ -509,7 +512,7 @@ async fn graceful_and_forced_shutdowns_remain_bounded() {
 async fn rejects_a_symlinked_executable_before_spawning() {
     use std::os::unix::fs::symlink;
 
-    let root = env::temp_dir().join(format!(
+    let root = temp_dir().join(format!(
         "agz-rust-coder-lsp-client-path-{}",
         std::process::id()
     ));
@@ -518,7 +521,7 @@ async fn rejects_a_symlinked_executable_before_spawning() {
     let link = root.join("rust-analyzer");
     symlink(mock_binary(), &link).expect("create executable symlink");
     let result = LspClient::spawn(
-        CommandSpec::new(link, env::temp_dir()),
+        CommandSpec::new(link, temp_dir()),
         Duration::from_secs(1),
         64 * 1024,
     )

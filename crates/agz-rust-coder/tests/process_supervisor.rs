@@ -40,7 +40,9 @@ mod linux_process_supervisor {
             .duration_since(UNIX_EPOCH)
             .expect("system clock is after the Unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()));
+        let path = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!("{prefix}-{}-{nanos}", std::process::id()));
         fs::create_dir(&path).expect("create test directory");
         path
     }
@@ -320,7 +322,9 @@ mod unix_process_journal {
             .duration_since(UNIX_EPOCH)
             .expect("system clock is after the Unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()));
+        let path = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!("{prefix}-{}-{nanos}", std::process::id()));
         fs::create_dir(&path).expect("create test directory");
         path
     }

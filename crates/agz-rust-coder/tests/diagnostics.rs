@@ -31,10 +31,12 @@ impl TestRoot {
             .duration_since(UNIX_EPOCH)
             .expect("clock after epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "agz-rust-coder-diagnostics-{label}-{}-{nonce}",
-            std::process::id()
-        ));
+        let path = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!(
+                "agz-rust-coder-diagnostics-{label}-{}-{nonce}",
+                std::process::id()
+            ));
         fs::create_dir_all(path.join("src")).expect("create source directory");
         Self { path }
     }

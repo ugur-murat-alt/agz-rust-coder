@@ -333,10 +333,12 @@ impl ProtocolTaskFixture {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let base = std::env::temp_dir().join(format!(
-            "agz-rust-coder-protocol-task-{}-{timestamp}",
-            std::process::id()
-        ));
+        let base = fs::canonicalize(std::env::temp_dir())
+            .context("canonical protocol task temp directory")?
+            .join(format!(
+                "agz-rust-coder-protocol-task-{}-{timestamp}",
+                std::process::id()
+            ));
         let workspace = base.join("workspace");
         let cache = base.join("cache");
         let started = base.join("build-script.pid");
