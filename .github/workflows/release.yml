@@ -1,6 +1,10 @@
 name: Release
 
 on:
+  # Pushing release/<Cargo version> is an explicit publication request.
+  push:
+    branches:
+      - "release/*"
   workflow_dispatch:
     inputs:
       tag:
@@ -17,7 +21,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
@@ -42,6 +46,19 @@ jobs:
             --component rustfmt \
             --component clippy \
             --component rust-analyzer
+
+      - name: Validate requested release identity
+        shell: bash
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          VERSION="$(cargo +1.88.0 metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "agz-rust-coder") | .version')"
+          EXPECTED_TAG="agz-rust-coder-v${VERSION}"
+          if [[ "$GITHUB_EVENT_NAME" = "push" ]]; then
+            test "$GITHUB_REF" = "refs/heads/release/${VERSION}"
+          else
+            test "$REQUESTED_TAG" = "$EXPECTED_TAG"
+          fi
 
       - name: Install pinned OpenCode V2
         shell: bash
@@ -205,7 +222,9 @@ jobs:
 
   publish:
     name: Publish approved release
-    if: inputs.publish == true
+    if: >-
+      inputs.publish == true ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/'))
     needs:
       - verify
       - release-binaries
@@ -253,15 +272,20 @@ jobs:
           test "$ARTIFACT_SHA" = "$BUILT_SHA"
           VERSION="$(cargo +1.88.0 metadata --manifest-path release-source/Cargo.toml --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "agz-rust-coder") | .version')"
           EXPECTED_TAG="agz-rust-coder-v${VERSION}"
+          if [[ "$GITHUB_EVENT_NAME" = "push" ]]; then
+            test "$GITHUB_REF" = "refs/heads/release/${VERSION}"
+            REQUESTED_TAG="$EXPECTED_TAG"
+          fi
           test "$REQUESTED_TAG" = "$EXPECTED_TAG"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$EXPECTED_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Verify release tag is unused
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
         run: |
           if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
             echo "Refusing to reuse or move existing tag ${RELEASE_TAG}." >&2
@@ -348,7 +372,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
         run: |
           gh release create "$RELEASE_TAG" \
             release-artifact/*.crate \
