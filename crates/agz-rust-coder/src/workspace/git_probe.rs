@@ -39,9 +39,7 @@ impl ControlledGitProbe {
             std::env::var_os("PATH")
                 .into_iter()
                 .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
-                .map(|directory| {
-                    directory.join(format!("git{}", std::env::consts::EXE_SUFFIX))
-                })
+                .map(|directory| directory.join(format!("git{}", std::env::consts::EXE_SUFFIX)))
                 .find(|path| path.is_file())
                 .unwrap_or_else(|| git.executable().to_owned())
         };
