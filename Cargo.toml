@@ -14,7 +14,7 @@ homepage = "https://github.com/ugur-murat-alt/agz-rust-coder"
 [workspace.dependencies]
 anyhow = "1.0"
 cap-std = "=4.0.3"
-cargo-platform = "=0.3.2"
+cargo-platform = "=0.3.3"
 cargo-lock = "=11.1.0"
 cargo_metadata = "=0.23.1"
 command-fds = "=0.3.2"
