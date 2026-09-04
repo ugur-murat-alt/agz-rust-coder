@@ -4,7 +4,7 @@ set -euo pipefail
 
 readonly REPOSITORY="ugur-murat-alt/agz-rust-coder"
 readonly BINARY_NAME="agz-rust-coder"
-readonly VERSION="${AGZ_RUST_CODER_VERSION:-0.1.0}"
+readonly VERSION="${AGZ_RUST_CODER_VERSION:-0.1.1}"
 
 die() {
   printf 'agz-rust-coder installer: %s\n' "$*" >&2

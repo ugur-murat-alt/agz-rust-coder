@@ -8,6 +8,7 @@
 mod identity;
 mod journal;
 mod output;
+pub mod root_bound;
 pub mod runner;
 mod supervisor;
 

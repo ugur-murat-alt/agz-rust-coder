@@ -36,11 +36,11 @@ use crate::{
     gate::{GateDetail, GateEvidence, GateRequest, GateStatus, GateTargetId},
     tools::{
         AuditCancellation, CrateLookupInput as DomainCrateLookupInput,
-        ToolError as SemanticToolError, document_symbols, lookup_crate, semantic_refactor,
-        semantic_rename, symbol_definition, symbol_hierarchy, symbol_hover, symbol_implementations,
-        symbol_references, with_lsp_cancellation,
+        ToolError as SemanticToolError, document_symbols, semantic_refactor, semantic_rename,
+        symbol_definition, symbol_hierarchy, symbol_hover, symbol_implementations,
+        symbol_references, with_lsp_authority, with_lsp_cancellation,
     },
-    workspace::{ClientRoots, WorkspaceRoot},
+    workspace::{ClientRoots, WorkspaceRoot, select_in_root},
 };
 
 pub const WORKFLOW_RESOURCE_URI: &str = "rust-coder://workflow";
@@ -714,35 +714,44 @@ impl RustCoderServer {
         let result = match semantic_context(&self.state, workspace.root) {
             Ok((manager, root, timeout)) => match tool {
                 "symbol" => {
-                    symbol_hover(
-                        &manager,
-                        root.path(),
-                        Path::new(&input.path),
-                        &input.symbol,
-                        input.line,
-                        timeout,
+                    with_lsp_authority(
+                        root.requested_authority().clone(),
+                        symbol_hover(
+                            &manager,
+                            root.path(),
+                            Path::new(&input.path),
+                            &input.symbol,
+                            input.line,
+                            timeout,
+                        ),
                     )
                     .await
                 }
                 "references" => {
-                    symbol_references(
-                        &manager,
-                        root.path(),
-                        Path::new(&input.path),
-                        &input.symbol,
-                        input.line,
-                        timeout,
-                    )
+                    Box::pin(with_lsp_authority(
+                        root.requested_authority().clone(),
+                        symbol_references(
+                            &manager,
+                            root.path(),
+                            Path::new(&input.path),
+                            &input.symbol,
+                            input.line,
+                            timeout,
+                        ),
+                    ))
                     .await
                 }
                 "definition" => {
-                    symbol_definition(
-                        &manager,
-                        root.path(),
-                        Path::new(&input.path),
-                        &input.symbol,
-                        input.line,
-                        timeout,
+                    with_lsp_authority(
+                        root.requested_authority().clone(),
+                        symbol_definition(
+                            &manager,
+                            root.path(),
+                            Path::new(&input.path),
+                            &input.symbol,
+                            input.line,
+                            timeout,
+                        ),
                     )
                     .await
                 }
@@ -757,11 +766,12 @@ impl RustCoderServer {
     async fn symbols(&self, input: SymbolsInput, workspace: WorkspaceRequest) -> CallToolResult {
         let path = input.path.clone();
         let result = match semantic_context(&self.state, workspace.root) {
-            Ok((manager, root, timeout)) => {
-                document_symbols(&manager, root.path(), Path::new(&input.path), timeout)
-                    .await
-                    .map_err(SemanticFailure::from)
-            }
+            Ok((manager, root, timeout)) => Box::pin(with_lsp_authority(
+                root.requested_authority().clone(),
+                document_symbols(&manager, root.path(), Path::new(&input.path), timeout),
+            ))
+            .await
+            .map_err(SemanticFailure::from),
             Err(error) => Err(SemanticFailure::Unavailable(error)),
         };
         semantic_result(&self.state, "symbols", path, 1, result)
@@ -775,15 +785,18 @@ impl RustCoderServer {
         let path = input.path.clone();
         let line = input.line.unwrap_or(1);
         let result = match semantic_context(&self.state, workspace.root) {
-            Ok((manager, root, timeout)) => symbol_implementations(
-                &manager,
-                root.path(),
-                Path::new(&input.path),
-                &input.symbol,
-                input.line,
-                input.include_contents,
-                timeout,
-            )
+            Ok((manager, root, timeout)) => Box::pin(with_lsp_authority(
+                root.requested_authority().clone(),
+                symbol_implementations(
+                    &manager,
+                    root.path(),
+                    Path::new(&input.path),
+                    &input.symbol,
+                    input.line,
+                    input.include_contents,
+                    timeout,
+                ),
+            ))
             .await
             .map_err(SemanticFailure::from),
             Err(error) => Err(SemanticFailure::Unavailable(error)),
@@ -799,16 +812,19 @@ impl RustCoderServer {
         let path = input.path.clone();
         let line = input.line.unwrap_or(1);
         let result = match semantic_context(&self.state, workspace.root) {
-            Ok((manager, root, timeout)) => symbol_hierarchy(
-                &manager,
-                root.path(),
-                Path::new(&input.path),
-                &input.symbol,
-                input.line,
-                input.direction.as_str(),
-                u32::from(input.depth),
-                timeout,
-            )
+            Ok((manager, root, timeout)) => Box::pin(with_lsp_authority(
+                root.requested_authority().clone(),
+                symbol_hierarchy(
+                    &manager,
+                    root.path(),
+                    Path::new(&input.path),
+                    &input.symbol,
+                    input.line,
+                    input.direction.as_str(),
+                    u32::from(input.depth),
+                    timeout,
+                ),
+            ))
             .await
             .map_err(SemanticFailure::from),
             Err(error) => Err(SemanticFailure::Unavailable(error)),
@@ -818,17 +834,21 @@ impl RustCoderServer {
 
     async fn rename(&self, input: RenameInput, workspace: WorkspaceRequest) -> CallToolResult {
         let result = match semantic_context(&self.state, workspace.root) {
-            Ok((manager, root, timeout)) => semantic_rename(
-                &manager,
-                root.path(),
-                Path::new(&input.path),
-                &input.symbol,
-                input.line,
-                &input.new_name,
-                input.include_contents,
-                usize::try_from(self.state.config().limits.max_rename_edits).unwrap_or(usize::MAX),
-                timeout,
-            )
+            Ok((manager, root, timeout)) => Box::pin(with_lsp_authority(
+                root.requested_authority().clone(),
+                semantic_rename(
+                    &manager,
+                    root.path(),
+                    Path::new(&input.path),
+                    &input.symbol,
+                    input.line,
+                    &input.new_name,
+                    input.include_contents,
+                    usize::try_from(self.state.config().limits.max_rename_edits)
+                        .unwrap_or(usize::MAX),
+                    timeout,
+                ),
+            ))
             .await
             .map_err(|error| error.to_string()),
             Err(error) => Err(error),
@@ -838,18 +858,21 @@ impl RustCoderServer {
 
     async fn refactor(&self, input: RefactorInput, workspace: WorkspaceRequest) -> CallToolResult {
         let result = match semantic_context(&self.state, workspace.root) {
-            Ok((manager, root, timeout)) => semantic_refactor(
-                &manager,
-                root.path(),
-                Path::new(&input.path),
-                &input.symbol,
-                input.line,
-                Some(&input.only),
-                input.include_contents,
-                usize::try_from(self.state.config().limits.max_refactor_edits)
-                    .unwrap_or(usize::MAX),
-                timeout,
-            )
+            Ok((manager, root, timeout)) => Box::pin(with_lsp_authority(
+                root.requested_authority().clone(),
+                semantic_refactor(
+                    &manager,
+                    root.path(),
+                    Path::new(&input.path),
+                    &input.symbol,
+                    input.line,
+                    Some(&input.only),
+                    input.include_contents,
+                    usize::try_from(self.state.config().limits.max_refactor_edits)
+                        .unwrap_or(usize::MAX),
+                    timeout,
+                ),
+            ))
             .await
             .map_err(|error| error.to_string()),
             Err(error) => Err(error),
@@ -1037,22 +1060,14 @@ impl ServerHandler for RustCoderServer {
             "crate_lookup" => {
                 let input: CrateLookupInput = parse_input(arguments)?;
                 validate_crate_lookup(&input)?;
-                let Ok(permit) = self.state.try_admit() else {
-                    return Ok(CallToolResponse::Complete(resource_blocked_crate_lookup(
-                        &self.state,
-                        input,
-                    )));
-                };
                 let state = Arc::clone(&self.state);
-                let fallback = input.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    let _permit = permit;
-                    crate_lookup_result(&state, input)
-                })
-                .await
-                .unwrap_or_else(|error| {
-                    crate_lookup_internal_error(&self.state, fallback, error.to_string())
-                });
+                let result = crate_lookup_with_admission(
+                    &state,
+                    input,
+                    context.ct.clone(),
+                    self.state.shutdown_token(),
+                )
+                .await;
                 Ok(CallToolResponse::Complete(result))
             }
             "docs" => {
@@ -1176,7 +1191,7 @@ impl ServerHandler for RustCoderServer {
                 Ok(CallToolResponse::Complete(
                     with_lsp_cancellation(
                         cancellation.token(),
-                        self.semantic(&name, input, workspace),
+                        Box::pin(self.semantic(&name, input, workspace)),
                     )
                     .await,
                 ))
@@ -1206,8 +1221,11 @@ impl ServerHandler for RustCoderServer {
                 let cancellation =
                     workspace.cancellation(context.ct.clone(), self.state.shutdown_token());
                 Ok(CallToolResponse::Complete(
-                    with_lsp_cancellation(cancellation.token(), self.symbols(input, workspace))
-                        .await,
+                    with_lsp_cancellation(
+                        cancellation.token(),
+                        Box::pin(self.symbols(input, workspace)),
+                    )
+                    .await,
                 ))
             }
             "implementations" => {
@@ -1238,7 +1256,7 @@ impl ServerHandler for RustCoderServer {
                 Ok(CallToolResponse::Complete(
                     with_lsp_cancellation(
                         cancellation.token(),
-                        self.implementations(input, workspace),
+                        Box::pin(self.implementations(input, workspace)),
                     )
                     .await,
                 ))
@@ -1269,8 +1287,11 @@ impl ServerHandler for RustCoderServer {
                 let cancellation =
                     workspace.cancellation(context.ct.clone(), self.state.shutdown_token());
                 Ok(CallToolResponse::Complete(
-                    with_lsp_cancellation(cancellation.token(), self.hierarchy(input, workspace))
-                        .await,
+                    with_lsp_cancellation(
+                        cancellation.token(),
+                        Box::pin(self.hierarchy(input, workspace)),
+                    )
+                    .await,
                 ))
             }
             "rename" => {
@@ -1295,8 +1316,11 @@ impl ServerHandler for RustCoderServer {
                 let cancellation =
                     workspace.cancellation(context.ct.clone(), self.state.shutdown_token());
                 Ok(CallToolResponse::Complete(
-                    with_lsp_cancellation(cancellation.token(), self.rename(input, workspace))
-                        .await,
+                    with_lsp_cancellation(
+                        cancellation.token(),
+                        Box::pin(self.rename(input, workspace)),
+                    )
+                    .await,
                 ))
             }
             "refactor" => {
@@ -1321,8 +1345,11 @@ impl ServerHandler for RustCoderServer {
                 let cancellation =
                     workspace.cancellation(context.ct.clone(), self.state.shutdown_token());
                 Ok(CallToolResponse::Complete(
-                    with_lsp_cancellation(cancellation.token(), self.refactor(input, workspace))
-                        .await,
+                    with_lsp_cancellation(
+                        cancellation.token(),
+                        Box::pin(self.refactor(input, workspace)),
+                    )
+                    .await,
                 ))
             }
             _ => Err(McpError::method_not_found::<CallToolRequestMethod>()),
@@ -1965,12 +1992,35 @@ async fn audit_result(
     }
 }
 
-fn crate_lookup_result(state: &AppState, input: CrateLookupInput) -> CallToolResult {
+async fn crate_lookup_with_admission(
+    state: &AppState,
+    input: CrateLookupInput,
+    request_cancellation: tokio_util::sync::CancellationToken,
+    shutdown_cancellation: tokio_util::sync::CancellationToken,
+) -> CallToolResult {
+    let Ok(_permit) = state.try_admit() else {
+        return resource_blocked_crate_lookup(state, input);
+    };
+    crate_lookup_result(state, input, request_cancellation, shutdown_cancellation).await
+}
+
+async fn crate_lookup_result(
+    state: &AppState,
+    input: CrateLookupInput,
+    request_cancellation: tokio_util::sync::CancellationToken,
+    shutdown_cancellation: tokio_util::sync::CancellationToken,
+) -> CallToolResult {
     let domain = DomainCrateLookupInput {
         name: input.name.clone(),
         version: input.version.clone(),
     };
-    let result = lookup_crate(&domain.name, domain.version.as_deref());
+    let result = crate::tools::crate_lookup::lookup_crate_cancellable(
+        &domain.name,
+        domain.version.as_deref(),
+        &request_cancellation,
+        &shutdown_cancellation,
+    )
+    .await;
     render_crate_lookup(state.max_output_bytes(), input, result)
 }
 
@@ -2011,25 +2061,6 @@ fn resource_blocked_crate_lookup(state: &AppState, input: CrateLookupInput) -> C
             crate_name: input.name,
             requested_version: input.version,
             reason: RESOURCE_BLOCKED_REASON.to_owned(),
-        },
-    )
-    .into_call_tool_result(state.max_output_bytes(), true)
-}
-
-fn crate_lookup_internal_error(
-    state: &AppState,
-    input: CrateLookupInput,
-    reason: String,
-) -> CallToolResult {
-    ToolOutput::new(
-        "crate_lookup",
-        "UNAVAILABLE",
-        "The bounded crate registry worker did not complete.",
-        CrateLookupData {
-            status: "unavailable".to_owned(),
-            crate_name: input.name,
-            requested_version: input.version,
-            reason,
         },
     )
     .into_call_tool_result(state.max_output_bytes(), true)
@@ -2087,8 +2118,21 @@ fn docs_result(
     root: WorkspaceRoot,
     cancellation: CancellationBridge,
 ) -> DocsExecution {
+    let selection = match select_in_root(&root) {
+        Ok(selection) => selection,
+        Err(error) => {
+            return DocsExecution {
+                result: docs_internal_error(
+                    state,
+                    input,
+                    format!("documentation workspace selection failed: {error}"),
+                ),
+                cleanup_complete: true,
+            };
+        }
+    };
     let domain_input = DomainDocsInput {
-        dir: root.path().display().to_string(),
+        dir: selection.requested_dir().display().to_string(),
         crate_name: input.crate_name.clone(),
         symbol: input.symbol.clone(),
         version: input.version,
@@ -2104,16 +2148,17 @@ fn docs_result(
             ConfigDocsFallback::Off => DomainDocsFallback::Off,
         },
         cache_dir: Some(state.config().docs.cache_dir.clone()),
-        workspace_authority: Some(root.authority().clone()),
+        workspace_authority: Some(selection.worktree_authority().clone()),
         dependency_authorities: state.roots().dependency_roots().to_vec(),
         cargo_home_authority: state.cargo_home().cloned(),
         expensive_fallback: input.expensive_fallback,
         ..DocsOptions::default()
     };
-    let result = state.docs_service().resolve_with_cancellation(
+    let result = state.docs_service().resolve_selected_with_cancellation(
         &domain_input,
         &options,
         cancellation.token(),
+        &selection,
     );
     let is_error = result.is_error;
     let cleanup_complete = result.cleanup_complete;
@@ -2444,5 +2489,32 @@ mod tests {
                 Some(status.as_str().to_ascii_uppercase().as_str())
             );
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_crate_lookup_releases_its_admission_permit() {
+        let root = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR"))
+            .expect("canonical crate root for test state");
+        let mut config = Config::defaults_at(root);
+        config.limits.max_in_flight_tools = 1;
+        let state = AppState::new(config).expect("create test state");
+        let request_cancellation = tokio_util::sync::CancellationToken::new();
+        request_cancellation.cancel();
+
+        let _ = crate_lookup_with_admission(
+            &state,
+            CrateLookupInput {
+                name: "serde_json".to_owned(),
+                version: None,
+            },
+            request_cancellation,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+
+        let permit = state
+            .try_admit()
+            .expect("cancelled lookup must release its admission permit");
+        drop(permit);
     }
 }

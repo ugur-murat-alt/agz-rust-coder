@@ -3,7 +3,7 @@ members = ["crates/agz-rust-coder", "xtask"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -17,6 +17,7 @@ cap-std = "=4.0.3"
 cargo-platform = "=0.3.2"
 cargo-lock = "=11.1.0"
 cargo_metadata = "=0.23.1"
+command-fds = "=0.3.2"
 clap = { version = "4.5", features = ["derive", "env"] }
 directories = "6.0.0"
 fs4 = "=1.1.0"

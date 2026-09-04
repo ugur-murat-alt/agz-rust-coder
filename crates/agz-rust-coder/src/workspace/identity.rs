@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::roots::{AuthorizedRoot, DirectoryEntryKind, RootError, WorkspaceRoot};
+use crate::process::root_bound::RootBoundCommand;
 
 const DEFAULT_MAX_FILES: usize = 20_000;
 const DEFAULT_MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
@@ -31,6 +32,8 @@ pub enum IdentityError {
     InvalidInput(String),
     #[error("git identity probe failed: {0}")]
     Git(String),
+    #[error("git root binding failed: {0}")]
+    RootBinding(String),
     #[error("identity I/O failed for {path}: {source}")]
     Io { path: PathBuf, source: io::Error },
 }
@@ -105,6 +108,17 @@ pub trait GitProbe: Send + Sync {
         args: &[OsString],
         max_output_bytes: usize,
     ) -> Result<GitOutput, IdentityError>;
+
+    fn run_authorized(
+        &self,
+        cwd: &Path,
+        args: &[OsString],
+        max_output_bytes: usize,
+        authority: Arc<AuthorizedRoot>,
+    ) -> Result<GitOutput, IdentityError> {
+        let _ = authority;
+        self.run(cwd, args, max_output_bytes)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +179,55 @@ impl GitProbe for StdGitProbe {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        self.collect_output(command, max_output_bytes)
+    }
+
+    fn run_authorized(
+        &self,
+        cwd: &Path,
+        args: &[OsString],
+        max_output_bytes: usize,
+        authority: Arc<AuthorizedRoot>,
+    ) -> Result<GitOutput, IdentityError> {
+        if !cwd.is_absolute() {
+            return Err(IdentityError::InvalidInput(
+                "git probe cwd must be absolute".to_owned(),
+            ));
+        }
+        for argument in args {
+            validate_os_string(argument, "git argument")?;
+        }
+        let environment: BTreeMap<OsString, OsString> = [
+            (OsString::from("GIT_CONFIG_NOSYSTEM"), OsString::from("1")),
+            (OsString::from("GIT_OPTIONAL_LOCKS"), OsString::from("0")),
+            (OsString::from("GIT_TERMINAL_PROMPT"), OsString::from("0")),
+        ]
+        .into_iter()
+        .collect();
+        let bound = RootBoundCommand::new(&authority, cwd, &self.executable, args, &environment)
+            .map_err(|error| IdentityError::RootBinding(error.to_string()))?;
+        let mut command = Command::new(&bound.executable);
+        command
+            .env_clear()
+            .envs(bound.environment)
+            .args(bound.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = self.collect_output(command, max_output_bytes)?;
+        // Keep the exact directory handle live through child completion. This
+        // is the Windows replacement barrier; Unix uses the verified cwd.
+        drop(authority);
+        Ok(output)
+    }
+}
+
+impl StdGitProbe {
+    fn collect_output(
+        &self,
+        mut command: Command,
+        max_output_bytes: usize,
+    ) -> Result<GitOutput, IdentityError> {
         let mut child = command.spawn().map_err(|source| IdentityError::Io {
             path: self.executable.clone(),
             source,
@@ -269,6 +332,32 @@ impl<'a> IdentityInput<'a> {
 /// paths, or an authorized root operation fails.
 #[allow(clippy::too_many_lines)]
 pub fn compute_input_identity(input: &IdentityInput<'_>) -> Result<InputIdentity, IdentityError> {
+    compute_input_identity_inner(input, None)
+}
+
+/// Computes an identity while binding Git child processes to the input root.
+/// Internal callers with an existing root authority must use this variant.
+pub fn compute_input_identity_authorized(
+    input: &IdentityInput<'_>,
+) -> Result<InputIdentity, IdentityError> {
+    compute_input_identity_inner(input, Some(None))
+}
+
+/// Internal variant for callers that retained an exact Git/worktree capability
+/// during workspace selection. The public authorized façade intentionally
+/// keeps its existing input shape and derives its authority as before.
+pub(crate) fn compute_input_identity_with_git_authority(
+    input: &IdentityInput<'_>,
+    authority: Arc<AuthorizedRoot>,
+) -> Result<InputIdentity, IdentityError> {
+    compute_input_identity_inner(input, Some(Some(authority)))
+}
+
+#[allow(clippy::too_many_lines)]
+fn compute_input_identity_inner(
+    input: &IdentityInput<'_>,
+    authorized: Option<Option<Arc<AuthorizedRoot>>>,
+) -> Result<InputIdentity, IdentityError> {
     validate_input(input)?;
     let command_hash = hash_command(input.cargo, input.command, input.environment);
     let environment_hash = hash_environment(input.environment);
@@ -277,11 +366,8 @@ pub fn compute_input_identity(input: &IdentityInput<'_>) -> Result<InputIdentity
     hasher.write_str(&command_hash);
     hasher.write_str(&environment_hash);
 
-    let head_result = input.git.run(
-        input.git_cwd,
-        &git_args(["rev-parse", "--verify", "HEAD"]),
-        input.limits.max_git_output_bytes,
-    );
+    let head_args = git_args(["rev-parse", "--verify", "HEAD"]);
+    let head_result = run_git(input, &head_args, &authorized);
     let mut incomplete_reason = None;
     let (head, use_git) = match head_result {
         Ok(output) if output.truncated => ("NO_GIT".to_owned(), false),
@@ -302,7 +388,7 @@ pub fn compute_input_identity(input: &IdentityInput<'_>) -> Result<InputIdentity
     hasher.write_path(input.manifest_path);
 
     let git_paths = if use_git {
-        collect_git_paths(input, &mut incomplete_reason)?
+        collect_git_paths(input, &mut incomplete_reason, &authorized)?
     } else {
         Vec::new()
     };
@@ -664,9 +750,37 @@ struct ChangedPath {
     absolute: PathBuf,
 }
 
+fn run_git(
+    input: &IdentityInput<'_>,
+    args: &[OsString],
+    authorized: &Option<Option<Arc<AuthorizedRoot>>>,
+) -> Result<GitOutput, IdentityError> {
+    if let Some(authority) = authorized {
+        let authority = match authority {
+            Some(authority) => authority.clone(),
+            None => input
+                .root
+                .authority()
+                .authorize_dir(input.git_cwd)
+                .map_err(IdentityError::Root)?,
+        };
+        input.git.run_authorized(
+            input.git_cwd,
+            args,
+            input.limits.max_git_output_bytes,
+            authority,
+        )
+    } else {
+        input
+            .git
+            .run(input.git_cwd, args, input.limits.max_git_output_bytes)
+    }
+}
+
 fn collect_git_paths(
     input: &IdentityInput<'_>,
     incomplete_reason: &mut Option<IdentityIncompleteReason>,
+    authorized: &Option<Option<Arc<AuthorizedRoot>>>,
 ) -> Result<Vec<ChangedPath>, IdentityError> {
     let mut paths = Vec::new();
     let probes = [
@@ -690,10 +804,7 @@ fn collect_git_paths(
         ]),
     ];
     for args in probes {
-        let Ok(output) = input
-            .git
-            .run(input.git_cwd, &args, input.limits.max_git_output_bytes)
-        else {
+        let Ok(output) = run_git(input, &args, authorized) else {
             set_reason(incomplete_reason, IdentityIncompleteReason::GitFailed);
             return Ok(paths);
         };

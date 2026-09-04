@@ -4,6 +4,7 @@
 //! untrusted input, so framing and message validation happen before any value is
 //! dispatched to a caller.
 
+use crate::{process::root_bound::RootBoundCommand, workspace::AuthorizedRoot};
 use std::{
     collections::HashMap,
     pin::Pin,
@@ -429,6 +430,7 @@ pub struct LspClient {
     server_request_handler: RwLock<Option<ServerRequestHandler>>,
     notification_handler: RwLock<Option<NotificationHandler>>,
     close_handler: RwLock<Option<CloseHandler>>,
+    _root_authority: Option<Arc<AuthorizedRoot>>,
 }
 
 impl std::fmt::Debug for LspClient {
@@ -465,6 +467,64 @@ impl LspClient {
         max_frame_bytes: usize,
         cancellation: Option<CancellationToken>,
     ) -> Result<Arc<Self>, LspError> {
+        let spec = normalize_command_spec(spec)?;
+        Self::spawn_inner(
+            spec,
+            default_timeout,
+            max_frame_bytes,
+            cancellation,
+            true,
+            None,
+        )
+        .await
+    }
+
+    pub async fn spawn_authorized(
+        spec: CommandSpec,
+        default_timeout: Duration,
+        max_frame_bytes: usize,
+        cancellation: Option<CancellationToken>,
+        authority: Arc<AuthorizedRoot>,
+    ) -> Result<Arc<Self>, LspError> {
+        // Validate the caller's executable before root-bound command creation;
+        // the latter deliberately resolves the target to an absolute path.
+        // Keeping this check first preserves the no-symlink executable boundary.
+        let spec = normalize_command_spec(spec)?;
+        let bound = RootBoundCommand::for_lsp(
+            &authority,
+            &spec.cwd,
+            &spec.executable,
+            &spec.args,
+            &spec.env,
+        )
+        .map_err(|error| LspError::Spawn(error.to_string()))?;
+        let ambient =
+            std::env::current_dir().map_err(|error| LspError::Spawn(error.to_string()))?;
+        let guarded = CommandSpec {
+            executable: bound.executable,
+            args: bound.args,
+            cwd: ambient,
+            env: bound.environment,
+        };
+        Self::spawn_inner(
+            guarded,
+            default_timeout,
+            max_frame_bytes,
+            cancellation,
+            false,
+            Some(authority),
+        )
+        .await
+    }
+
+    async fn spawn_inner(
+        spec: CommandSpec,
+        default_timeout: Duration,
+        max_frame_bytes: usize,
+        cancellation: Option<CancellationToken>,
+        set_cwd: bool,
+        root_authority: Option<Arc<AuthorizedRoot>>,
+    ) -> Result<Arc<Self>, LspError> {
         if cancellation
             .as_ref()
             .is_some_and(CancellationToken::is_cancelled)
@@ -475,12 +535,14 @@ impl LspClient {
         let mut command = CommandWrap::with_new(&spec.executable, |command| {
             command
                 .args(&spec.args)
-                .current_dir(&spec.cwd)
                 .env_clear()
                 .envs(&spec.env)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
+            if set_cwd {
+                command.current_dir(&spec.cwd);
+            }
         });
         command.wrap(KillOnDrop);
         #[cfg(unix)]
@@ -543,6 +605,7 @@ impl LspClient {
             server_request_handler: RwLock::new(None),
             notification_handler: RwLock::new(None),
             close_handler: RwLock::new(None),
+            _root_authority: root_authority,
         });
 
         let weak = Arc::downgrade(&client);

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use crate::workspace::{AuthorizedRoot, RootGuard, WalkLimits};
+use crate::workspace::{AuthorizedRoot, RootGuard, WalkLimits, WorkspaceSelection};
 
 use super::{
     cache::{CacheIdentity, DocsCache, GeneratedPage},
@@ -240,6 +240,15 @@ pub struct LocalDocRequest {
 
 pub trait LocalDocGenerator: Send + Sync {
     fn generate(&self, request: &LocalDocRequest) -> Result<Vec<GeneratedPage>, String>;
+
+    fn generate_authorized(
+        &self,
+        request: &LocalDocRequest,
+        authority: Arc<AuthorizedRoot>,
+    ) -> Result<Vec<GeneratedPage>, String> {
+        let _ = authority;
+        self.generate(request)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -271,6 +280,24 @@ impl CargoDocGenerator {
 
 impl LocalDocGenerator for CargoDocGenerator {
     fn generate(&self, request: &LocalDocRequest) -> Result<Vec<GeneratedPage>, String> {
+        self.generate_inner(request, None)
+    }
+
+    fn generate_authorized(
+        &self,
+        request: &LocalDocRequest,
+        authority: Arc<AuthorizedRoot>,
+    ) -> Result<Vec<GeneratedPage>, String> {
+        self.generate_inner(request, Some(authority))
+    }
+}
+
+impl CargoDocGenerator {
+    fn generate_inner(
+        &self,
+        request: &LocalDocRequest,
+        authority: Option<Arc<AuthorizedRoot>>,
+    ) -> Result<Vec<GeneratedPage>, String> {
         let remaining = request.deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err("local documentation deadline elapsed".to_owned());
@@ -309,7 +336,16 @@ impl LocalDocGenerator for CargoDocGenerator {
             .build()
             .map_err(|error| error.to_string())?;
         let result = runtime
-            .block_on(self.supervisor.run(cargo, arguments, options))
+            .block_on(async {
+                match authority {
+                    Some(authority) => {
+                        self.supervisor
+                            .run_authorized(cargo, arguments, options, authority)
+                            .await
+                    }
+                    None => self.supervisor.run(cargo, arguments, options).await,
+                }
+            })
             .map_err(|error| error.to_string())?;
         if !result.drain_complete || !result.cleanup_complete {
             return Err(format!(
@@ -439,6 +475,7 @@ pub struct DocsResolver {
     network: Arc<dyn NetworkClient>,
     local: Arc<dyn LocalDocGenerator>,
     flights: Arc<Mutex<HashMap<String, Arc<LocalFlight>>>>,
+    authorized_local_generation: bool,
 }
 
 impl std::fmt::Debug for DocsResolver {
@@ -470,6 +507,7 @@ impl DocsResolver {
             network: Arc::new(network),
             local: Arc::new(local),
             flights: Arc::new(Mutex::new(HashMap::new())),
+            authorized_local_generation: false,
         }
     }
 
@@ -481,7 +519,18 @@ impl DocsResolver {
             network,
             local,
             flights: Arc::new(Mutex::new(HashMap::new())),
+            authorized_local_generation: false,
         }
+    }
+
+    /// Constructs the resolver used by the MCP server, whose local process
+    /// launch receives an explicit workspace authority from request setup.
+    pub(crate) fn with_authorized_supervisor(
+        supervisor: crate::process::ProcessSupervisor,
+    ) -> Self {
+        let mut resolver = Self::with_supervisor(supervisor);
+        resolver.authorized_local_generation = true;
+        resolver
     }
 
     pub fn resolve(&self, input: &DocsInput, options: &DocsOptions) -> DocsResult {
@@ -494,8 +543,30 @@ impl DocsResolver {
         options: &DocsOptions,
         cancellation: CancellationToken,
     ) -> DocsResult {
+        self.resolve_inner(input, options, cancellation, None)
+    }
+
+    /// Internal MCP entrypoint. The selection owns exact package/worktree
+    /// capabilities captured before provider work starts.
+    pub(crate) fn resolve_selected_with_cancellation(
+        &self,
+        input: &DocsInput,
+        options: &DocsOptions,
+        cancellation: CancellationToken,
+        selection: &WorkspaceSelection,
+    ) -> DocsResult {
+        self.resolve_inner(input, options, cancellation, Some(selection))
+    }
+
+    fn resolve_inner(
+        &self,
+        input: &DocsInput,
+        options: &DocsOptions,
+        cancellation: CancellationToken,
+        selection: Option<&WorkspaceSelection>,
+    ) -> DocsResult {
         let deadline = Instant::now() + Duration::from_millis(options.timeout_ms.max(1));
-        let prepared = match prepare(input, options, &cancellation) {
+        let prepared = match prepare(input, options, &cancellation, selection) {
             Ok(prepared) => prepared,
             Err(result) => return result,
         };
@@ -599,6 +670,9 @@ impl DocsResolver {
                     let generation_manifest = prepared.manifest_path.clone();
                     let generation_package = prepared.dependency.name.clone();
                     let generation_local = Arc::clone(&self.local);
+                    let generation_authority = self
+                        .authorized_local_generation
+                        .then(|| Arc::clone(&prepared.package_authority));
                     let generation = self.local_generation_singleflight(
                         &key,
                         &cancellation,
@@ -623,7 +697,12 @@ impl DocsResolver {
                                 deadline,
                                 cancellation: generation_cancellation.clone(),
                             };
-                            let pages = generation_local.generate(&request)?;
+                            let pages = match generation_authority {
+                                Some(authority) => {
+                                    generation_local.generate_authorized(&request, authority)?
+                                }
+                                None => generation_local.generate(&request)?,
+                            };
                             generation.validate().map_err(|error| {
                                 format!("local cache directory changed during generation: {error}")
                             })?;
@@ -944,6 +1023,7 @@ struct PreparedRequest {
     fingerprint: Option<String>,
     cache_root: PathBuf,
     source_roots: Vec<SourceRoot>,
+    package_authority: Arc<AuthorizedRoot>,
 }
 
 #[derive(Debug, Clone)]
@@ -1032,6 +1112,7 @@ fn prepare(
     input: &DocsInput,
     options: &DocsOptions,
     cancellation: &CancellationToken,
+    selection: Option<&WorkspaceSelection>,
 ) -> Result<PreparedRequest, DocsResult> {
     let requested = Path::new(input.dir.trim());
     if requested.as_os_str().is_empty() || !requested.is_absolute() {
@@ -1046,26 +1127,40 @@ fn prepare(
             "documentation dir could not be normalized safely",
         ));
     };
-    let authority = match options.workspace_authority.clone() {
-        Some(authority) => authority,
-        None => match RootGuard::new([requested.clone()], Vec::<PathBuf>::new()) {
-            Ok(guard) => guard.configured_roots()[0].clone(),
+    let authority = match selection {
+        Some(selection) => selection.worktree_authority().clone(),
+        None => match options.workspace_authority.clone() {
+            Some(authority) => authority,
+            None => match RootGuard::new([requested.clone()], Vec::<PathBuf>::new()) {
+                Ok(guard) => guard.configured_roots()[0].clone(),
+                Err(_) => {
+                    return Err(unavailable_input(
+                        input,
+                        "documentation dir is not an accessible authorized directory",
+                    ));
+                }
+            },
+        },
+    };
+    let requested = match selection {
+        Some(selection) if requested == selection.requested_dir() => {
+            selection.requested_authority().path().to_owned()
+        }
+        Some(_) => {
+            return Err(unavailable_input(
+                input,
+                "documentation dir no longer matches workspace selection",
+            ));
+        }
+        None => match authority.authorize_dir(&requested) {
+            Ok(requested) => requested.path().to_owned(),
             Err(_) => {
                 return Err(unavailable_input(
                     input,
-                    "documentation dir is not an accessible authorized directory",
+                    "documentation dir is outside the authorized workspace root",
                 ));
             }
         },
-    };
-    let requested = match authority.authorize_dir(&requested) {
-        Ok(requested) => requested.path().to_owned(),
-        Err(_) => {
-            return Err(unavailable_input(
-                input,
-                "documentation dir is outside the authorized workspace root",
-            ));
-        }
     };
     if cancellation.is_cancelled() {
         return Err(unavailable_input(
@@ -1073,14 +1168,29 @@ fn prepare(
             "documentation request was cancelled",
         ));
     }
-    let package_root = match find_package_root(&authority, &requested) {
-        Some(root) => root,
-        None => {
-            return Err(unavailable_input(
-                input,
-                "Cargo.toml was not found within the selected worktree",
-            ));
-        }
+    let package_root = match selection {
+        Some(selection) => selection.package_authority().path().to_owned(),
+        None => match find_package_root(&authority, &requested) {
+            Some(root) => root,
+            None => {
+                return Err(unavailable_input(
+                    input,
+                    "Cargo.toml was not found within the selected worktree",
+                ));
+            }
+        },
+    };
+    let package_authority = match selection {
+        Some(selection) => selection.package_authority().clone(),
+        None => match authority.authorize_dir(&package_root) {
+            Ok(authority) => authority,
+            Err(_) => {
+                return Err(unavailable_input(
+                    input,
+                    "package root authorization changed before local generation",
+                ));
+            }
+        },
     };
     let workspace_root =
         find_workspace_root(&authority, &package_root).unwrap_or_else(|| package_root.clone());
@@ -1179,6 +1289,7 @@ fn prepare(
         fingerprint,
         cache_root,
         source_roots: source_roots.source,
+        package_authority,
     })
 }
 

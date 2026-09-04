@@ -17,6 +17,7 @@ sağlar ve kaynağa yazmayan rename/refactor paketleri döndürür.
 | --- | --- |
 | Crate, binary, server | `agz-rust-coder` |
 | MCP Registry | `io.github.ugur-murat-alt/agz-rust-coder` |
+| Güncel sürüm | `0.1.1` |
 | İlk sürüm | `0.1.0` |
 | Release tag | `agz-rust-coder-v<version>` |
 | Rust edition / MSRV | `2024` / `1.88.0` |

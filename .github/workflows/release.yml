@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Exact tag to create, for example agz-rust-coder-v0.1.0"
+        description: "Exact tag to create, for example agz-rust-coder-v0.1.1"
         required: true
         type: string
       publish:
@@ -115,7 +115,8 @@ jobs:
             cargo +1.88.0 run --locked -p xtask -- benchmark-smoke
           git bundle create target/package/agz-rust-coder-source.bundle HEAD
           printf '%s\n' "$GITHUB_SHA" > target/package/SOURCE_SHA
-          (cd target/package && sha256sum agz-rust-coder-*.crate agz-rust-coder-source.bundle > SHA256SUMS)
+          cp install.sh target/package/install.sh
+          (cd target/package && sha256sum agz-rust-coder-*.crate agz-rust-coder-source.bundle install.sh > SHA256SUMS)
 
       - name: Upload verified package artifact
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
@@ -126,6 +127,7 @@ jobs:
             target/package/agz-rust-coder-source.bundle
             target/package/SHA256SUMS
             target/package/SOURCE_SHA
+            target/package/install.sh
           if-no-files-found: error
           retention-days: 7
           overwrite: false
@@ -269,7 +271,7 @@ jobs:
           STATUS="$(curl --silent --show-error --location \
             --output "$RESPONSE" \
             --write-out '%{http_code}' \
-            --user-agent 'agz-rust-coder-release/0.1.0' \
+            --user-agent "agz-rust-coder-release/${VERSION}" \
             "https://crates.io/api/v1/crates/agz-rust-coder/${VERSION}")"
           case "$STATUS" in
             200)
@@ -344,6 +346,7 @@ jobs:
             release-artifact/*.tar.gz \
             release-artifact/*.tar.gz.sha256 \
             release-artifact/SHA256SUMS \
+            release-artifact/install.sh \
             --target "$GITHUB_SHA" \
             --title "$RELEASE_TAG" \
             --generate-notes

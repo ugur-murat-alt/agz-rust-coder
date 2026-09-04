@@ -134,9 +134,10 @@ impl AppState {
             config.limits.audit_total_bytes,
             config.limits.audit_findings,
         ));
-        let lsp = RustAnalyzerManager::from_config(&config.rust_analyzer)
-            .ok()
-            .map(Arc::new);
+        let lsp =
+            RustAnalyzerManager::from_config_authorized(&config.rust_analyzer, processes.clone())
+                .ok()
+                .map(Arc::new);
         let cargo_home = std::env::var_os("CARGO_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
@@ -149,7 +150,7 @@ impl AppState {
             processes: processes.clone(),
             check,
             audit,
-            docs: Arc::new(DocsResolver::with_supervisor(processes)),
+            docs: Arc::new(DocsResolver::with_authorized_supervisor(processes)),
             cargo_home,
             lsp,
             admission,

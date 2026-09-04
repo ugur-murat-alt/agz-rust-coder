@@ -73,6 +73,14 @@ impl JournalRecord {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredJournalRecord {
+    #[serde(flatten)]
+    record: JournalRecord,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    alternate_command_hash: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryDisposition {
     OwnerAlive,
@@ -131,6 +139,14 @@ impl ProcessJournal {
     /// Returns an error when the record is invalid or cannot be atomically
     /// written to the journal directory.
     pub fn record(&self, record: &JournalRecord) -> Result<(), JournalError> {
+        self.record_with_alternate(record, None)
+    }
+
+    pub(crate) fn record_with_alternate(
+        &self,
+        record: &JournalRecord,
+        alternate_command_hash: Option<&str>,
+    ) -> Result<(), JournalError> {
         validate_token(&record.token)?;
         if record.version != JOURNAL_VERSION {
             return Err(JournalError::InvalidToken(format!(
@@ -145,7 +161,10 @@ impl ProcessJournal {
         }
         let path = self.path_for(&record.token)?;
         let temp = self.temp_path(&record.token);
-        let data = serde_json::to_vec(record)?;
+        let data = serde_json::to_vec(&StoredJournalRecord {
+            record: record.clone(),
+            alternate_command_hash: alternate_command_hash.map(str::to_owned),
+        })?;
         let result = Self::write_atomic(&temp, &path, &data);
         if result.is_err() {
             let _ = fs::remove_file(&temp);
@@ -246,7 +265,8 @@ impl ProcessJournal {
                 reason: "journal entry is not a regular file".to_owned(),
             });
         }
-        let record = read_record(path)?;
+        let stored = read_record(path)?;
+        let record = stored.record;
         if record.version != JOURNAL_VERSION {
             return Ok(invalid_entry(&record.token, "unsupported journal version"));
         }
@@ -260,7 +280,7 @@ impl ProcessJournal {
             return Ok(entry);
         }
 
-        let group = match verify_child(&record) {
+        let group = match verify_child(&record, stored.alternate_command_hash.as_deref()) {
             Ok(group) => group,
             Err(VerifyFailure::AlreadyExited(reason)) => {
                 let _ = fs::remove_file(path);
@@ -451,7 +471,7 @@ fn validate_token(token: &str) -> Result<(), JournalError> {
     Ok(())
 }
 
-fn read_record(path: &Path) -> Result<JournalRecord, String> {
+fn read_record(path: &Path) -> Result<StoredJournalRecord, String> {
     let file = File::open(path).map_err(|error| error.to_string())?;
     let mut data = Vec::new();
     file.take(MAX_RECORD_BYTES + 1)
@@ -469,7 +489,10 @@ enum VerifyFailure {
     Unverifiable(String),
 }
 
-fn verify_child(record: &JournalRecord) -> Result<u32, VerifyFailure> {
+fn verify_child(
+    record: &JournalRecord,
+    alternate_command_hash: Option<&str>,
+) -> Result<u32, VerifyFailure> {
     let identity = match read_process_identity(record.child_pid) {
         Ok(Some(identity)) => identity,
         Ok(None) => {
@@ -499,6 +522,22 @@ fn verify_child(record: &JournalRecord) -> Result<u32, VerifyFailure> {
             "child PID was reused with a different start time".to_owned(),
         ));
     }
+    let ProcessGroupIdentity::Unix { pgid } = &record.group else {
+        return Err(VerifyFailure::Unverifiable(
+            "the recorded process group cannot be verified on this platform".to_owned(),
+        ));
+    };
+    let pgid = *pgid;
+    if pgid <= 1 || pgid != record.child_pid || identity.group_id != pgid {
+        return Err(VerifyFailure::Mismatch(
+            "child process group does not match the journal".to_owned(),
+        ));
+    }
+    if current_group_id() == Some(pgid) {
+        return Err(VerifyFailure::Mismatch(
+            "refusing to signal the current process group".to_owned(),
+        ));
+    }
     let expected_executable = match fs::canonicalize(&record.executable) {
         Ok(path) => path,
         Err(error) => {
@@ -520,29 +559,14 @@ fn verify_child(record: &JournalRecord) -> Result<u32, VerifyFailure> {
             "child executable does not match the journal".to_owned(),
         ));
     }
-    let ProcessGroupIdentity::Unix { pgid } = &record.group else {
-        return Err(VerifyFailure::Unverifiable(
-            "the recorded process group cannot be verified on this platform".to_owned(),
-        ));
-    };
-    let pgid = *pgid;
-    if pgid <= 1 || pgid != record.child_pid || identity.group_id != pgid {
-        return Err(VerifyFailure::Mismatch(
-            "child process group does not match the journal".to_owned(),
-        ));
-    }
-    if current_group_id() == Some(pgid) {
-        return Err(VerifyFailure::Mismatch(
-            "refusing to signal the current process group".to_owned(),
-        ));
-    }
     if identity.argv.is_empty() {
         return Err(VerifyFailure::Unverifiable(
             "live command line is unavailable".to_owned(),
         ));
     }
     let actual_args = identity.argv[1..].to_vec();
-    if command_hash_bytes(&actual_executable, &actual_args) != record.command_hash {
+    let actual_hash = command_hash_bytes(&record.executable, &actual_args);
+    if actual_hash != record.command_hash && alternate_command_hash != Some(actual_hash.as_str()) {
         return Err(VerifyFailure::Mismatch(
             "child command hash does not match the journal".to_owned(),
         ));

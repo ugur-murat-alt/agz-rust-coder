@@ -5,7 +5,7 @@ Cargo and rustc remain the authority; Rust Analyzer and static audit results are
 advisory.
 
 - MCP Registry name: `mcp-name: io.github.ugur-murat-alt/agz-rust-coder`
-- Version: `0.1.0`
+- Version: `0.1.1`
 - MSRV: Rust `1.88.0`
 - Transport: stdio
 

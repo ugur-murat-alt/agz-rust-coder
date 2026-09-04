@@ -17,6 +17,7 @@ rename/refactor packages.
 | --- | --- |
 | Crate, binary, server | `agz-rust-coder` |
 | MCP Registry | `io.github.ugur-murat-alt/agz-rust-coder` |
+| Current release | `0.1.1` |
 | First release | `0.1.0` |
 | Release tag | `agz-rust-coder-v<version>` |
 | Rust edition / MSRV | `2024` / `1.88.0` |

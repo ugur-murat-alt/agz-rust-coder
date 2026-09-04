@@ -2,6 +2,7 @@
 
 use std::{
     collections::BTreeMap,
+    ffi::OsString,
     fmt,
     future::Future,
     io,
@@ -26,7 +27,8 @@ use super::{
 };
 use crate::{
     config::{RustAnalyzerConfig, WorkspaceCode},
-    process::CommandSpec,
+    process::{CommandSpec, ProcessRunOptions, ProcessRunResult, ProcessSupervisor, root_bound},
+    workspace::{AuthorizedRoot, RootGuard},
 };
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -68,6 +70,8 @@ pub enum ManagerError {
     Cancelled,
     #[error("workspace path is unsafe: {0}")]
     Workspace(#[from] NormalizeError),
+    #[error("workspace root authority is invalid: {0}")]
+    RootAuthority(String),
     #[error("rust-analyzer is unavailable: {0}")]
     Unavailable(String),
     #[error("rust-analyzer startup failed: {0}")]
@@ -211,6 +215,24 @@ pub trait LspClientFactory: Send + Sync + 'static {
             cancellation,
         )
     }
+
+    fn spawn_authorized<'a>(
+        &'a self,
+        spec: CommandSpec,
+        default_timeout: Duration,
+        max_frame_bytes: usize,
+        cancellation: Option<CancellationToken>,
+        authority: Arc<crate::workspace::AuthorizedRoot>,
+    ) -> ClientFuture<'a, ClientRef> {
+        let _ = authority;
+        self.spawn_with_cancellation(spec, default_timeout, max_frame_bytes, cancellation)
+    }
+
+    /// Returns the root URI path exposed to this factory's language server.
+    /// Test and alternate factories retain the lexical root by default.
+    fn protocol_root(&self, lexical: &Path) -> PathBuf {
+        lexical.to_owned()
+    }
 }
 
 pub trait BinarySchemaProbe: Send + Sync + 'static {
@@ -223,6 +245,32 @@ pub trait BinarySchemaProbe: Send + Sync + 'static {
         cancellation: Option<CancellationToken>,
     ) -> ProbeFuture<'a> {
         cancellable_probe_future(self.probe(binary, timeout), cancellation)
+    }
+
+    fn probe_authorized_with_cancellation<'a>(
+        &'a self,
+        binary: &'a Path,
+        timeout: Duration,
+        cancellation: Option<CancellationToken>,
+        authority: Arc<AuthorizedRoot>,
+    ) -> ProbeFuture<'a> {
+        let _ = authority;
+        self.probe_with_cancellation(binary, timeout, cancellation)
+    }
+
+    /// Runs a root-authorized probe with the manager's process lifecycle owner.
+    /// Alternate probes retain the existing authorized behavior unless they need
+    /// the supervisor's process-tree cleanup guarantees.
+    fn probe_authorized_with_supervisor<'a>(
+        &'a self,
+        binary: &'a Path,
+        timeout: Duration,
+        cancellation: Option<CancellationToken>,
+        authority: Arc<AuthorizedRoot>,
+        supervisor: ProcessSupervisor,
+    ) -> ProbeFuture<'a> {
+        let _ = supervisor;
+        self.probe_authorized_with_cancellation(binary, timeout, cancellation, authority)
     }
 }
 
@@ -588,6 +636,31 @@ impl LspClientFactory for ConcreteClientFactory {
             Ok(Arc::new(ConcreteClientAdapter::new(client)) as ClientRef)
         })
     }
+
+    fn spawn_authorized<'a>(
+        &'a self,
+        spec: CommandSpec,
+        default_timeout: Duration,
+        max_frame_bytes: usize,
+        cancellation: Option<CancellationToken>,
+        authority: Arc<crate::workspace::AuthorizedRoot>,
+    ) -> ClientFuture<'a, ClientRef> {
+        Box::pin(async move {
+            let client = client::LspClient::spawn_authorized(
+                spec,
+                default_timeout,
+                max_frame_bytes,
+                cancellation,
+                authority,
+            )
+            .await?;
+            Ok(Arc::new(ConcreteClientAdapter::new(client)) as ClientRef)
+        })
+    }
+
+    fn protocol_root(&self, lexical: &Path) -> PathBuf {
+        root_bound::lsp_protocol_root(lexical)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -634,6 +707,91 @@ impl BinarySchemaProbe for ConcreteBinarySchemaProbe {
             cancellation,
         ))
     }
+
+    fn probe_authorized_with_cancellation<'a>(
+        &'a self,
+        binary: &'a Path,
+        timeout: Duration,
+        cancellation: Option<CancellationToken>,
+        authority: Arc<AuthorizedRoot>,
+    ) -> ProbeFuture<'a> {
+        self.probe_authorized_with_supervisor(
+            binary,
+            timeout,
+            cancellation,
+            authority,
+            ProcessSupervisor::without_journal(),
+        )
+    }
+
+    fn probe_authorized_with_supervisor<'a>(
+        &'a self,
+        binary: &'a Path,
+        timeout: Duration,
+        cancellation: Option<CancellationToken>,
+        authority: Arc<AuthorizedRoot>,
+        supervisor: ProcessSupervisor,
+    ) -> ProbeFuture<'a> {
+        let binary = binary.to_owned();
+        let max_output_bytes = self.max_output_bytes;
+        Box::pin(async move {
+            if cancellation
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                return Err(ProbeError::Cancelled);
+            }
+            let mut options = ProcessRunOptions::new(authority.path())
+                .with_environment(fixed_environment())
+                .with_timeout(timeout)
+                .with_max_output_bytes(max_output_bytes);
+            if let Some(cancellation) = cancellation {
+                options = options.with_cancellation(cancellation);
+            }
+            let result = supervisor
+                .run_authorized(
+                    binary,
+                    [OsString::from("--print-config-schema")],
+                    options,
+                    authority,
+                )
+                .await
+                .map_err(|error| ProbeError::Io(error.to_string()))?;
+            supervised_schema_result(result)
+        })
+    }
+}
+
+fn supervised_schema_result(result: ProcessRunResult) -> Result<BinaryConfigSchema, ProbeError> {
+    if !result.drain_complete || !result.cleanup_complete {
+        return Err(ProbeError::Process(format!(
+            "schema probe cleanup was incomplete (drain_complete={}, cleanup_complete={}): {}",
+            result.drain_complete,
+            result.cleanup_complete,
+            result.warnings.join("; ")
+        )));
+    }
+    if result.cancelled {
+        return Err(ProbeError::Cancelled);
+    }
+    if result.timed_out {
+        return Err(ProbeError::TimedOut);
+    }
+    if result.output_truncated {
+        return Err(ProbeError::OutputTooLarge);
+    }
+    if result.exit_code != 0 || result.signal.is_some() {
+        return Err(ProbeError::Process(format!(
+            "schema probe exited with code {}{}: {}",
+            result.exit_code,
+            result
+                .signal
+                .map(|signal| format!(" (signal {signal})"))
+                .unwrap_or_default(),
+            result.stderr
+        )));
+    }
+    BinaryConfigSchema::from_bytes(result.stdout.as_bytes()).map_err(ProbeError::Schema)
 }
 
 #[derive(Debug)]
@@ -648,6 +806,25 @@ async fn probe_binary_schema(
     max_output_bytes: usize,
     cancellation: Option<CancellationToken>,
 ) -> Result<BinaryConfigSchema, ProbeError> {
+    probe_binary_schema_command(
+        binary,
+        vec![OsString::from("--print-config-schema")],
+        fixed_environment(),
+        timeout,
+        max_output_bytes,
+        cancellation,
+    )
+    .await
+}
+
+async fn probe_binary_schema_command(
+    binary: PathBuf,
+    arguments: Vec<OsString>,
+    environment: BTreeMap<OsString, OsString>,
+    timeout: Duration,
+    max_output_bytes: usize,
+    cancellation: Option<CancellationToken>,
+) -> Result<BinaryConfigSchema, ProbeError> {
     if cancellation
         .as_ref()
         .is_some_and(CancellationToken::is_cancelled)
@@ -656,9 +833,9 @@ async fn probe_binary_schema(
     }
     let mut command = Command::new(&binary);
     command
-        .arg("--print-config-schema")
+        .args(arguments)
         .env_clear()
-        .envs(fixed_environment())
+        .envs(environment)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -819,6 +996,7 @@ impl StopState {
 
 struct Instance {
     root: PathBuf,
+    root_authority: Arc<AuthorizedRoot>,
     client: ClientRef,
     token: Arc<()>,
     capabilities: RustAnalyzerCapabilities,
@@ -843,12 +1021,14 @@ impl fmt::Debug for Instance {
 impl Instance {
     fn new(
         root: PathBuf,
+        root_authority: Arc<AuthorizedRoot>,
         client: ClientRef,
         token: Arc<()>,
         capabilities: RustAnalyzerCapabilities,
     ) -> Self {
         Self {
             root,
+            root_authority,
             client,
             token,
             capabilities,
@@ -912,6 +1092,8 @@ struct ManagerState {
 
 struct ManagerInner<P, F> {
     options: ManagerOptions,
+    authorized_execution: bool,
+    processes: ProcessSupervisor,
     probe: Arc<P>,
     factory: Arc<F>,
     state: Mutex<ManagerState>,
@@ -975,8 +1157,32 @@ impl RustAnalyzerManager<ConcreteBinarySchemaProbe, ConcreteClientFactory> {
         )
     }
 
+    pub fn new_authorized(options: ManagerOptions) -> Result<Self, ManagerError> {
+        Self::new_authorized_with_supervisor(options, ProcessSupervisor::without_journal())
+    }
+
+    pub(crate) fn new_authorized_with_supervisor(
+        options: ManagerOptions,
+        processes: ProcessSupervisor,
+    ) -> Result<Self, ManagerError> {
+        Self::with_adapters_mode(
+            options,
+            ConcreteBinarySchemaProbe::default(),
+            ConcreteClientFactory,
+            true,
+            processes,
+        )
+    }
+
     pub fn from_config(config: &RustAnalyzerConfig) -> Result<Self, ManagerError> {
         Self::new(ManagerOptions::from_config(config))
+    }
+
+    pub(crate) fn from_config_authorized(
+        config: &RustAnalyzerConfig,
+        processes: ProcessSupervisor,
+    ) -> Result<Self, ManagerError> {
+        Self::new_authorized_with_supervisor(ManagerOptions::from_config(config), processes)
     }
 }
 
@@ -990,10 +1196,42 @@ where
         probe: P,
         factory: F,
     ) -> Result<Self, ManagerError> {
+        Self::with_adapters_mode(
+            options,
+            probe,
+            factory,
+            false,
+            ProcessSupervisor::without_journal(),
+        )
+    }
+
+    pub fn with_authorized_adapters(
+        options: ManagerOptions,
+        probe: P,
+        factory: F,
+    ) -> Result<Self, ManagerError> {
+        Self::with_adapters_mode(
+            options,
+            probe,
+            factory,
+            true,
+            ProcessSupervisor::without_journal(),
+        )
+    }
+
+    fn with_adapters_mode(
+        options: ManagerOptions,
+        probe: P,
+        factory: F,
+        authorized_execution: bool,
+        processes: ProcessSupervisor,
+    ) -> Result<Self, ManagerError> {
         let options = options.normalized()?;
         Ok(Self {
             inner: Arc::new(ManagerInner {
                 options,
+                authorized_execution,
+                processes,
                 probe: Arc::new(probe),
                 factory: Arc::new(factory),
                 state: Mutex::new(ManagerState::default()),
@@ -1061,15 +1299,67 @@ where
         root: impl AsRef<Path>,
         cancellation: Option<CancellationToken>,
     ) -> Result<ClientRef, ManagerError> {
+        let (root, authority) = self.authorize_path_root(root.as_ref())?;
+        self.acquire_authorized_optional(root, authority, cancellation)
+            .await
+    }
+
+    /// Acquires a client using an already-authorized workspace capability.
+    /// The exact requested directory is reopened through that capability so a
+    /// lexical root cannot be rebound to a replacement directory mid-request.
+    pub async fn acquire_authorized(
+        &self,
+        authority: Arc<AuthorizedRoot>,
+        root: impl AsRef<Path>,
+    ) -> Result<ClientRef, ManagerError> {
+        self.require_authorized_execution()?;
+        let (root, authority) = authorize_exact_root(&authority, root.as_ref())?;
+        self.acquire_authorized_optional(root, authority, None)
+            .await
+    }
+
+    pub async fn acquire_authorized_with_cancellation(
+        &self,
+        authority: Arc<AuthorizedRoot>,
+        root: impl AsRef<Path>,
+        cancellation: CancellationToken,
+    ) -> Result<ClientRef, ManagerError> {
+        self.require_authorized_execution()?;
+        let (root, authority) = authorize_exact_root(&authority, root.as_ref())?;
+        self.acquire_authorized_optional(root, authority, Some(cancellation))
+            .await
+    }
+
+    async fn acquire_authorized_optional(
+        &self,
+        root: PathBuf,
+        authority: Arc<AuthorizedRoot>,
+        cancellation: Option<CancellationToken>,
+    ) -> Result<ClientRef, ManagerError> {
         self.ensure_sweeper();
         check_cancellation(cancellation.as_ref())?;
-        let root = normalize::canonical_workspace_path(root.as_ref())?;
         self.acquire_canonical(
             root,
+            authority,
             Instant::now() + self.inner.options.wait_timeout,
             cancellation,
         )
         .await
+    }
+
+    fn authorize_path_root(
+        &self,
+        root: &Path,
+    ) -> Result<(PathBuf, Arc<AuthorizedRoot>), ManagerError> {
+        let root = normalize::canonical_workspace_path(root)?;
+        let guard = RootGuard::new([root.clone()], std::iter::empty())
+            .map_err(|error| ManagerError::RootAuthority(error.to_string()))?;
+        let authority = guard
+            .configured_roots()
+            .first()
+            .cloned()
+            .ok_or_else(|| ManagerError::RootAuthority("workspace root is empty".to_owned()))?;
+        authorize_exact_root(&authority, &root)
     }
 
     pub async fn acquire_lease(&self, root: impl AsRef<Path>) -> Result<ClientLease, ManagerError> {
@@ -1089,17 +1379,55 @@ where
         root: impl AsRef<Path>,
         cancellation: Option<CancellationToken>,
     ) -> Result<ClientLease, ManagerError> {
+        let (root, authority) = self.authorize_path_root(root.as_ref())?;
+        self.acquire_lease_authorized_optional(root, authority, cancellation)
+            .await
+    }
+
+    pub async fn acquire_lease_authorized(
+        &self,
+        authority: Arc<AuthorizedRoot>,
+        root: impl AsRef<Path>,
+    ) -> Result<ClientLease, ManagerError> {
+        self.require_authorized_execution()?;
+        let (root, authority) = authorize_exact_root(&authority, root.as_ref())?;
+        self.acquire_lease_authorized_optional(root, authority, None)
+            .await
+    }
+
+    pub async fn acquire_lease_authorized_with_cancellation(
+        &self,
+        authority: Arc<AuthorizedRoot>,
+        root: impl AsRef<Path>,
+        cancellation: CancellationToken,
+    ) -> Result<ClientLease, ManagerError> {
+        self.require_authorized_execution()?;
+        let (root, authority) = authorize_exact_root(&authority, root.as_ref())?;
+        self.acquire_lease_authorized_optional(root, authority, Some(cancellation))
+            .await
+    }
+
+    async fn acquire_lease_authorized_optional(
+        &self,
+        root: PathBuf,
+        authority: Arc<AuthorizedRoot>,
+        cancellation: Option<CancellationToken>,
+    ) -> Result<ClientLease, ManagerError> {
         self.ensure_sweeper();
         check_cancellation(cancellation.as_ref())?;
-        let root = normalize::canonical_workspace_path(root.as_ref())?;
         let deadline = Instant::now() + self.inner.options.wait_timeout;
         loop {
             check_cancellation(cancellation.as_ref())?;
-            if let Some(lease) = self.try_lease(&root, cancellation.as_ref())? {
+            if let Some(lease) = self.try_lease(&root, &authority, cancellation.as_ref())? {
                 return Ok(lease);
             }
             let _ = self
-                .acquire_canonical(root.clone(), deadline, cancellation.clone())
+                .acquire_canonical(
+                    root.clone(),
+                    authority.clone(),
+                    deadline,
+                    cancellation.clone(),
+                )
                 .await?;
         }
     }
@@ -1144,6 +1472,69 @@ where
         T: Send,
     {
         let lease = self.acquire_lease_optional(root, cancellation).await?;
+        let result = operation(lease.client())
+            .await
+            .map_err(manager_client_error);
+        drop(lease);
+        result
+    }
+
+    pub async fn with_client_authorized<T, O, Fut>(
+        &self,
+        authority: Arc<AuthorizedRoot>,
+        root: impl AsRef<Path>,
+        operation: O,
+    ) -> Result<T, ManagerError>
+    where
+        O: FnOnce(ClientRef) -> Fut + Send,
+        Fut: Future<Output = Result<T, LspError>> + Send,
+        T: Send,
+    {
+        self.with_client_authorized_optional(authority, root.as_ref(), None, operation)
+            .await
+    }
+
+    pub async fn with_client_authorized_with_cancellation<T, O, Fut>(
+        &self,
+        authority: Arc<AuthorizedRoot>,
+        root: impl AsRef<Path>,
+        cancellation: CancellationToken,
+        operation: O,
+    ) -> Result<T, ManagerError>
+    where
+        O: FnOnce(ClientRef) -> Fut + Send,
+        Fut: Future<Output = Result<T, LspError>> + Send,
+        T: Send,
+    {
+        self.with_client_authorized_optional(
+            authority,
+            root.as_ref(),
+            Some(cancellation),
+            operation,
+        )
+        .await
+    }
+
+    async fn with_client_authorized_optional<T, O, Fut>(
+        &self,
+        authority: Arc<AuthorizedRoot>,
+        root: &Path,
+        cancellation: Option<CancellationToken>,
+        operation: O,
+    ) -> Result<T, ManagerError>
+    where
+        O: FnOnce(ClientRef) -> Fut + Send,
+        Fut: Future<Output = Result<T, LspError>> + Send,
+        T: Send,
+    {
+        self.require_authorized_execution()?;
+        let lease = match cancellation.clone() {
+            Some(cancellation) => {
+                self.acquire_lease_authorized_with_cancellation(authority, root, cancellation)
+                    .await?
+            }
+            None => self.acquire_lease_authorized(authority, root).await?,
+        };
         let result = operation(lease.client())
             .await
             .map_err(manager_client_error);
@@ -1259,6 +1650,7 @@ where
     async fn acquire_canonical(
         &self,
         root: PathBuf,
+        authority: Arc<AuthorizedRoot>,
         deadline: Instant,
         cancellation: Option<CancellationToken>,
     ) -> Result<ClientRef, ManagerError> {
@@ -1286,6 +1678,11 @@ where
                         Action::WaitStop(instance.stop.clone())
                     } else if instance.client.is_closed() {
                         Action::Stop(instance)
+                    } else if !authorities_match(&instance.root_authority, &authority)? {
+                        return Err(ManagerError::RootAuthority(
+                            "a different physical directory now occupies the requested root"
+                                .to_owned(),
+                        ));
                     } else {
                         instance.touch();
                         Action::Return(instance.client.clone())
@@ -1318,6 +1715,12 @@ where
                             if result.client.is_closed() {
                                 continue;
                             }
+                            if !authorities_match(&result.root_authority, &authority)? {
+                                return Err(ManagerError::RootAuthority(
+                                    "the active startup belongs to a different physical directory"
+                                        .to_owned(),
+                                ));
+                            }
                             return Ok(result.client.clone());
                         }
                         Err(ManagerError::Cancelled) => {
@@ -1330,10 +1733,20 @@ where
                 }
                 Action::Start(flight) => {
                     let result = self
-                        .start_owner(root.clone(), flight, cancellation.clone())
+                        .start_owner(
+                            root.clone(),
+                            authority.clone(),
+                            flight,
+                            cancellation.clone(),
+                        )
                         .await?;
                     if result.client.is_closed() {
                         continue;
+                    }
+                    if !authorities_match(&result.root_authority, &authority)? {
+                        return Err(ManagerError::RootAuthority(
+                            "the startup belongs to a different physical directory".to_owned(),
+                        ));
                     }
                     return Ok(result.client.clone());
                 }
@@ -1344,6 +1757,7 @@ where
     fn try_lease(
         &self,
         root: &Path,
+        authority: &Arc<AuthorizedRoot>,
         cancellation: Option<&CancellationToken>,
     ) -> Result<Option<ClientLease>, ManagerError> {
         check_cancellation(cancellation)?;
@@ -1360,6 +1774,11 @@ where
         };
         if instance.stopping.load(Ordering::Acquire) || instance.client.is_closed() {
             return Ok(None);
+        }
+        if !authorities_match(&instance.root_authority, authority)? {
+            return Err(ManagerError::RootAuthority(
+                "a different physical directory now occupies the requested root".to_owned(),
+            ));
         }
         instance.active.fetch_add(1, Ordering::AcqRel);
         instance.touch();
@@ -1378,10 +1797,11 @@ where
     async fn start_owner(
         &self,
         root: PathBuf,
+        authority: Arc<AuthorizedRoot>,
         flight: Arc<StartFlight>,
         cancellation: Option<CancellationToken>,
     ) -> Result<Arc<Instance>, ManagerError> {
-        let result = self.start_instance(&root, cancellation).await;
+        let result = self.start_instance(&root, authority, cancellation).await;
         self.complete_start(&root, &flight, result.clone());
         result
     }
@@ -1389,38 +1809,53 @@ where
     async fn start_instance(
         &self,
         root: &Path,
+        authority: Arc<AuthorizedRoot>,
         cancellation: Option<CancellationToken>,
     ) -> Result<Arc<Instance>, ManagerError> {
         check_cancellation(cancellation.as_ref())?;
         let binary = self.resolved_binary()?;
         if self.inner.options.workspace_code == WorkspaceCode::Deny {
-            self.ensure_schema(&binary, cancellation.clone()).await?;
+            self.ensure_schema(&binary, authority.clone(), cancellation.clone())
+                .await?;
         }
         self.ensure_capacity(root, cancellation.clone()).await?;
         check_cancellation(cancellation.as_ref())?;
+        let protocol_root = self.protocol_root_for(root);
         let spec = CommandSpec {
             executable: binary,
             args: Vec::new(),
             cwd: root.to_owned(),
             env: fixed_environment(),
         };
-        let client = self
-            .inner
-            .factory
-            .spawn_with_cancellation(
-                spec,
-                self.inner.options.timeout,
-                self.inner.options.max_frame_bytes,
-                cancellation.clone(),
-            )
-            .await
-            .map_err(manager_client_error)?;
+        let client = if self.inner.authorized_execution {
+            self.inner
+                .factory
+                .spawn_authorized(
+                    spec,
+                    self.inner.options.timeout,
+                    self.inner.options.max_frame_bytes,
+                    cancellation.clone(),
+                    authority.clone(),
+                )
+                .await
+        } else {
+            self.inner
+                .factory
+                .spawn_with_cancellation(
+                    spec,
+                    self.inner.options.timeout,
+                    self.inner.options.max_frame_bytes,
+                    cancellation.clone(),
+                )
+                .await
+        }
+        .map_err(manager_client_error)?;
         if let Err(error) = check_cancellation(cancellation.as_ref()) {
             let _ = client.shutdown(self.inner.options.shutdown_timeout).await;
             return Err(error);
         }
         let token = Arc::new(());
-        let callbacks = self.callbacks(root, token.clone());
+        let callbacks = self.callbacks(root, &protocol_root, token.clone());
         if let Err(error) = client
             .set_callbacks_with_cancellation(callbacks, cancellation.clone())
             .await
@@ -1433,7 +1868,7 @@ where
         let initialized = match client
             .request_with_cancellation(
                 "initialize",
-                initialize_params(root, self.inner.options.workspace_code)?,
+                initialize_params(&protocol_root, self.inner.options.workspace_code)?,
                 self.inner.options.timeout,
                 cancellation.clone(),
             )
@@ -1476,6 +1911,7 @@ where
             .await?;
         Ok(Arc::new(Instance::new(
             root.to_owned(),
+            authority,
             client,
             token,
             internal_capabilities(&initialized),
@@ -1535,6 +1971,7 @@ where
     async fn ensure_schema(
         &self,
         binary: &Path,
+        authority: Arc<AuthorizedRoot>,
         cancellation: Option<CancellationToken>,
     ) -> Result<(), ManagerError> {
         loop {
@@ -1589,15 +2026,27 @@ where
                 }
             }
 
-            let result = self
-                .inner
-                .probe
-                .probe_with_cancellation(
-                    &binary,
-                    self.inner.options.probe_timeout,
-                    cancellation.clone(),
-                )
-                .await
+            let result = if self.inner.authorized_execution {
+                self.inner
+                    .probe
+                    .probe_authorized_with_supervisor(
+                        &binary,
+                        self.inner.options.probe_timeout,
+                        cancellation.clone(),
+                        authority,
+                        self.inner.processes.clone(),
+                    )
+                    .await
+            } else {
+                self.inner
+                    .probe
+                    .probe_with_cancellation(
+                        &binary,
+                        self.inner.options.probe_timeout,
+                        cancellation.clone(),
+                    )
+                    .await
+            }
                 .map_err(|error| match error {
                     ProbeError::Cancelled => ManagerError::Cancelled,
                     error => ManagerError::Unavailable(error.to_string()),
@@ -1804,8 +2253,26 @@ where
         }
     }
 
-    fn callbacks(&self, root: &Path, token: Arc<()>) -> ClientCallbacks {
-        let root_for_request = root.to_owned();
+    pub(crate) fn protocol_root_for(&self, lexical: &Path) -> PathBuf {
+        if self.inner.authorized_execution {
+            self.inner.factory.protocol_root(lexical)
+        } else {
+            lexical.to_owned()
+        }
+    }
+
+    fn require_authorized_execution(&self) -> Result<(), ManagerError> {
+        if self.inner.authorized_execution {
+            Ok(())
+        } else {
+            Err(ManagerError::RootAuthority(
+                "this manager was constructed for direct public execution".to_owned(),
+            ))
+        }
+    }
+
+    fn callbacks(&self, root: &Path, protocol_root: &Path, token: Arc<()>) -> ClientCallbacks {
+        let root_for_request = protocol_root.to_owned();
         let deny = self.inner.options.workspace_code == WorkspaceCode::Deny;
         let server_request_handler: ServerRequestHandler =
             Arc::new(move |method, params, _cancel| {
@@ -1979,6 +2446,43 @@ fn manager_client_error(error: LspError) -> ManagerError {
         ManagerError::Cancelled
     } else {
         ManagerError::Client(error)
+    }
+}
+
+fn authorize_exact_root(
+    authority: &Arc<AuthorizedRoot>,
+    root: &Path,
+) -> Result<(PathBuf, Arc<AuthorizedRoot>), ManagerError> {
+    let exact = authority
+        .authorize_dir(root)
+        .map_err(|error| ManagerError::RootAuthority(error.to_string()))?;
+    Ok((exact.path().to_owned(), exact))
+}
+
+fn authorities_match(left: &AuthorizedRoot, right: &AuthorizedRoot) -> Result<bool, ManagerError> {
+    if left.path() != right.path() {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        use cap_std::fs::MetadataExt;
+
+        let left = left
+            .dir()
+            .dir_metadata()
+            .map_err(|error| ManagerError::RootAuthority(error.to_string()))?;
+        let right = right
+            .dir()
+            .dir_metadata()
+            .map_err(|error| ManagerError::RootAuthority(error.to_string()))?;
+        Ok(left.dev() == right.dev() && left.ino() == right.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        // The capability directory handle remains live for every instance. On
+        // Windows that open handle prevents a replacement at this lexical path;
+        // rejecting a path mismatch above is therefore fail-closed.
+        Ok(true)
     }
 }
 

@@ -1,6 +1,6 @@
 # Araç ve Yapılandırma Referansı
 
-Bu belge `agz-rust-coder` `0.1.0` sürümünün açık araç ve yapılandırma yüzeyini
+Bu belge `agz-rust-coder` `0.1.1` sürümünün açık araç ve yapılandırma yüzeyini
 tanımlar.
 
 ## Araç Kataloğu

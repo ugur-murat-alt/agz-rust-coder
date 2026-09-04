@@ -602,15 +602,26 @@ pub struct ResolvedPath {
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceRoot {
+    /// The configured/intersected root used for ancestor selection and general
+    /// workspace access.
     root: Arc<AuthorizedRoot>,
+    /// The exact directory capability selected for this request.  This must
+    /// survive independently of later changes at its lexical path.
+    requested_authority: Arc<AuthorizedRoot>,
     requested: PathBuf,
     epoch: u64,
 }
 
 impl WorkspaceRoot {
-    pub(crate) fn from_parts(root: Arc<AuthorizedRoot>, requested: PathBuf, epoch: u64) -> Self {
+    pub(crate) fn from_parts(
+        root: Arc<AuthorizedRoot>,
+        requested_authority: Arc<AuthorizedRoot>,
+        requested: PathBuf,
+        epoch: u64,
+    ) -> Self {
         Self {
             root,
+            requested_authority,
             requested,
             epoch,
         }
@@ -626,6 +637,11 @@ impl WorkspaceRoot {
 
     pub fn authority(&self) -> &Arc<AuthorizedRoot> {
         &self.root
+    }
+
+    /// Returns the exact capability for the request-selected directory.
+    pub fn requested_authority(&self) -> &Arc<AuthorizedRoot> {
+        &self.requested_authority
     }
 
     pub fn authority_path(&self) -> &Path {
@@ -686,20 +702,22 @@ impl RootSnapshot {
     }
 
     pub fn select(&self, directory: Option<&Path>) -> Result<WorkspaceRoot, RootError> {
-        let (root, requested) = match directory {
+        let (root, requested_authority, requested) = match directory {
             None if self.roots.len() == 1 => {
-                (self.roots[0].clone(), self.roots[0].path().to_owned())
+                let root = self.roots[0].clone();
+                (root.clone(), root.clone(), root.path().to_owned())
             }
             None => return Err(RootError::MultipleRoots),
             Some(directory) if !directory.is_absolute() => return Err(RootError::RelativePath),
             Some(directory) => {
                 let resolved = self.resolve_existing(directory)?;
-                resolved.root.authorize_dir(&resolved.canonical)?;
-                (resolved.root, resolved.canonical)
+                let requested = resolved.root.authorize_dir(&resolved.canonical)?;
+                (resolved.root, requested, resolved.canonical)
             }
         };
         Ok(WorkspaceRoot {
             root,
+            requested_authority,
             requested,
             epoch: self.epoch,
         })

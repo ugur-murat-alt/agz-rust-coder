@@ -24,6 +24,7 @@ fn main() {
             .then_some("textDocument/hover")
     });
     let message_error = executable.contains("message-retry");
+    let barrier = executable.contains("barrier");
     let log_path = args
         .iter()
         .position(|arg| arg == "--log")
@@ -32,6 +33,7 @@ fn main() {
     let mut input = io::stdin();
     let mut buffer = Vec::new();
     let mut retried = false;
+    let mut barrier_waited = false;
 
     loop {
         let Some(message) = next_frame(&mut input, &mut buffer).expect("read semantic request")
@@ -70,8 +72,36 @@ fn main() {
             default_rename,
             reciprocal,
         );
+        if barrier
+            && !barrier_waited
+            && matches!(
+                method.as_str(),
+                "textDocument/references"
+                    | "textDocument/implementation"
+                    | "textDocument/rename"
+                    | "textDocument/codeAction"
+            )
+        {
+            barrier_waited = true;
+            wait_for_replacement_barrier();
+        }
         send_raw(&response(&id, &result));
     }
+}
+
+fn wait_for_replacement_barrier() {
+    let ready = PathBuf::from(".semantic-ra-ready");
+    let proceed = PathBuf::from(".semantic-ra-continue");
+    std::fs::write(&ready, "ready\n").expect("write semantic barrier ready file");
+    for _ in 0..100 {
+        if proceed.exists() {
+            let _ = std::fs::remove_file(&proceed);
+            let _ = std::fs::remove_file(&ready);
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("semantic replacement barrier timed out");
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -11,6 +11,7 @@ pub mod workspace {
 }
 
 use agz_rust_coder::lsp;
+#[cfg(unix)]
 use agz_rust_coder::tools::{read_workspace_file, read_workspace_file_with_hook};
 
 use std::{
@@ -23,8 +24,10 @@ use std::{
     time::Duration,
 };
 
+#[cfg(unix)]
+use lsp::manager::{ConcreteBinarySchemaProbe, ConcreteClientFactory};
 use lsp::{
-    client::{CloseHandler, DocumentSyncOptions},
+    client::{CloseHandler, DocumentSyncOptions, ServerRequestHandler},
     manager::{
         BinarySchemaProbe, ClientCallbacks, ClientFuture, ClientRef, LspClientFactory,
         LspClientLike, ManagerOptions, ProbeError, ProbeFuture, RustAnalyzerManager,
@@ -152,6 +155,8 @@ struct MockClient {
     initialize_delay: Duration,
     request_delay: Duration,
     close_handler: Mutex<Option<CloseHandler>>,
+    server_request_handler: Mutex<Option<ServerRequestHandler>>,
+    requests: Mutex<Vec<(String, Value)>>,
 }
 
 impl std::fmt::Debug for MockClient {
@@ -174,6 +179,8 @@ impl MockClient {
             initialize_delay,
             request_delay,
             close_handler: Mutex::new(None),
+            server_request_handler: Mutex::new(None),
+            requests: Mutex::new(Vec::new()),
         }
     }
 
@@ -189,12 +196,41 @@ impl MockClient {
             }
         }
     }
+
+    fn initialize_params(&self) -> Vec<Value> {
+        self.requests
+            .lock()
+            .expect("request mutex")
+            .iter()
+            .filter(|(method, _)| method == "initialize")
+            .map(|(_, params)| params.clone())
+            .collect()
+    }
+
+    async fn workspace_folders(&self) -> Value {
+        let handler = self
+            .server_request_handler
+            .lock()
+            .expect("server request handler mutex")
+            .clone()
+            .expect("workspace callback is installed");
+        handler(
+            "workspace/workspaceFolders".to_owned(),
+            Value::Null,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("workspace folders callback")
+    }
 }
 
 impl LspClientLike for MockClient {
     fn set_callbacks(&self, callbacks: ClientCallbacks) -> ClientFuture<'_, ()> {
         if let Ok(mut handler) = self.close_handler.lock() {
             *handler = callbacks.close_handler;
+        }
+        if let Ok(mut handler) = self.server_request_handler.lock() {
+            *handler = callbacks.server_request_handler;
         }
         Box::pin(async { Ok(()) })
     }
@@ -203,8 +239,12 @@ impl LspClientLike for MockClient {
         Box::pin(async { Ok(()) })
     }
 
-    fn request(&self, method: &str, _params: Value, _timeout: Duration) -> ClientFuture<'_, Value> {
+    fn request(&self, method: &str, params: Value, _timeout: Duration) -> ClientFuture<'_, Value> {
         let method = method.to_owned();
+        self.requests
+            .lock()
+            .expect("request mutex")
+            .push((method.clone(), params));
         let initialize_delay = self.initialize_delay;
         let request_delay = self.request_delay;
         let id = self.id;
@@ -258,6 +298,7 @@ struct MockFactory {
     next_id: Arc<AtomicUsize>,
     clients: Arc<Mutex<Vec<Arc<MockClient>>>>,
     specs: Arc<Mutex<Vec<crate::process::CommandSpec>>>,
+    protocol_root: Option<PathBuf>,
 }
 
 impl MockFactory {
@@ -268,6 +309,7 @@ impl MockFactory {
             next_id: Arc::new(AtomicUsize::new(1)),
             clients: Arc::new(Mutex::new(Vec::new())),
             specs: Arc::new(Mutex::new(Vec::new())),
+            protocol_root: None,
         }
     }
 
@@ -281,6 +323,11 @@ impl MockFactory {
 
     fn specs(&self) -> Vec<crate::process::CommandSpec> {
         self.specs.lock().expect("spec mutex").clone()
+    }
+
+    fn with_protocol_root(mut self, root: PathBuf) -> Self {
+        self.protocol_root = Some(root);
+        self
     }
 }
 
@@ -303,6 +350,12 @@ impl LspClientFactory for MockFactory {
             .expect("clients mutex")
             .push(client.clone());
         Box::pin(async move { Ok(client as ClientRef) })
+    }
+
+    fn protocol_root(&self, lexical: &Path) -> PathBuf {
+        self.protocol_root
+            .clone()
+            .unwrap_or_else(|| lexical.to_owned())
     }
 }
 
@@ -502,6 +555,180 @@ async fn factory_receives_the_canonical_workspace_and_fixed_environment() {
             .iter()
             .any(|(key, value)| key == "CARGO_TERM_COLOR" && value == "never")
     );
+    let _ = manager.close_all().await;
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn concrete_factory_uses_the_root_descriptor_protocol_alias() {
+    let factory = ConcreteClientFactory;
+    assert_eq!(
+        factory.protocol_root(Path::new("/lexical/workspace")),
+        PathBuf::from("/proc/self/fd/198")
+    );
+}
+
+#[tokio::test]
+async fn protocol_root_is_shared_by_initialize_and_workspace_folder_callback() {
+    let root = TestRoot::new("protocol-root-alias");
+    let binary = binary(root.path());
+    let protocol_root = PathBuf::from("/agz-stable-lsp-root");
+    let factory =
+        MockFactory::new(Duration::ZERO, Duration::ZERO).with_protocol_root(protocol_root.clone());
+    let observer = factory.clone();
+    let manager = RustAnalyzerManager::with_authorized_adapters(
+        options(&binary),
+        MockProbe::valid(),
+        factory,
+    )
+    .expect("authorized manager");
+    let authority = workspace::RootGuard::new([root.path().to_owned()], std::iter::empty())
+        .expect("authorize workspace")
+        .configured_roots()[0]
+        .clone();
+    manager
+        .acquire_authorized(authority, root.path())
+        .await
+        .expect("start client");
+    let client = observer.clients().pop().expect("started mock client");
+
+    let original = root.path().with_extension("original");
+    fs::rename(root.path(), &original).expect("move lexical root after initialization");
+    fs::create_dir(root.path()).expect("create lexical replacement");
+    let initialize = client
+        .initialize_params()
+        .pop()
+        .expect("captured initialize parameters");
+    let workspace_folders = client.workspace_folders().await;
+    let expected_uri = "file:///agz-stable-lsp-root";
+    assert_eq!(initialize["rootUri"], expected_uri);
+    assert_eq!(initialize["workspaceFolders"][0]["uri"], expected_uri);
+    assert_eq!(workspace_folders[0]["uri"], expected_uri);
+    assert_ne!(
+        initialize["rootUri"],
+        format!("file://{}", root.path().display()),
+        "the replacement lexical root must never be sent to the client"
+    );
+
+    let _ = manager.close_all().await;
+    fs::remove_dir_all(&original).expect("remove original root");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn authorized_root_replacement_cannot_start_the_replacement_analyzer() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = TestRoot::new("authorized-replacement");
+    let authority = workspace::RootGuard::new([root.path().to_owned()], std::iter::empty())
+        .expect("authorize original workspace")
+        .configured_roots()[0]
+        .clone();
+    let original = root.path().with_extension("original");
+    let marker = root.path().join("replacement-analyzer-ran");
+    fs::rename(root.path(), &original).expect("move authorized workspace");
+    fs::create_dir(root.path()).expect("create replacement workspace");
+    let replacement_analyzer = root.path().join("replacement-rust-analyzer");
+    fs::write(
+        &replacement_analyzer,
+        format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+    )
+    .expect("write replacement analyzer");
+    let mut permissions = fs::metadata(&replacement_analyzer)
+        .expect("replacement analyzer metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&replacement_analyzer, permissions).expect("make replacement executable");
+
+    let manager = RustAnalyzerManager::with_authorized_adapters(
+        options(&replacement_analyzer)
+            .with_workspace_code(config::WorkspaceCode::Deny)
+            .with_wait_timeout(Duration::from_secs(1)),
+        ConcreteBinarySchemaProbe::default(),
+        ConcreteClientFactory,
+    )
+    .expect("create concrete manager");
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        manager.acquire_authorized(authority, root.path()),
+    )
+    .await
+    .expect("root replacement failure is bounded");
+    assert!(result.is_err(), "replacement root must fail closed");
+    assert!(
+        !marker.exists(),
+        "replacement workspace analyzer must not start"
+    );
+    let _ = manager.close_all().await;
+    fs::remove_dir_all(root.path()).expect("remove replacement workspace");
+    fs::remove_dir_all(original).expect("remove original workspace");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn authorized_schema_probe_cancellation_reaps_its_descendant() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = TestRoot::new("authorized-schema-probe-cleanup");
+    let binary = root.path().join("schema-probe");
+    let pid_file = root.path().join("schema-descendant.pid");
+    let sentinel = root.path().join("schema-descendant-survived");
+    fs::write(
+        &binary,
+        format!(
+            "#!/bin/sh\n( trap '' TERM; sleep 2; touch '{}' ) &\necho $! > '{}'\nsleep 5\n",
+            sentinel.display(),
+            pid_file.display(),
+        ),
+    )
+    .expect("write schema probe fixture");
+    let mut permissions = fs::metadata(&binary)
+        .expect("schema probe metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&binary, permissions).expect("make schema probe executable");
+
+    let authority = workspace::RootGuard::new([root.path().to_owned()], std::iter::empty())
+        .expect("authorize workspace")
+        .configured_roots()[0]
+        .clone();
+    let manager = RustAnalyzerManager::new_authorized(
+        options(&binary)
+            .with_workspace_code(config::WorkspaceCode::Deny)
+            .with_wait_timeout(Duration::from_secs(3)),
+    )
+    .expect("create authorized manager");
+    let cancellation = CancellationToken::new();
+    let acquire_manager = manager.clone();
+    let root_path = root.path().to_owned();
+    let acquire_cancellation = cancellation.clone();
+    let acquire = tokio::spawn(async move {
+        acquire_manager
+            .acquire_authorized_with_cancellation(authority, root_path, acquire_cancellation)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !pid_file.exists() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("schema descendant started");
+    cancellation.cancel();
+
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(4), acquire)
+            .await
+            .expect("schema cancellation is bounded")
+            .expect("schema acquire task"),
+        Err(lsp::manager::ManagerError::Cancelled)
+    ));
+    sleep(Duration::from_millis(700)).await;
+    assert!(
+        !sentinel.exists(),
+        "a cancelled authorized probe must reap its logical descendant"
+    );
+    assert_eq!(manager.instance_count(), 0);
     let _ = manager.close_all().await;
 }
 

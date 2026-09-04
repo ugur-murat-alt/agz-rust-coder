@@ -1,7 +1,7 @@
 # Tool And Configuration Reference
 
 This document defines the public tool and configuration surface of
-`agz-rust-coder` `0.1.0`.
+`agz-rust-coder` `0.1.1`.
 
 ## Tool Catalog
 

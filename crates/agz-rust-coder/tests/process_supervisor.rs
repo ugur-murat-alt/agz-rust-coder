@@ -6,13 +6,15 @@ mod linux_process_supervisor {
         fs,
         path::{Path, PathBuf},
         process::Stdio,
+        sync::Arc,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use agz_rust_coder::process::{
-        JournalRecord, ProcessGroupIdentity, ProcessJournal, ProcessRunOptions, ProcessSupervisor,
-        RecoveryDisposition,
+        JournalRecord, ProcessError, ProcessGroupIdentity, ProcessJournal, ProcessRunOptions,
+        ProcessSupervisor, RecoveryDisposition,
     };
+    use agz_rust_coder::workspace::RootGuard;
     use tokio_util::sync::CancellationToken;
 
     fn fixture(name: &str) -> PathBuf {
@@ -222,6 +224,153 @@ mod linux_process_supervisor {
     }
 
     #[tokio::test]
+    async fn authorized_root_replacement_fails_before_the_target_starts() {
+        let root = unique_directory("mcp-process-root-binding");
+        let marker = root.join("replacement-ran");
+        let authority = RootGuard::new([root.clone()], std::iter::empty())
+            .expect("authorize root")
+            .configured_roots()[0]
+            .clone();
+        let original = root.with_extension("original");
+        fs::rename(&root, &original).expect("rename authorized root");
+        fs::create_dir(&root).expect("create replacement root");
+        let result = ProcessSupervisor::without_journal()
+            .run_authorized(
+                "/bin/sh",
+                [
+                    OsString::from("-c"),
+                    OsString::from("touch replacement-ran"),
+                ],
+                options(&root, Duration::from_secs(2)),
+                authority,
+            )
+            .await
+            .expect("guard process starts");
+        assert_ne!(result.exit_code, 0);
+        assert!(!marker.exists(), "replacement target must not run");
+        fs::remove_dir_all(&root).expect("remove replacement root");
+        fs::remove_dir_all(&original).expect("remove original root");
+    }
+
+    #[tokio::test]
+    async fn authorized_launch_rejects_a_guard_binary_inside_its_root() {
+        let guard = PathBuf::from(env!("CARGO_BIN_EXE_agz-rust-coder"));
+        let root = guard
+            .parent()
+            .expect("guard binary has a parent")
+            .to_owned();
+        let authority = RootGuard::new([root.clone()], std::iter::empty())
+            .expect("authorize guard parent")
+            .configured_roots()[0]
+            .clone();
+
+        let result = ProcessSupervisor::without_journal()
+            .run_authorized(
+                "/bin/sh",
+                [OsString::from("-c"), OsString::from("exit 0")],
+                options(&root, Duration::from_secs(2)),
+                authority,
+            )
+            .await;
+
+        assert!(matches!(result, Err(ProcessError::RootBinding(_))));
+    }
+
+    #[tokio::test]
+    async fn root_contained_executable_uses_the_verified_directory_after_replacement() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_directory("mcp-process-executable-binding");
+        let executable = root.join("analyzer");
+        let original_marker = root.with_extension("original-marker");
+        let replacement_marker = root.with_extension("replacement-marker");
+        let ready = root.with_extension("ready");
+        let continue_file = root.with_extension("continue");
+        fs::write(&executable, "#!/bin/sh\nprintf original > \"$1\"\n")
+            .expect("write original executable");
+        let mut permissions = fs::metadata(&executable)
+            .expect("original executable metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).expect("make original executable runnable");
+        let authority = RootGuard::new([root.clone()], std::iter::empty())
+            .expect("authorize root")
+            .configured_roots()[0]
+            .clone();
+        let mut run_options = options(&root, Duration::from_secs(5));
+        run_options.env.insert(
+            OsString::from("AGZ_RUST_CODER_GUARD_TEST_READY"),
+            ready.as_os_str().to_owned(),
+        );
+        run_options.env.insert(
+            OsString::from("AGZ_RUST_CODER_GUARD_TEST_CONTINUE"),
+            continue_file.as_os_str().to_owned(),
+        );
+        let runner = Arc::new(ProcessSupervisor::without_journal());
+        let running = {
+            let runner = Arc::clone(&runner);
+            let executable = executable.clone();
+            let original_marker = original_marker.clone();
+            let replacement_marker = replacement_marker.clone();
+            tokio::spawn(async move {
+                runner
+                    .run_authorized(
+                        executable,
+                        [
+                            original_marker.into_os_string(),
+                            replacement_marker.into_os_string(),
+                        ],
+                        run_options,
+                        authority,
+                    )
+                    .await
+            })
+        };
+        for _ in 0..200 {
+            if ready.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(ready.exists(), "guard did not complete its identity check");
+
+        let original = root.with_extension("original");
+        fs::rename(&root, &original).expect("move verified root");
+        fs::create_dir(&root).expect("create replacement root");
+        let replacement = root.join("analyzer");
+        fs::write(&replacement, "#!/bin/sh\nprintf replacement > \"$2\"\n")
+            .expect("write replacement executable");
+        let mut permissions = fs::metadata(&replacement)
+            .expect("replacement executable metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&replacement, permissions)
+            .expect("make replacement executable runnable");
+        fs::write(&continue_file, b"continue").expect("release guard");
+
+        let result = running
+            .await
+            .expect("join guarded process")
+            .expect("run guarded process");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(&original_marker).expect("original marker"),
+            "original"
+        );
+        assert!(
+            !replacement_marker.exists(),
+            "replacement executable must not run"
+        );
+        assert_eq!(runner.active_count(), 0);
+        fs::remove_dir_all(&root).expect("remove replacement root");
+        fs::remove_dir_all(&original).expect("remove original root");
+        let _ = fs::remove_file(original_marker);
+        let _ = fs::remove_file(replacement_marker);
+        let _ = fs::remove_file(ready);
+        let _ = fs::remove_file(continue_file);
+    }
+
+    #[tokio::test]
     async fn recovery_does_not_kill_a_reused_pid_identity() {
         let root = unique_directory("mcp-process-journal");
         let mut child = std::process::Command::new("/bin/sleep")
@@ -260,6 +409,89 @@ mod linux_process_supervisor {
         child.kill().expect("kill identity fixture");
         child.wait().expect("wait identity fixture");
         fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[tokio::test]
+    async fn recovery_accepts_guard_handoff_after_root_replacement() {
+        let root = unique_directory("mcp-process-journal-root");
+        let journal_root = unique_directory("mcp-process-journal-handoff");
+        let journal = ProcessJournal::new(&journal_root).expect("create process journal");
+        let runner = Arc::new(ProcessSupervisor::with_journal(journal));
+        let authority = RootGuard::new([root.clone()], std::iter::empty())
+            .expect("authorize root")
+            .configured_roots()[0]
+            .clone();
+        let root_argument = root.clone();
+        let running = {
+            let runner = Arc::clone(&runner);
+            let run_root = root.clone();
+            tokio::spawn(async move {
+                runner
+                    .run_authorized(
+                        "/bin/sh",
+                        [
+                            OsString::from("-c"),
+                            OsString::from("test -d \"$1\" || exit 1; while :; do sleep 1; done"),
+                            OsString::from("agz-root-guard-test"),
+                            root_argument.into_os_string(),
+                        ],
+                        options(&run_root, Duration::from_secs(30)),
+                        authority,
+                    )
+                    .await
+            })
+        };
+        let jobs = journal_root.join("jobs");
+        let mut record_path = None;
+        for _ in 0..200 {
+            record_path = fs::read_dir(&jobs).ok().and_then(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .find(|path| {
+                        path.extension().and_then(|extension| extension.to_str()) == Some("json")
+                    })
+            });
+            if record_path.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let record_path = record_path.expect("guarded child journal record");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&record_path).expect("read child journal record"))
+                .expect("deserialize child journal record");
+        let token = record["token"].as_str().expect("journal token").to_owned();
+        // Simulate the owner having crashed; recovery must only target the
+        // child group after preserving PID/start-time/group verification.
+        record["owner_pid"] = serde_json::json!(u32::MAX);
+        record["owner_start_time"] = serde_json::json!(0);
+        fs::write(
+            &record_path,
+            serde_json::to_vec(&record).expect("serialize orphan journal record"),
+        )
+        .expect("write orphan journal record");
+
+        let original = root.with_extension("original");
+        fs::rename(&root, &original).expect("move authorized root");
+        fs::create_dir(&root).expect("create replacement root");
+
+        let recovery = ProcessJournal::new(&journal_root)
+            .expect("open recovery journal")
+            .recover_orphans();
+        assert!(recovery.entries.iter().any(|entry| {
+            entry.disposition == RecoveryDisposition::Killed && entry.token == token
+        }));
+        let result = running
+            .await
+            .expect("join guarded child")
+            .expect("guarded child result");
+        assert!(result.cleanup_complete);
+        assert_eq!(runner.active_count(), 0);
+        fs::remove_dir_all(&root).expect("remove replacement root");
+        fs::remove_dir_all(&original).expect("remove original root");
+        fs::remove_dir_all(&journal_root).expect("remove journal root");
     }
 
     #[tokio::test]

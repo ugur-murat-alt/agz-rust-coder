@@ -11,8 +11,9 @@ use agz_rust_coder::{
     lsp::{ManagerOptions, RustAnalyzerManager},
     tools::{
         document_symbols, semantic_refactor, semantic_rename, symbol_definition, symbol_hierarchy,
-        symbol_hover, symbol_implementations, symbol_references,
+        symbol_hover, symbol_implementations, symbol_references, with_lsp_authority,
     },
+    workspace::{ClientRoots, RootGuard},
 };
 
 static SEMANTIC_BINARY: OnceLock<PathBuf> = OnceLock::new();
@@ -78,7 +79,7 @@ impl Drop for TestRoot {
 }
 
 fn manager_with_binary(binary: &Path) -> RustAnalyzerManager {
-    RustAnalyzerManager::new(
+    RustAnalyzerManager::new_authorized(
         ManagerOptions::default()
             .with_binary(binary)
             .with_workspace_code(WorkspaceCode::Allow)
@@ -91,6 +92,51 @@ fn manager_with_binary(binary: &Path) -> RustAnalyzerManager {
 
 fn manager() -> RustAnalyzerManager {
     manager_with_binary(semantic_binary())
+}
+
+fn requested_authority(
+    root: &TestRoot,
+) -> std::sync::Arc<agz_rust_coder::workspace::AuthorizedRoot> {
+    let guard =
+        RootGuard::new([root.path().to_owned()], std::iter::empty()).expect("authorize test root");
+    let snapshot = guard
+        .snapshot(ClientRoots::unsupported())
+        .expect("snapshot test root");
+    snapshot
+        .select(Some(root.path()))
+        .expect("select test root")
+        .requested_authority()
+        .clone()
+}
+
+async fn wait_for_barrier(path: &Path) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if path.exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("semantic fixture reached replacement barrier");
+}
+
+fn replace_root(root: &TestRoot, label: &str) -> PathBuf {
+    let old = root.path().with_file_name(format!(
+        "agz-rust-coder-navigation-{label}-old-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&old);
+    fs::rename(root.path(), &old).expect("rename original root");
+    fs::create_dir_all(root.path().join("src")).expect("create replacement root");
+    fs::write(
+        root.path().join("src/lib.rs"),
+        "pub fn replacement_only() { panic!(\"replacement content\") }\n",
+    )
+    .expect("write replacement source");
+    fs::write(old.join(".semantic-ra-continue"), "continue\n").expect("release semantic fixture");
+    old
 }
 
 #[tokio::test]
@@ -236,6 +282,132 @@ async fn semantic_edits_are_write_free_and_return_commands_as_text() {
 
     let report = manager.close_all().await;
     assert_eq!(report.remaining, 0);
+}
+
+#[tokio::test]
+async fn retained_authority_navigation_uses_original_root_after_replacement() {
+    let root = TestRoot::new("retained-navigation");
+    let authority = requested_authority(&root);
+    let manager = std::sync::Arc::new(manager_with_binary(&compile_semantic_binary(
+        "semantic-ra-barrier-navigation",
+    )));
+    let operation_manager = std::sync::Arc::clone(&manager);
+    let operation_authority = authority.clone();
+    let root_path = root.path().to_owned();
+    let references = tokio::spawn(async move {
+        Box::pin(with_lsp_authority(
+            operation_authority,
+            symbol_references(
+                operation_manager.as_ref(),
+                &root_path,
+                Path::new("src/lib.rs"),
+                "mock_fn",
+                Some(1),
+                Duration::from_secs(5),
+            ),
+        ))
+        .await
+    });
+    wait_for_barrier(&root.path().join(".semantic-ra-ready")).await;
+    let old = replace_root(&root, "retained-navigation");
+    let references = references
+        .await
+        .expect("navigation task joins")
+        .expect("references through original authority");
+    assert!(references.contains("src/lib.rs:1"), "{references}");
+    assert!(references.contains("pub fn mock_fn"), "{references}");
+    assert!(!references.contains("replacement content"), "{references}");
+
+    let implementations = with_lsp_authority(
+        authority,
+        symbol_implementations(
+            manager.as_ref(),
+            root.path(),
+            Path::new("src/lib.rs"),
+            "mock_fn",
+            Some(1),
+            true,
+            Duration::from_secs(5),
+        ),
+    )
+    .await
+    .expect("implementations through original authority");
+    assert!(
+        implementations.contains("pub fn mock_fn"),
+        "{implementations}"
+    );
+    assert!(
+        !implementations.contains("replacement content"),
+        "{implementations}"
+    );
+    assert_eq!(manager.close_all().await.remaining, 0);
+    let _ = fs::remove_dir_all(old);
+}
+
+#[tokio::test]
+async fn retained_authority_edits_use_original_snapshot_after_replacement() {
+    let root = TestRoot::new("retained-edits");
+    let authority = requested_authority(&root);
+    let manager = std::sync::Arc::new(manager_with_binary(&compile_semantic_binary(
+        "semantic-ra-barrier-edits",
+    )));
+    let operation_manager = std::sync::Arc::clone(&manager);
+    let operation_authority = authority.clone();
+    let root_path = root.path().to_owned();
+    let rename = tokio::spawn(async move {
+        Box::pin(with_lsp_authority(
+            operation_authority,
+            semantic_rename(
+                operation_manager.as_ref(),
+                &root_path,
+                Path::new("src/lib.rs"),
+                "mock_fn",
+                Some(1),
+                "renamed",
+                true,
+                20,
+                Duration::from_secs(5),
+            ),
+        ))
+        .await
+    });
+    wait_for_barrier(&root.path().join(".semantic-ra-ready")).await;
+    let old = replace_root(&root, "retained-edits");
+    let rename = rename
+        .await
+        .expect("rename task joins")
+        .expect("rename through original authority");
+    assert!(rename.patches.iter().all(|patch| {
+        patch.old_string.contains("mock_fn") && !patch.old_string.contains("replacement content")
+    }));
+    assert_eq!(rename.patches.len(), 2, "{rename:#?}");
+
+    let refactor = Box::pin(with_lsp_authority(
+        authority,
+        semantic_refactor(
+            manager.as_ref(),
+            root.path(),
+            Path::new("src/lib.rs"),
+            "mock_fn",
+            Some(1),
+            None,
+            true,
+            20,
+            Duration::from_secs(5),
+        ),
+    ))
+    .await
+    .expect("refactor through original authority");
+    assert!(refactor.patches.iter().all(|patch| {
+        patch.old_string.contains("42") && !patch.old_string.contains("replacement content")
+    }));
+    assert!(!refactor.patches.is_empty(), "{refactor:#?}");
+    assert_eq!(
+        fs::read_to_string(root.path().join("src/lib.rs")).expect("read replacement source"),
+        "pub fn replacement_only() { panic!(\"replacement content\") }\n"
+    );
+    assert_eq!(manager.close_all().await.remaining, 0);
+    let _ = fs::remove_dir_all(old);
 }
 
 #[tokio::test]

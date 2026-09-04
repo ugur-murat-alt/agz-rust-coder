@@ -14,7 +14,7 @@ body:
     attributes:
       label: Version or commit
       description: Include the binary version, crate version, or exact commit.
-      placeholder: agz-rust-coder-v0.1.0 or abc1234
+      placeholder: agz-rust-coder-v0.1.1 or abc1234
     validations:
       required: true
   - type: dropdown

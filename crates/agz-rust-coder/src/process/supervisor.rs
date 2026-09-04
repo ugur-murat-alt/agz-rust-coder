@@ -39,7 +39,9 @@ use super::{
         DiagnosticCallback, OutputCollector, OutputEvent, OutputSnapshot, StreamKind,
         spawn_stderr_reader, spawn_stdout_reader,
     },
+    root_bound::RootBoundCommand,
 };
+use crate::workspace::AuthorizedRoot;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_KILL_GRACE: Duration = Duration::from_millis(500);
@@ -64,6 +66,8 @@ pub enum ProcessError {
     },
     #[error("spawned process did not expose a PID")]
     MissingPid,
+    #[error("root-bound process launch failed: {0}")]
+    RootBinding(String),
 }
 
 #[derive(Clone)]
@@ -550,10 +554,78 @@ impl ProcessSupervisor {
         self.run_spec(spec, options).await
     }
 
+    /// Starts an exact-root process through the internal guard.  Unlike `run`,
+    /// the requested cwd is never supplied to the outer spawn operation.
+    pub async fn run_authorized<I, A>(
+        &self,
+        executable: impl Into<PathBuf>,
+        args: I,
+        options: ProcessRunOptions,
+        authority: Arc<AuthorizedRoot>,
+    ) -> Result<ProcessRunResult, ProcessError>
+    where
+        I: IntoIterator<Item = A>,
+        A: Into<OsString>,
+    {
+        let mut logical = CommandSpec::new(executable, options.cwd.clone());
+        logical.args = args.into_iter().map(Into::into).collect();
+        logical.env = options.env.clone();
+        let logical = logical.normalized()?;
+        let bound = RootBoundCommand::new(
+            &authority,
+            &logical.cwd,
+            &logical.executable,
+            &logical.args,
+            &logical.env,
+        )
+        .map_err(|error| ProcessError::RootBinding(error.to_string()))?;
+        let ambient = std::env::current_dir().map_err(|error| {
+            ProcessError::RootBinding(format!(
+                "cannot retain ambient cwd for guard spawn: {error}"
+            ))
+        })?;
+        let mut guard_options = options;
+        guard_options.cwd = ambient;
+        guard_options.env = bound.environment.clone();
+        let guard_spec = CommandSpec {
+            executable: bound.executable,
+            args: bound.args,
+            cwd: guard_options.cwd.clone(),
+            env: bound.environment.clone(),
+        };
+        let result = self
+            .run_spec_inner(
+                guard_spec,
+                guard_options,
+                None,
+                Some(logical),
+                Some(bound.handoff_args),
+            )
+            .await;
+        // On Windows cap-std deliberately opens directories without
+        // FILE_SHARE_DELETE. Retain that exact handle until the guard and its
+        // child are fully reaped so the lexical target cannot be replaced.
+        drop(authority);
+        result
+    }
+
     pub async fn run_spec(
         &self,
         spec: CommandSpec,
         options: ProcessRunOptions,
+    ) -> Result<ProcessRunResult, ProcessError> {
+        let spawn_cwd = options.cwd.clone();
+        self.run_spec_inner(spec, options, Some(spawn_cwd), None, None)
+            .await
+    }
+
+    async fn run_spec_inner(
+        &self,
+        spec: CommandSpec,
+        options: ProcessRunOptions,
+        spawn_cwd: Option<PathBuf>,
+        logical_spec: Option<CommandSpec>,
+        handoff_args: Option<Vec<OsString>>,
     ) -> Result<ProcessRunResult, ProcessError> {
         validate_options(&options)?;
         let token = make_token();
@@ -566,15 +638,18 @@ impl ProcessSupervisor {
                 return Err(error);
             }
         };
+        let evidence_spec = logical_spec.as_ref().unwrap_or(&normalized);
         let mut command = CommandWrap::with_new(&normalized.executable, |command| {
             command
                 .args(&normalized.args)
-                .current_dir(&normalized.cwd)
                 .env_clear()
                 .envs(&normalized.env)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
+            if let Some(cwd) = &spawn_cwd {
+                command.current_dir(cwd);
+            }
         });
         command.wrap(KillOnDrop);
         #[cfg(unix)]
@@ -603,17 +678,28 @@ impl ProcessSupervisor {
             .flatten()
             .map(|identity| identity.start_time);
         let group = group_identity(child_pid);
+        #[cfg(target_os = "linux")]
+        let journal_executable = PathBuf::from(format!("/proc/{child_pid}/exe"));
+        // Windows retains the guard as the job-owned leader; platforms without
+        // Linux process identity retain the prior journal identity contract.
+        #[cfg(windows)]
+        let journal_executable = normalized.executable.clone();
+        #[cfg(all(not(target_os = "linux"), not(windows)))]
+        let journal_executable = evidence_spec.executable.clone();
         let record = JournalRecord::new(
             token.clone(),
             child_pid,
             child_start_time,
-            normalized.executable.clone(),
+            journal_executable.clone(),
             group,
-            command_hash(&normalized.executable, &normalized.args),
+            command_hash(&journal_executable, &normalized.args),
         );
+        let alternate_command_hash = handoff_args
+            .as_deref()
+            .map(|args| command_hash(&journal_executable, args));
         let mut warnings = Vec::new();
         let journal_recorded = if let Some(journal) = &self.inner.journal {
-            match journal.record(&record) {
+            match journal.record_with_alternate(&record, alternate_command_hash.as_deref()) {
                 Ok(()) => true,
                 Err(error) => {
                     push_warning(
@@ -886,7 +972,7 @@ impl ProcessSupervisor {
             );
         }
         let result = make_result(
-            &normalized,
+            evidence_spec,
             token,
             child_pid,
             started,

@@ -5,6 +5,22 @@ Semantic Versioning and follows the Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-04
+
+### Security
+
+- Bound authorized Cargo, Git, documentation, and Rust Analyzer subprocesses to
+  the exact directory capabilities captured during workspace selection, with
+  process-tree cleanup for cancelled schema probes.
+
+### Fixed
+
+- Made metadata ownership, followers, Cargo execution, cancellation, and
+  deadlines bounded without publishing late or request-local results to the
+  shared cache.
+- Made crates.io lookup cancellation-aware while preserving bounded response
+  streaming, fixed-host redirects, and immediate admission-permit release.
+
 ## [0.1.0] - 2026-09-01
 
 ### Added
@@ -19,5 +35,6 @@ Semantic Versioning and follows the Keep a Changelog structure.
 - Cargo distribution through crates.io and discovery metadata for the official
   MCP Registry.
 
-[Unreleased]: https://github.com/ugur-murat-alt/agz-rust-coder/compare/agz-rust-coder-v0.1.0...HEAD
+[Unreleased]: https://github.com/ugur-murat-alt/agz-rust-coder/compare/agz-rust-coder-v0.1.1...HEAD
+[0.1.1]: https://github.com/ugur-murat-alt/agz-rust-coder/compare/agz-rust-coder-v0.1.0...agz-rust-coder-v0.1.1
 [0.1.0]: https://github.com/ugur-murat-alt/agz-rust-coder/releases/tag/agz-rust-coder-v0.1.0

@@ -33,5 +33,5 @@ pub use symbol::{
     file_path_from_uri, find_symbol_column, flatten_symbols, match_symbol, match_symbol_candidates,
     read_workspace_file, read_workspace_file_with_hook, resolve_asset_path, snapshot_rust_files,
     symbol_definition, symbol_hover, symbol_hover_at_position, symbol_references,
-    with_lsp_cancellation, with_rust_document, with_symbol_position,
+    with_lsp_authority, with_lsp_cancellation, with_rust_document, with_symbol_position,
 };

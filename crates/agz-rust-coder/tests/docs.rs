@@ -1094,3 +1094,76 @@ fn real_local_generator_writes_only_to_the_external_cache() {
     );
     assert!(!workspace.join("target").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn selected_child_replacement_rejects_local_doc_generation_before_cargo_runs() {
+    use std::time::{Duration, Instant};
+
+    use agz_rust_coder::workspace::ClientRoots;
+
+    let sandbox = TempRoot::new();
+    let root = sandbox.0.join("workspace");
+    fs::create_dir(&root).expect("create original workspace root");
+    fs::create_dir(root.join("src")).expect("create original source directory");
+    fs::write(
+        root.join("Cargo.toml"),
+        b"[package]\nname = \"original\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("write original manifest");
+    fs::write(root.join("src/lib.rs"), b"pub fn value() -> u8 { 1 }\n")
+        .expect("write original source");
+
+    let guard = RootGuard::new([sandbox.0.clone()], Vec::<PathBuf>::new())
+        .expect("authorize configured parent");
+    let snapshot = guard
+        .snapshot(ClientRoots::unsupported())
+        .expect("snapshot configured parent");
+    let authority = snapshot
+        .select(Some(&root))
+        .expect("select child workspace")
+        .requested_authority()
+        .clone();
+    let marker = sandbox.0.join("replacement-doc-generator-ran");
+    let original = sandbox.0.join("workspace-original");
+    fs::rename(&root, &original).expect("rename authorized root");
+    fs::create_dir(&root).expect("create replacement workspace root");
+    fs::create_dir(root.join("src")).expect("create replacement source directory");
+    fs::write(
+        root.join("Cargo.toml"),
+        b"[package]\nname = \"replacement\"\nversion = \"0.1.0\"\nedition = \"2024\"\nbuild = \"build.rs\"\n",
+    )
+    .expect("write replacement manifest");
+    fs::write(
+        root.join("Cargo.lock"),
+        b"version = 4\n\n[[package]]\nname = \"replacement\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("write replacement lockfile");
+    fs::write(root.join("src/lib.rs"), b"pub fn value() -> u8 { 2 }\n")
+        .expect("write replacement source");
+    fs::write(
+        root.join("build.rs"),
+        format!(
+            "use std::{{env, fs, path::PathBuf}};\nfn main() {{\n    let manifest = PathBuf::from(env::var_os(\"CARGO_MANIFEST_DIR\").unwrap());\n    let marker = manifest.parent().unwrap().join(\"{}\");\n    fs::write(marker, b\"replacement doc generator ran\").unwrap();\n}}\n",
+            marker.file_name().expect("marker file name").to_string_lossy(),
+        ),
+    )
+    .expect("write replacement build script");
+
+    let request = LocalDocRequest {
+        manifest_path: root.join("Cargo.toml"),
+        package: "replacement".to_owned(),
+        target_dir: sandbox.0.join("doc-target"),
+        deadline: Instant::now() + Duration::from_secs(5),
+        cancellation: tokio_util::sync::CancellationToken::new(),
+    };
+    let result =
+        agz_rust_coder::docs::CargoDocGenerator::default().generate_authorized(&request, authority);
+
+    assert!(
+        result.is_err(),
+        "replacement root must fail before local cargo runs: {result:?}"
+    );
+    assert!(!marker.exists(), "replacement build script must not run");
+    assert!(original.join("Cargo.toml").is_file());
+}

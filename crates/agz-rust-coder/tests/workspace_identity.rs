@@ -12,6 +12,9 @@ use agz_rust_coder::workspace::{
     RootGuard, compute_input_identity,
 };
 
+#[cfg(unix)]
+use agz_rust_coder::workspace::StdGitProbe;
+
 #[derive(Debug, Clone)]
 struct FakeGit {
     status: i32,
@@ -262,4 +265,68 @@ fn symlink_in_the_identity_walk_is_incomplete() {
         fs::read(outside.path().join("secret.rs")).unwrap(),
         b"pub fn secret() {}\n"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn selected_child_replacement_rejects_git_before_using_replacement_stdout() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sandbox = TestDir::new("root-replacement-git");
+    let root = sandbox.path().join("workspace");
+    fs::create_dir(&root).expect("create original workspace root");
+    fs::write(
+        root.join("Cargo.toml"),
+        b"[package]\nname = \"original\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("write original manifest");
+    fs::create_dir(root.join("src")).expect("create original source directory");
+    fs::write(root.join("src/lib.rs"), b"pub fn value() -> u8 { 1 }\n")
+        .expect("write original source");
+
+    let marker = sandbox.path().join("replacement-git-ran");
+    let git = sandbox.path().join("fake-git");
+    fs::write(
+        &git,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nprintf '%s' 'replacement-head\\n'\n",
+            marker.display(),
+        ),
+    )
+    .expect("write fake git executable");
+    let mut permissions = fs::metadata(&git).expect("fake git metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&git, permissions).expect("make fake git executable");
+
+    let guard = RootGuard::new([sandbox.path().to_owned()], std::iter::empty())
+        .expect("authorize configured parent");
+    let snapshot = guard
+        .snapshot(ClientRoots::unsupported())
+        .expect("snapshot configured parent");
+    let workspace = snapshot
+        .select(Some(&root))
+        .expect("select child workspace");
+    let authority = workspace.requested_authority().clone();
+    let original = sandbox.path().join("workspace-original");
+    fs::rename(&root, &original).expect("rename authorized root");
+    fs::create_dir(&root).expect("create replacement workspace root");
+    fs::write(
+        root.join("Cargo.toml"),
+        b"[package]\nname = \"replacement\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("write replacement manifest");
+
+    let args = [OsString::from("rev-parse"), OsString::from("HEAD")];
+    let result = StdGitProbe::new(git).run_authorized(workspace.path(), &args, 1024, authority);
+
+    let rejected = match &result {
+        Err(_) => true,
+        Ok(output) => output.status != Some(0) && output.stdout.is_empty(),
+    };
+    assert!(
+        rejected,
+        "replacement git stdout must not be accepted: {result:?}"
+    );
+    assert!(!marker.exists(), "replacement git must not run");
+    assert!(original.join("Cargo.toml").is_file());
 }

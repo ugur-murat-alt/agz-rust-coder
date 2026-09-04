@@ -10,6 +10,7 @@ use std::{
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
+use crate::workspace::identity::compute_input_identity_with_git_authority;
 use crate::{
     config::{Config, GateScope as ConfigGateScope},
     diagnostics::{Diagnostic, machine_applicable_package, parse_cargo_output},
@@ -22,7 +23,7 @@ use crate::{
     process::{ProcessRunOptions, ProcessSupervisor},
     workspace::{
         AuthorizedRoot, IdentityInput, IdentityLimits, InputIdentity, MetadataService, RootGuard,
-        StdGitProbe, WorkspaceRoot, compute_input_identity, select_workspace,
+        StdGitProbe, WorkspaceRoot, select_workspace,
     },
 };
 
@@ -37,6 +38,7 @@ pub struct CheckService {
     owns_supervisor: bool,
     cargo: PathBuf,
     config: Config,
+    shutdown: CancellationToken,
 }
 
 impl CheckService {
@@ -74,6 +76,7 @@ impl CheckService {
             cargo: resolve_cargo(config.cargo.path.as_deref()),
             guard,
             config,
+            shutdown: CancellationToken::new(),
         }
     }
 
@@ -118,25 +121,38 @@ impl CheckService {
             false,
         );
         let deadline = accepted_at + Duration::from_millis(self.config.gate.hard_timeout_ms);
-        let cancellation = cancellation.unwrap_or_default();
+        let requested_cancellation = cancellation.unwrap_or_default();
+        let cancellation = CancellationToken::new();
+        if requested_cancellation.is_cancelled() || self.shutdown.is_cancelled() {
+            cancellation.cancel();
+        }
+        let cancellation_forwarder = forward_cancellation(
+            requested_cancellation,
+            self.shutdown.clone(),
+            cancellation.clone(),
+        );
         let heartbeat =
             spawn_preflight_heartbeat(progress.clone(), cancellation.clone(), accepted_at);
         let service = self.clone();
         let prepare_request = request.clone();
-        let mut preparing = tokio::task::spawn_blocking(move || service.prepare(&prepare_request));
-        let prepared = tokio::select! {
-            result = &mut preparing => match result {
-                Ok(result) => result,
-                Err(error) => Err((GateStatus::Unavailable, format!("gate preflight failed: {error}"))),
-            },
-            () = cancellation.cancelled() => {
-                let _ = (&mut preparing).await;
-                Err((GateStatus::Cancelled, "gate request was cancelled during preflight".to_owned()))
-            },
-            () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-                let _ = (&mut preparing).await;
-                Err((GateStatus::Timeout, "gate deadline elapsed during preflight".to_owned()))
-            }
+        let metadata_control = crate::workspace::metadata::MetadataControl::new(
+            deadline,
+            cancellation.clone(),
+            self.supervisor.clone(),
+            tokio::runtime::Handle::current(),
+        );
+        let preparing = tokio::task::spawn_blocking(move || {
+            service.prepare(&prepare_request, &metadata_control)
+        });
+        // The controlled preflight owns any metadata child through the supervisor.
+        // Awaiting it here prevents detaching the blocking worker while still bounding
+        // cancellation and deadline handling at every metadata checkpoint.
+        let prepared = match preparing.await {
+            Ok(result) => result,
+            Err(error) => Err((
+                GateStatus::Unavailable,
+                format!("gate preflight failed: {error}"),
+            )),
         };
         if let Some(heartbeat) = heartbeat {
             heartbeat.abort();
@@ -144,10 +160,30 @@ impl CheckService {
         let prepared = match prepared {
             Ok(prepared) => prepared,
             Err((status, message)) => {
+                cancellation_forwarder.abort();
                 return terminal_evidence(&request, status, message, accepted_at);
             }
         };
+        if cancellation.is_cancelled() {
+            cancellation_forwarder.abort();
+            return terminal_evidence(
+                &request,
+                GateStatus::Cancelled,
+                "gate request was cancelled during preflight".to_owned(),
+                accepted_at,
+            );
+        }
+        if Instant::now() >= deadline {
+            cancellation_forwarder.abort();
+            return terminal_evidence(
+                &request,
+                GateStatus::Timeout,
+                "gate deadline elapsed during preflight".to_owned(),
+                accepted_at,
+            );
+        }
         if !prepared.identity.complete {
+            cancellation_forwarder.abort();
             return terminal_evidence(
                 &request,
                 GateStatus::Inconclusive,
@@ -188,6 +224,7 @@ impl CheckService {
                 }) {
                 Ok(job) => job,
                 Err(error) => {
+                    cancellation_forwarder.abort();
                     return terminal_evidence(
                         &request,
                         scheduler_status(&error),
@@ -199,7 +236,7 @@ impl CheckService {
         let _progress_registration =
             progress.and_then(|progress| job.progress().add_callback(progress));
         let subscription = job.subscribe(Some(cancellation));
-        match subscription.wait().await {
+        let evidence = match subscription.wait().await {
             Ok(evidence) => evidence,
             Err(error) => terminal_evidence(
                 &request,
@@ -207,17 +244,25 @@ impl CheckService {
                 error.to_string(),
                 accepted_at,
             ),
-        }
+        };
+        cancellation_forwarder.abort();
+        evidence
     }
 
     pub async fn close(&self) {
+        self.shutdown.cancel();
         self.scheduler.close().await;
         if self.owns_supervisor {
             let _ = self.supervisor.close().await;
         }
     }
 
-    fn prepare(&self, request: &GateRequest) -> Result<PreparedCheck, (GateStatus, String)> {
+    fn prepare(
+        &self,
+        request: &GateRequest,
+        control: &crate::workspace::metadata::MetadataControl,
+    ) -> Result<PreparedCheck, (GateStatus, String)> {
+        control.checkpoint().map_err(preflight_control_error)?;
         let roots = self
             .guard
             .snapshot(request.client_roots.clone())
@@ -237,14 +282,25 @@ impl CheckService {
         let workspace_root = selection.requested_root();
         let load = self
             .metadata
-            .acquire(&selection, self.cargo.clone())
-            .map_err(|error| {
-                (
-                    GateStatus::Inconclusive,
-                    format!("Cargo metadata preflight failed: {error}"),
-                )
-            })?;
+            .acquire_controlled(&selection, self.cargo.clone(), control)
+            .map_err(preflight_metadata_error)?;
+        control.checkpoint().map_err(preflight_control_error)?;
         let snapshot = Arc::clone(&load.snapshot);
+        let workspace_authority = if snapshot.workspace_root == selection.package_authority().path()
+        {
+            selection.package_authority().clone()
+        } else {
+            selection
+                .worktree_authority()
+                .authorize_dir(&snapshot.workspace_root)
+                .map_err(|error| {
+                    (
+                        GateStatus::Inconclusive,
+                        format!("workspace execution authorization failed: {error}"),
+                    )
+                })?
+        };
+        let git_authority = selection.worktree_authority().clone();
         let cache =
             select_gate_cache(&snapshot, &self.config.gate, request.mode()).map_err(|error| {
                 (
@@ -283,6 +339,7 @@ impl CheckService {
             })?;
         let mut identity = identity_for(
             &workspace_root,
+            &git_authority,
             &snapshot.manifest_path,
             &self.cargo,
             &command,
@@ -296,6 +353,7 @@ impl CheckService {
                 format!("input identity failed: {error}"),
             )
         })?;
+        control.checkpoint().map_err(preflight_control_error)?;
         let mut scope = check_scope(
             &snapshot,
             request.target,
@@ -316,6 +374,7 @@ impl CheckService {
                 .collect();
             identity = identity_for(
                 &workspace_root,
+                &git_authority,
                 &snapshot.manifest_path,
                 &self.cargo,
                 &command,
@@ -329,10 +388,14 @@ impl CheckService {
                     format!("input identity failed: {error}"),
                 )
             })?;
+            control.checkpoint().map_err(preflight_control_error)?;
             scope.evidence.changed_paths = identity.changed_paths.clone();
         }
+        control.checkpoint().map_err(preflight_control_error)?;
         Ok(PreparedCheck {
             workspace_root,
+            workspace_authority,
+            git_authority,
             snapshot,
             cache,
             targets,
@@ -358,6 +421,8 @@ impl CheckService {
 #[derive(Debug)]
 struct PreparedCheck {
     workspace_root: WorkspaceRoot,
+    workspace_authority: Arc<AuthorizedRoot>,
+    git_authority: Arc<AuthorizedRoot>,
     snapshot: Arc<crate::workspace::WorkspaceSnapshot>,
     cache: CacheSelection,
     targets: Vec<crate::gate::GateTarget>,
@@ -528,7 +593,12 @@ async fn execute_prepared(
                 usize::try_from(config.limits.process_output_bytes).unwrap_or(usize::MAX),
             );
         let result = supervisor
-            .run(cargo.clone(), target.args.clone(), options)
+            .run_authorized(
+                cargo.clone(),
+                target.args.clone(),
+                options,
+                prepared.workspace_authority.clone(),
+            )
             .await
             .map_err(|error| SchedulerError::Internal(error.to_string()))?;
         warnings.extend(result.warnings.iter().cloned());
@@ -589,6 +659,7 @@ async fn execute_prepared(
 
     let post_identity = identity_for(
         &prepared.workspace_root,
+        &prepared.git_authority,
         &prepared.snapshot.manifest_path,
         &cargo,
         &prepared.command,
@@ -678,6 +749,7 @@ async fn execute_prepared(
 
 fn identity_for(
     root: &WorkspaceRoot,
+    git_authority: &Arc<AuthorizedRoot>,
     manifest: &Path,
     cargo: &Path,
     command: &[OsString],
@@ -686,12 +758,13 @@ fn identity_for(
     limits: IdentityLimits,
 ) -> Result<InputIdentity, String> {
     let git = StdGitProbe::default();
-    compute_input_identity(
+    compute_input_identity_with_git_authority(
         &IdentityInput::new(root, manifest, cargo, command, &cache.environment, &git)
-            .with_git_cwd(root.path())
+            .with_git_cwd(git_authority.path())
             .with_external_roots(external_roots)
             .with_target_directory(&cache.target_directory)
             .with_limits(limits),
+        git_authority.clone(),
     )
     .map_err(|error| error.to_string())
 }
@@ -764,6 +837,32 @@ fn spawn_preflight_heartbeat(
             }
         })
     })
+}
+
+fn forward_cancellation(
+    request: CancellationToken,
+    shutdown: CancellationToken,
+    combined: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::select! {
+            () = request.cancelled() => combined.cancel(),
+            () = shutdown.cancelled() => combined.cancel(),
+        }
+    })
+}
+
+fn preflight_control_error(error: crate::workspace::MetadataError) -> (GateStatus, String) {
+    preflight_metadata_error(error)
+}
+
+fn preflight_metadata_error(error: crate::workspace::MetadataError) -> (GateStatus, String) {
+    let status = match &error {
+        crate::workspace::MetadataError::Cancelled => GateStatus::Cancelled,
+        crate::workspace::MetadataError::TimedOut => GateStatus::Timeout,
+        _ => GateStatus::Inconclusive,
+    };
+    (status, format!("Cargo metadata preflight failed: {error}"))
 }
 
 fn terminal_evidence(

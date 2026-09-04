@@ -72,6 +72,19 @@ impl TestProject {
         );
         Arc::new(CheckService::new(config, guard))
     }
+
+    fn service_with_cargo(&self, cargo: PathBuf) -> Arc<CheckService> {
+        let mut config = Config::defaults_at(&self.root);
+        config.gate.debounce_ms = 10;
+        config.gate.hard_timeout_ms = 60_000;
+        config.gate.cache_dir = self.state.join("cache");
+        config.gate.lease_dir = self.state.join("leases");
+        config.cargo.path = Some(cargo);
+        let guard = Arc::new(
+            RootGuard::new([self.root.clone()], std::iter::empty()).expect("create root guard"),
+        );
+        Arc::new(CheckService::new(config, guard))
+    }
 }
 
 #[tokio::test]
@@ -324,6 +337,129 @@ async fn cancellation_detaches_the_last_subscriber_and_cleans_the_job() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert_eq!(service.active_count(), 0);
+    service.close().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn preflight_cancellation_does_not_start_cargo() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let project = TestProject::new("preflight-cancel", "pub fn value() -> usize { 1 }\n", None);
+    let marker = project.state.join("cargo-started");
+    let cargo = project.state.join("fake-cargo");
+    fs::write(
+        &cargo,
+        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+    )
+    .expect("write fake cargo");
+    let mut permissions = fs::metadata(&cargo)
+        .expect("fake cargo metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&cargo, permissions).expect("make fake cargo executable");
+
+    let service = project.service_with_cargo(cargo);
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    cancellation.cancel();
+    let evidence = service
+        .run(
+            GateRequest::new(&project.root, GateTargetId::Check),
+            None,
+            Some(cancellation),
+        )
+        .await;
+
+    assert_eq!(evidence.status, GateStatus::Cancelled);
+    assert!(
+        !marker.exists(),
+        "pre-cancelled preflight must not run Cargo"
+    );
+    service.close().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn selected_child_replacement_cannot_run_the_check_target() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let project = TestProject::new(
+        "selected-child-replacement",
+        "pub fn value() -> usize { 1 }\n",
+        None,
+    );
+    let configured_parent = project
+        .root
+        .parent()
+        .expect("workspace has a configured parent")
+        .to_owned();
+    let original = configured_parent.join("workspace-original");
+    let marker = project.state.join("replacement-check-ran");
+
+    let mut config = Config::defaults_at(&project.root);
+    config.gate.debounce_ms = 10;
+    config.gate.hard_timeout_ms = 60_000;
+    config.gate.cache_dir = project.state.join("cache");
+    config.gate.lease_dir = project.state.join("leases");
+    config.gate.scope = ConfigGateScope::Workspace;
+    let guard = Arc::new(
+        RootGuard::new([configured_parent], std::iter::empty())
+            .expect("authorize configured parent"),
+    );
+    let service = Arc::new(CheckService::new(config, guard));
+
+    let swapped = Arc::new(AtomicBool::new(false));
+    let callback = {
+        let root = project.root.clone();
+        let original = original.clone();
+        let marker = marker.clone();
+        let swapped = Arc::clone(&swapped);
+        Arc::new(move |event: agz_rust_coder::gate::ProgressEvent| {
+            if event.stage != agz_rust_coder::gate::ProgressStage::Running
+                || swapped.swap(true, Ordering::SeqCst)
+            {
+                return;
+            }
+            fs::rename(&root, &original).expect("rename selected child workspace");
+            fs::create_dir_all(root.join("src")).expect("create replacement source directory");
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"check-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\nbuild = \"build.rs\"\n\n[workspace]\n",
+            )
+            .expect("write replacement manifest");
+            fs::write(
+                root.join("Cargo.lock"),
+                "version = 4\n\n[[package]]\nname = \"check-fixture\"\nversion = \"0.1.0\"\n",
+            )
+            .expect("write replacement lockfile");
+            fs::write(root.join("src/lib.rs"), "pub fn replacement() {}\n")
+                .expect("write replacement source");
+            fs::write(
+                root.join("build.rs"),
+                format!(
+                    "fn main() {{ std::fs::write({:?}, b\"replacement check ran\").unwrap(); }}\n",
+                    marker.to_string_lossy()
+                ),
+            )
+            .expect("write replacement build script");
+        }) as agz_rust_coder::gate::ProgressCallback
+    };
+
+    let evidence = service
+        .run(
+            GateRequest::new(&project.root, GateTargetId::Check),
+            Some(callback),
+            None,
+        )
+        .await;
+
+    assert!(
+        swapped.load(Ordering::SeqCst),
+        "replacement hook did not run"
+    );
+    assert_eq!(evidence.authority, GateAuthority::None, "{evidence:#?}");
+    assert!(!marker.exists(), "replacement Cargo target must not run");
+    assert!(original.join("Cargo.toml").is_file());
     service.close().await;
 }
 

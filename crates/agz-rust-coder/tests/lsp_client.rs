@@ -15,6 +15,11 @@ use serde_json::{Value, json};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(target_os = "linux")]
+use agz_rust_coder::workspace::RootGuard;
+#[cfg(target_os = "linux")]
+use std::collections::BTreeMap;
+
 static MOCK_BINARY: OnceLock<PathBuf> = OnceLock::new();
 
 fn temp_dir() -> PathBuf {
@@ -74,6 +79,69 @@ async fn spawn_client(mode: &str, log: Option<&Path>) -> Arc<LspClient> {
     LspClient::spawn(spec, Duration::from_secs(2), 64 * 1024)
         .await
         .expect("spawn mock client")
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn authorized_lsp_keeps_a_root_descriptor_alias_after_guard_exec() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = temp_dir().join(format!(
+        "agz-rust-coder-lsp-descriptor-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir(&root).expect("create LSP root");
+    let descriptor_log = root.with_extension("descriptor");
+    let wrapper = root.join("rust-analyzer-wrapper");
+    fs::write(
+        &wrapper,
+        "#!/bin/sh\nreadlink /proc/self/fd/198 > \"$1\"\nshift\nexec \"$@\"\n",
+    )
+    .expect("write LSP wrapper");
+    let mut permissions = fs::metadata(&wrapper)
+        .expect("wrapper metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&wrapper, permissions).expect("make wrapper executable");
+    let authority = RootGuard::new([root.clone()], std::iter::empty())
+        .expect("authorize LSP root")
+        .configured_roots()[0]
+        .clone();
+    let spec = CommandSpec {
+        executable: wrapper,
+        args: vec![
+            descriptor_log.as_os_str().to_owned(),
+            mock_binary().as_os_str().to_owned(),
+            "--mode".into(),
+            "echo".into(),
+        ],
+        cwd: root.clone(),
+        env: BTreeMap::new(),
+    };
+    let client =
+        LspClient::spawn_authorized(spec, Duration::from_secs(2), 64 * 1024, None, authority)
+            .await
+            .expect("spawn authorized LSP client");
+    assert_eq!(
+        client
+            .request("echo", Value::Null)
+            .await
+            .expect("echo request"),
+        json!({"ok": true})
+    );
+    assert_eq!(
+        fs::read_to_string(&descriptor_log)
+            .expect("read descriptor alias")
+            .trim(),
+        root.display().to_string()
+    );
+    client
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("shutdown descriptor client");
+    fs::remove_dir_all(root).expect("remove LSP root");
+    let _ = fs::remove_file(descriptor_log);
 }
 
 #[test]

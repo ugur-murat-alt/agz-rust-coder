@@ -68,6 +68,9 @@ pub struct WorkspaceSelection {
     package_root: PathBuf,
     manifest_path: PathBuf,
     authority: Arc<AuthorizedRoot>,
+    requested_authority: Arc<AuthorizedRoot>,
+    package_authority: Arc<AuthorizedRoot>,
+    worktree_authority: Arc<AuthorizedRoot>,
     epoch: u64,
 }
 
@@ -92,6 +95,23 @@ impl WorkspaceSelection {
         &self.authority
     }
 
+    pub fn requested_authority(&self) -> &Arc<AuthorizedRoot> {
+        &self.requested_authority
+    }
+
+    /// Exact capability captured for the package selected during workspace
+    /// discovery. Internal process owners must retain this instead of opening
+    /// the package again through the configured parent root.
+    pub(crate) fn package_authority(&self) -> &Arc<AuthorizedRoot> {
+        &self.package_authority
+    }
+
+    /// Exact capability captured for the worktree selected during workspace
+    /// discovery. It is used for Git and workspace-root descendants.
+    pub(crate) fn worktree_authority(&self) -> &Arc<AuthorizedRoot> {
+        &self.worktree_authority
+    }
+
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
@@ -99,6 +119,7 @@ impl WorkspaceSelection {
     pub fn requested_root(&self) -> WorkspaceRoot {
         WorkspaceRoot::from_parts(
             self.authority.clone(),
+            self.requested_authority.clone(),
             self.requested_dir.clone(),
             self.epoch,
         )
@@ -118,22 +139,12 @@ pub fn select_in_root(root: &WorkspaceRoot) -> Result<WorkspaceSelection, Select
     let canonical_worktree = find_worktree_boundary(root, &requested_dir)?;
 
     if let Some(package_root) = find_ancestor_manifest(root, &requested_dir, &canonical_worktree)? {
-        return Ok(make_selection(
-            root,
-            requested_dir,
-            canonical_worktree,
-            package_root,
-        ));
+        return make_selection(root, requested_dir, canonical_worktree, package_root);
     }
 
     let direct = child_manifest_candidates(root, &requested_dir)?;
     if direct.len() == 1 {
-        return Ok(make_selection(
-            root,
-            requested_dir,
-            canonical_worktree,
-            direct[0].clone(),
-        ));
+        return make_selection(root, requested_dir, canonical_worktree, direct[0].clone());
     }
     if direct.len() > 1 {
         return Err(SelectionError::Ambiguous { candidates: direct });
@@ -149,12 +160,12 @@ pub fn select_in_root(root: &WorkspaceRoot) -> Result<WorkspaceSelection, Select
     nested.sort();
     nested.dedup();
     match nested.as_slice() {
-        [package_root] => Ok(make_selection(
+        [package_root] => make_selection(
             root,
             requested_dir,
             canonical_worktree,
             package_root.clone(),
-        )),
+        ),
         [] => Err(SelectionError::ManifestNotFound {
             requested_dir,
             worktree: canonical_worktree,
@@ -168,16 +179,34 @@ fn make_selection(
     requested_dir: PathBuf,
     canonical_worktree: PathBuf,
     package_root: PathBuf,
-) -> WorkspaceSelection {
+) -> Result<WorkspaceSelection, SelectionError> {
     let manifest_path = package_root.join("Cargo.toml");
-    WorkspaceSelection {
+    let package_authority = capture_exact_authority(root, &package_root)?;
+    let worktree_authority = capture_exact_authority(root, &canonical_worktree)?;
+    Ok(WorkspaceSelection {
         requested_dir,
         canonical_worktree,
         package_root,
         manifest_path,
         authority: root.authority().clone(),
+        requested_authority: root.requested_authority().clone(),
+        package_authority,
+        worktree_authority,
         epoch: root.epoch(),
+    })
+}
+
+fn capture_exact_authority(
+    root: &WorkspaceRoot,
+    path: &Path,
+) -> Result<Arc<AuthorizedRoot>, SelectionError> {
+    if root.requested_authority().path() == path {
+        return Ok(root.requested_authority().clone());
     }
+    if root.authority().path() == path {
+        return Ok(root.authority().clone());
+    }
+    Ok(root.authority().authorize_dir(path)?)
 }
 
 fn find_worktree_boundary(

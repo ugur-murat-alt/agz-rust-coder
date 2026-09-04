@@ -4,20 +4,26 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use cargo_metadata::{Metadata, MetadataCommand};
 use sha2::{Digest, Sha256};
+use tokio::runtime::Handle;
+use tokio_util::sync::CancellationToken;
 
 use super::graph::{PackageGraph, build_package_graph};
 use super::roots::{AuthorizedRoot, RootError, RootGuard};
 use super::select::{SelectionError, WorkspaceSelection};
+use crate::process::{ProcessRunOptions, ProcessSupervisor, root_bound::RootBoundCommand};
 
 const DEFAULT_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const DEFAULT_MEMBER_DEPTH: usize = 32;
 const MAX_METADATA_INPUT_FILES: usize = 256;
 const MAX_METADATA_INPUT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_METADATA_CONFIG_DEPTH: usize = 32;
+const FLIGHT_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum MetadataCacheState {
@@ -38,7 +44,10 @@ pub enum MetadataError {
     UnexpectedExternalPath(PathBuf),
     WorkspaceRootOutside(PathBuf),
     LockedRequired,
+    Cancelled,
+    TimedOut,
     Runner(String),
+    RootBinding(String),
     RootEpochChanged { expected: u64, actual: u64 },
     Poisoned,
 }
@@ -80,7 +89,12 @@ impl fmt::Display for MetadataError {
                 path.display()
             ),
             Self::LockedRequired => formatter.write_str("metadata execution must use --locked"),
+            Self::Cancelled => formatter.write_str("cargo metadata was cancelled"),
+            Self::TimedOut => formatter.write_str("cargo metadata deadline elapsed"),
             Self::Runner(message) => write!(formatter, "cargo metadata failed: {message}"),
+            Self::RootBinding(message) => {
+                write!(formatter, "cargo metadata root binding failed: {message}")
+            }
             Self::RootEpochChanged { expected, actual } => {
                 write!(formatter, "root epoch changed from {expected} to {actual}")
             }
@@ -140,8 +154,64 @@ pub struct MetadataRun {
     pub metadata: Metadata,
 }
 
+/// Request-scoped execution limits for the internal asynchronous metadata path.
+/// The public synchronous metadata façade intentionally does not require it.
+#[derive(Debug, Clone)]
+pub struct MetadataControl {
+    deadline: Instant,
+    cancellation: CancellationToken,
+    supervisor: ProcessSupervisor,
+    runtime: Handle,
+}
+
+impl MetadataControl {
+    #[must_use]
+    pub(crate) fn new(
+        deadline: Instant,
+        cancellation: CancellationToken,
+        supervisor: ProcessSupervisor,
+        runtime: Handle,
+    ) -> Self {
+        Self {
+            deadline,
+            cancellation,
+            supervisor,
+            runtime,
+        }
+    }
+
+    pub(crate) fn checkpoint(&self) -> Result<(), MetadataError> {
+        if self.cancellation.is_cancelled() {
+            return Err(MetadataError::Cancelled);
+        }
+        if Instant::now() >= self.deadline {
+            return Err(MetadataError::TimedOut);
+        }
+        Ok(())
+    }
+}
+
 pub trait MetadataRunner: Send + Sync + 'static {
     fn run(&self, command: &MetadataCommandSpec) -> Result<MetadataRun, MetadataError>;
+
+    fn run_authorized(
+        &self,
+        command: &MetadataCommandSpec,
+        authority: Arc<AuthorizedRoot>,
+    ) -> Result<MetadataRun, MetadataError> {
+        let _ = authority;
+        self.run(command)
+    }
+
+    fn run_with_control(
+        &self,
+        command: &MetadataCommandSpec,
+        authority: Arc<AuthorizedRoot>,
+        control: &MetadataControl,
+    ) -> Result<MetadataRun, MetadataError> {
+        control.checkpoint()?;
+        self.run_authorized(command, authority)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -160,6 +230,95 @@ impl MetadataRunner for CargoMetadataRunner {
             .other_options(vec!["--locked".to_owned()]);
         metadata
             .exec()
+            .map(|metadata| MetadataRun { metadata })
+            .map_err(|error| MetadataError::Runner(error.to_string()))
+    }
+
+    fn run_authorized(
+        &self,
+        command: &MetadataCommandSpec,
+        authority: Arc<AuthorizedRoot>,
+    ) -> Result<MetadataRun, MetadataError> {
+        if !command.locked || !command.args.iter().any(|arg| arg == OsStr::new("--locked")) {
+            return Err(MetadataError::LockedRequired);
+        }
+        let mut args = command.args.clone();
+        if let Some(index) = args.iter().position(|arg| arg == "--manifest-path")
+            && let Some(path) = args.get_mut(index.saturating_add(1))
+        {
+            *path = OsString::from("Cargo.toml");
+        }
+        let bound = RootBoundCommand::new(
+            &authority,
+            &command.current_dir,
+            &command.cargo,
+            &args,
+            &std::env::vars_os().collect(),
+        )
+        .map_err(|error| MetadataError::RootBinding(error.to_string()))?;
+        let output = Command::new(bound.executable)
+            .args(bound.args)
+            .env_clear()
+            .envs(bound.environment)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|error| MetadataError::RootBinding(error.to_string()))?;
+        // Keep the exact directory handle live through child completion. This
+        // is the Windows replacement barrier; Unix uses the verified cwd.
+        drop(authority);
+        if !output.status.success() {
+            return Err(MetadataError::Runner(
+                String::from_utf8_lossy(&output.stderr).into(),
+            ));
+        }
+        serde_json::from_slice(&output.stdout)
+            .map(|metadata| MetadataRun { metadata })
+            .map_err(|error| MetadataError::Runner(error.to_string()))
+    }
+
+    fn run_with_control(
+        &self,
+        command: &MetadataCommandSpec,
+        authority: Arc<AuthorizedRoot>,
+        control: &MetadataControl,
+    ) -> Result<MetadataRun, MetadataError> {
+        if !command.locked || !command.args.iter().any(|arg| arg == OsStr::new("--locked")) {
+            return Err(MetadataError::LockedRequired);
+        }
+        control.checkpoint()?;
+        let environment = std::env::vars_os().collect::<BTreeMap<_, _>>();
+        let result = control
+            .runtime
+            .block_on(
+                control.supervisor.run_authorized(
+                    command.cargo.clone(),
+                    command.args.clone(),
+                    ProcessRunOptions::new(command.current_dir.clone())
+                        .with_deadline(control.deadline)
+                        .with_cancellation(control.cancellation.clone())
+                        .with_environment(environment),
+                    authority,
+                ),
+            )
+            .map_err(|error| MetadataError::Runner(error.to_string()))?;
+        if result.cancelled {
+            return Err(MetadataError::Cancelled);
+        }
+        if result.timed_out {
+            return Err(MetadataError::TimedOut);
+        }
+        if !result.drain_complete || !result.cleanup_complete {
+            return Err(MetadataError::Runner(
+                "cargo metadata cleanup did not complete".to_owned(),
+            ));
+        }
+        control.checkpoint()?;
+        if result.exit_code != 0 {
+            return Err(MetadataError::Runner(result.stderr));
+        }
+        serde_json::from_str(&result.stdout)
             .map(|metadata| MetadataRun { metadata })
             .map_err(|error| MetadataError::Runner(error.to_string()))
     }
@@ -272,25 +431,38 @@ impl<R: MetadataRunner> MetadataService<R> {
         &self,
         selection: &WorkspaceSelection,
     ) -> Result<DependencyClosure, MetadataError> {
+        self.preflight_inner(selection, None)
+    }
+
+    fn preflight_inner(
+        &self,
+        selection: &WorkspaceSelection,
+        control: Option<&MetadataControl>,
+    ) -> Result<DependencyClosure, MetadataError> {
+        checkpoint(control)?;
         self.check_epoch(selection.epoch())?;
         let mut closure = DependencyClosure::new();
         let mut queue = VecDeque::new();
-        let package_root =
-            canonical_manifest_directory(selection.authority(), selection.package_root())?;
+        // The package was opened while selecting the workspace. Do not reopen
+        // its lexical path through the configured parent after that boundary.
+        let package_root = selection.package_authority().path().to_owned();
         queue.push_back(package_root);
         let mut visited = BTreeSet::new();
 
         while let Some(manifest_dir) = queue.pop_front() {
+            checkpoint(control)?;
             if !visited.insert(manifest_dir.clone()) {
                 continue;
             }
             let manifest = self.open_manifest(selection, &manifest_dir)?;
+            checkpoint(control)?;
             let manifest_path = manifest_dir.join("Cargo.toml");
             closure.manifests.push(manifest_path);
             closure.package_roots.push(manifest_dir.clone());
 
             let value = parse_manifest(&manifest_dir.join("Cargo.toml"), &manifest)?;
             for candidate in collect_path_values(&value) {
+                checkpoint(control)?;
                 let candidate =
                     resolve_manifest_path(&manifest_dir, &candidate).ok_or_else(|| {
                         MetadataError::PathDependencyMissing(manifest_dir.join(&candidate))
@@ -298,7 +470,9 @@ impl<R: MetadataRunner> MetadataService<R> {
                 self.enqueue_manifest(selection, &mut closure, &mut queue, candidate)?;
             }
             for member in collect_workspace_members(&value) {
+                checkpoint(control)?;
                 for candidate in expand_workspace_member(selection, &manifest_dir, &member)? {
+                    checkpoint(control)?;
                     self.enqueue_manifest(selection, &mut closure, &mut queue, candidate)?;
                 }
             }
@@ -347,17 +521,39 @@ impl<R: MetadataRunner> MetadataService<R> {
         selection: &WorkspaceSelection,
         cargo: impl Into<PathBuf>,
     ) -> Result<MetadataLoad, MetadataError> {
+        self.acquire_inner(selection, cargo.into(), None, false)
+    }
+
+    pub(crate) fn acquire_controlled(
+        &self,
+        selection: &WorkspaceSelection,
+        cargo: impl Into<PathBuf>,
+        control: &MetadataControl,
+    ) -> Result<MetadataLoad, MetadataError> {
+        self.acquire_inner(selection, cargo.into(), Some(control), true)
+    }
+
+    fn acquire_inner(
+        &self,
+        selection: &WorkspaceSelection,
+        cargo: PathBuf,
+        control: Option<&MetadataControl>,
+        authorized_execution: bool,
+    ) -> Result<MetadataLoad, MetadataError> {
+        checkpoint(control)?;
         self.check_epoch(selection.epoch())?;
         let generation = self.generation(selection.package_root())?;
-        let cargo = cargo.into();
-        let closure = self.preflight(selection)?;
-        let Some(graph_fingerprint) = self.cache_fingerprint(selection, &closure) else {
+        let closure = self.preflight_inner(selection, control)?;
+        let Some(graph_fingerprint) = self.cache_fingerprint_inner(selection, &closure, control)?
+        else {
             let snapshot = self.load_uncached(
                 selection,
                 cargo,
                 generation,
                 closure,
                 MetadataCacheState::Bypass,
+                control,
+                authorized_execution,
             )?;
             return Ok(MetadataLoad {
                 snapshot,
@@ -371,45 +567,66 @@ impl<R: MetadataRunner> MetadataService<R> {
             graph_fingerprint,
         };
 
-        let (flight, owner) = {
-            let mut state = self.state.lock().map_err(|_| MetadataError::Poisoned)?;
-            if let Some(snapshot) = state.cache.get(&key) {
-                return Ok(MetadataLoad {
-                    snapshot: snapshot.clone(),
-                    cache: MetadataCacheState::Hit,
-                });
+        let (flight, _) = loop {
+            checkpoint(control)?;
+            let (flight, owner) = {
+                let mut state = self.state.lock().map_err(|_| MetadataError::Poisoned)?;
+                if let Some(snapshot) = state.cache.get(&key) {
+                    return Ok(MetadataLoad {
+                        snapshot: snapshot.clone(),
+                        cache: MetadataCacheState::Hit,
+                    });
+                }
+                if let Some(flight) = state.active.get(&key) {
+                    (flight.clone(), false)
+                } else {
+                    let flight = Arc::new(Flight::new());
+                    state.active.insert(key.clone(), flight.clone());
+                    (flight, true)
+                }
+            };
+            if owner {
+                break (flight, true);
             }
-            if let Some(flight) = state.active.get(&key) {
-                (flight.clone(), false)
-            } else {
-                let flight = Arc::new(Flight::new());
-                state.active.insert(key.clone(), flight.clone());
-                (flight, true)
+
+            match wait_for_flight(&flight, control)? {
+                // Cancellation and deadline are request-local outcomes. The
+                // completed owner flight has already been removed from
+                // `active`, so a healthy follower may claim a fresh flight.
+                Err(MetadataError::Cancelled | MetadataError::TimedOut) => continue,
+                result => {
+                    return result.map(|snapshot| MetadataLoad {
+                        snapshot,
+                        cache: MetadataCacheState::Hit,
+                    });
+                }
             }
         };
 
-        if !owner {
-            let result = wait_for_flight(&flight)?;
-            return result.map(|snapshot| MetadataLoad {
-                snapshot,
-                cache: MetadataCacheState::Hit,
-            });
-        }
-
-        let result = self.load_uncached(
+        let mut result = self.load_uncached(
             selection,
             cargo,
             generation,
             closure,
             MetadataCacheState::Miss,
+            control,
+            authorized_execution,
         );
+        if result.is_ok() {
+            if let Err(error) = checkpoint(control) {
+                result = Err(error);
+            }
+        }
+        let mut state = self.state.lock().map_err(|_| MetadataError::Poisoned)?;
+        state.active.remove(&key);
+        // Remove the completed flight before wake-up. Otherwise a healthy
+        // follower can observe the request-local terminal result repeatedly
+        // while `active` still points at this flight.
         {
             let mut slot = flight.result.lock().map_err(|_| MetadataError::Poisoned)?;
             *slot = Some(result.clone());
             flight.ready.notify_all();
         }
-        let mut state = self.state.lock().map_err(|_| MetadataError::Poisoned)?;
-        state.active.remove(&key);
         match result {
             Ok(snapshot) => {
                 if state
@@ -476,14 +693,27 @@ impl<R: MetadataRunner> MetadataService<R> {
         generation: u64,
         closure: DependencyClosure,
         metadata_cache: MetadataCacheState,
+        control: Option<&MetadataControl>,
+        authorized_execution: bool,
     ) -> Result<Arc<WorkspaceSnapshot>, MetadataError> {
+        checkpoint(control)?;
         let command = MetadataCommandSpec::for_selection(selection, cargo);
         if !command.locked {
             return Err(MetadataError::LockedRequired);
         }
-        let run = self.runner.run(&command)?;
+        let run = if let Some(control) = control {
+            let authority = selection.package_authority().clone();
+            self.runner.run_with_control(&command, authority, control)?
+        } else if authorized_execution {
+            let authority = selection.package_authority().clone();
+            self.runner.run_authorized(&command, authority)?
+        } else {
+            self.runner.run(&command)?
+        };
+        checkpoint(control)?;
         self.check_epoch(selection.epoch())?;
         let metadata = validate_metadata(&run.metadata, selection, &closure, &self.guard)?;
+        checkpoint(control)?;
         let workspace_root = canonical_metadata_workspace_root(&run.metadata, selection)?;
         let target_directory = PathBuf::from(run.metadata.target_directory.as_std_path());
         let external_paths = metadata
@@ -506,6 +736,7 @@ impl<R: MetadataRunner> MetadataService<R> {
                 })
             })
             .collect::<Vec<_>>();
+        checkpoint(control)?;
         let snapshot = WorkspaceSnapshot {
             requested_dir: selection.requested_dir().to_owned(),
             canonical_worktree: selection.canonical_worktree().to_owned(),
@@ -521,22 +752,26 @@ impl<R: MetadataRunner> MetadataService<R> {
             dependency_closure: closure,
             metadata_cache,
         };
+        checkpoint(control)?;
         Ok(Arc::new(snapshot))
     }
 
-    fn cache_fingerprint(
+    fn cache_fingerprint_inner(
         &self,
         selection: &WorkspaceSelection,
         closure: &DependencyClosure,
-    ) -> Option<[u8; 32]> {
+        control: Option<&MetadataControl>,
+    ) -> Result<Option<[u8; 32]>, MetadataError> {
+        checkpoint(control)?;
         let mut inputs = BTreeMap::new();
         if closure.manifests.len() > MAX_METADATA_INPUT_FILES {
-            return None;
+            return Ok(None);
         }
         for manifest in &closure.manifests {
+            checkpoint(control)?;
             let bytes = match self.read_cache_input(selection, manifest) {
                 Ok(Some(bytes)) => bytes,
-                Ok(None) | Err(_) => return None,
+                Ok(None) | Err(_) => return Ok(None),
             };
             inputs.insert(manifest.clone(), Some(bytes));
         }
@@ -545,14 +780,15 @@ impl<R: MetadataRunner> MetadataService<R> {
         let mut workspace_root = None;
         let mut reached_authority = false;
         for _ in 0..=MAX_METADATA_CONFIG_DEPTH {
+            checkpoint(control)?;
             if !selection.authority().contains(&current) {
-                return None;
+                return Ok(None);
             }
             let manifest_path = current.join("Cargo.toml");
             if !inputs.contains_key(&manifest_path) {
                 let bytes = match self.read_cache_input(selection, &manifest_path) {
                     Ok(bytes) => bytes,
-                    Err(_) => return None,
+                    Err(_) => return Ok(None),
                 };
                 inputs.insert(manifest_path.clone(), bytes);
             }
@@ -560,7 +796,7 @@ impl<R: MetadataRunner> MetadataService<R> {
                 && let Some(Some(bytes)) = inputs.get(&manifest_path)
             {
                 let Ok(value) = parse_manifest(&manifest_path, bytes) else {
-                    return None;
+                    return Ok(None);
                 };
                 if value
                     .get("workspace")
@@ -576,9 +812,10 @@ impl<R: MetadataRunner> MetadataService<R> {
                 current.join(".cargo/config.toml"),
             ] {
                 if let Entry::Vacant(entry) = inputs.entry(config.clone()) {
+                    checkpoint(control)?;
                     let bytes = match self.read_cache_input(selection, &config) {
                         Ok(bytes) => bytes,
-                        Err(_) => return None,
+                        Err(_) => return Ok(None),
                     };
                     entry.insert(bytes);
                 }
@@ -599,7 +836,7 @@ impl<R: MetadataRunner> MetadataService<R> {
             current = parent.to_owned();
         }
         if !reached_authority {
-            return None;
+            return Ok(None);
         }
 
         let lock_root = workspace_root.unwrap_or_else(|| selection.package_root().to_owned());
@@ -607,26 +844,32 @@ impl<R: MetadataRunner> MetadataService<R> {
         if let Entry::Vacant(entry) = inputs.entry(lock_path.clone()) {
             let bytes = match self.read_cache_input(selection, &lock_path) {
                 Ok(bytes) => bytes,
-                Err(_) => return None,
+                Err(_) => return Ok(None),
             };
             entry.insert(bytes);
         }
         if inputs.len() > MAX_METADATA_INPUT_FILES {
-            return None;
+            return Ok(None);
         }
 
         let mut hasher = Sha256::new();
         hasher.update(b"agz-rust-coder-metadata-graph-v1");
         let mut total_bytes = 0u64;
         for (path, bytes) in inputs {
+            checkpoint(control)?;
             hasher.update(b"path");
             hash_metadata_path(&mut hasher, &path);
             match bytes {
                 Some(bytes) => {
-                    let length = u64::try_from(bytes.len()).ok()?;
-                    total_bytes = total_bytes.checked_add(length)?;
+                    let Some(length) = u64::try_from(bytes.len()).ok() else {
+                        return Ok(None);
+                    };
+                    let Some(next_total) = total_bytes.checked_add(length) else {
+                        return Ok(None);
+                    };
+                    total_bytes = next_total;
                     if total_bytes > MAX_METADATA_INPUT_BYTES {
-                        return None;
+                        return Ok(None);
                     }
                     hasher.update(b"present");
                     hasher.update(length.to_le_bytes());
@@ -637,7 +880,7 @@ impl<R: MetadataRunner> MetadataService<R> {
                 }
             }
         }
-        Some(hasher.finalize().into())
+        Ok(Some(hasher.finalize().into()))
     }
 
     fn read_cache_input(
@@ -680,9 +923,12 @@ impl<R: MetadataRunner> MetadataService<R> {
         selection: &WorkspaceSelection,
         directory: &Path,
     ) -> Result<Arc<AuthorizedRoot>, MetadataError> {
-        if selection.authority().contains(directory) {
+        if directory == selection.package_authority().path() {
+            return Ok(selection.package_authority().clone());
+        }
+        if selection.worktree_authority().contains(directory) {
             return selection
-                .authority()
+                .worktree_authority()
                 .authorize_dir(directory)
                 .map_err(MetadataError::from);
         }
@@ -699,15 +945,33 @@ impl<R: MetadataRunner> MetadataService<R> {
     }
 }
 
+fn checkpoint(control: Option<&MetadataControl>) -> Result<(), MetadataError> {
+    control.map_or(Ok(()), MetadataControl::checkpoint)
+}
+
 fn wait_for_flight(
     flight: &Flight,
+    control: Option<&MetadataControl>,
 ) -> Result<Result<Arc<WorkspaceSnapshot>, MetadataError>, MetadataError> {
     let mut result = flight.result.lock().map_err(|_| MetadataError::Poisoned)?;
     while result.is_none() {
-        result = flight
+        checkpoint(control)?;
+        let Some(control) = control else {
+            result = flight
+                .ready
+                .wait(result)
+                .map_err(|_| MetadataError::Poisoned)?;
+            continue;
+        };
+        let remaining = control.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(MetadataError::TimedOut);
+        }
+        let (next, _) = flight
             .ready
-            .wait(result)
+            .wait_timeout(result, remaining.min(FLIGHT_WAIT_POLL_INTERVAL))
             .map_err(|_| MetadataError::Poisoned)?;
+        result = next;
     }
     result.clone().ok_or(MetadataError::Poisoned)
 }
@@ -932,23 +1196,20 @@ fn hash_metadata_path(hasher: &mut Sha256, path: &Path) {
     hasher.update(path.as_bytes());
 }
 
-fn canonical_manifest_directory(
-    root: &AuthorizedRoot,
-    path: &Path,
-) -> Result<PathBuf, MetadataError> {
-    let directory = root.authorize_dir(path)?;
-    Ok(directory.path().to_owned())
-}
-
 fn canonical_metadata_workspace_root(
     metadata: &Metadata,
     selection: &WorkspaceSelection,
 ) -> Result<PathBuf, MetadataError> {
     let workspace_root = PathBuf::from(metadata.workspace_root.as_std_path());
-    if !selection.authority().contains(&workspace_root) {
+    if workspace_root == selection.package_authority().path() {
+        return Ok(selection.package_authority().path().to_owned());
+    }
+    if !selection.worktree_authority().contains(&workspace_root) {
         return Err(MetadataError::WorkspaceRootOutside(workspace_root));
     }
-    let root = selection.authority().authorize_dir(&workspace_root)?;
+    let root = selection
+        .worktree_authority()
+        .authorize_dir(&workspace_root)?;
     Ok(root.path().to_owned())
 }
 
@@ -1006,4 +1267,331 @@ fn validate_metadata(
         .packages
         .sort_by(|left, right| left.id.repr.cmp(&right.id.repr));
     Ok(validated)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use cargo_metadata::MetadataCommand;
+
+    use super::*;
+    use crate::workspace::{ClientRoots, WorkspaceSelection, select_workspace};
+
+    #[derive(Debug)]
+    struct TestWorkspace(PathBuf);
+
+    impl TestWorkspace {
+        fn new(label: &str) -> Self {
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "agz-rust-coder-metadata-control-{label}-{}-{stamp}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(root.join("src")).expect("create workspace");
+            std::fs::write(root.join(".git"), "fixture worktree marker").expect("write marker");
+            std::fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"metadata-control-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+            )
+            .expect("write manifest");
+            std::fs::write(
+                root.join("Cargo.lock"),
+                "version = 4\n\n[[package]]\nname = \"metadata-control-fixture\"\nversion = \"0.1.0\"\n",
+            )
+            .expect("write lockfile");
+            std::fs::write(root.join("src/lib.rs"), "pub fn value() {}\n").expect("write source");
+            Self(root)
+        }
+    }
+
+    impl Drop for TestWorkspace {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct LateSuccessRunner {
+        metadata: MetadataRun,
+        calls: Arc<AtomicUsize>,
+        started: Arc<AtomicBool>,
+        release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl MetadataRunner for LateSuccessRunner {
+        fn run(&self, _command: &MetadataCommandSpec) -> Result<MetadataRun, MetadataError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.metadata.clone())
+        }
+
+        fn run_with_control(
+            &self,
+            _command: &MetadataCommandSpec,
+            _authority: Arc<AuthorizedRoot>,
+            _control: &MetadataControl,
+        ) -> Result<MetadataRun, MetadataError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.started.store(true, Ordering::Release);
+            let (released, ready) = &*self.release;
+            let mut released = released.lock().expect("release lock");
+            while !*released {
+                released = ready.wait(released).expect("release wait");
+            }
+            Ok(self.metadata.clone())
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct DeadlineSuccessRunner {
+        metadata: MetadataRun,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl MetadataRunner for DeadlineSuccessRunner {
+        fn run(&self, _command: &MetadataCommandSpec) -> Result<MetadataRun, MetadataError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.metadata.clone())
+        }
+
+        fn run_with_control(
+            &self,
+            _command: &MetadataCommandSpec,
+            _authority: Arc<AuthorizedRoot>,
+            control: &MetadataControl,
+        ) -> Result<MetadataRun, MetadataError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let lock = Mutex::new(());
+            let guard = lock.lock().expect("deadline lock");
+            let _ = Condvar::new()
+                .wait_timeout(
+                    guard,
+                    control.deadline.saturating_duration_since(Instant::now()),
+                )
+                .expect("deadline wait");
+            Ok(self.metadata.clone())
+        }
+    }
+
+    fn fixture() -> (
+        TestWorkspace,
+        Arc<RootGuard>,
+        WorkspaceSelection,
+        MetadataRun,
+    ) {
+        let workspace = TestWorkspace::new("late-cache");
+        let guard = Arc::new(
+            RootGuard::new([workspace.0.clone()], std::iter::empty()).expect("root guard"),
+        );
+        let snapshot = guard
+            .snapshot(ClientRoots::unsupported())
+            .expect("root snapshot");
+        let selection = select_workspace(&snapshot, Some(&workspace.0)).expect("selection");
+        let metadata = MetadataCommand::new()
+            .manifest_path(workspace.0.join("Cargo.toml"))
+            .exec()
+            .expect("fixture metadata");
+        (workspace, guard, selection, MetadataRun { metadata })
+    }
+
+    fn control(deadline: Instant, cancellation: CancellationToken) -> MetadataControl {
+        MetadataControl::new(
+            deadline,
+            cancellation,
+            ProcessSupervisor::without_journal(),
+            Handle::current(),
+        )
+    }
+
+    #[tokio::test]
+    async fn cancelled_owner_late_success_is_not_published_to_cache() {
+        let (_workspace, guard, selection, metadata) = fixture();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(AtomicBool::new(false));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let service = Arc::new(MetadataService::with_runner(
+            guard,
+            LateSuccessRunner {
+                metadata,
+                calls: Arc::clone(&calls),
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            },
+        ));
+        let cancellation = CancellationToken::new();
+        let owner = {
+            let service = Arc::clone(&service);
+            let selection = selection.clone();
+            let control = control(
+                Instant::now() + Duration::from_secs(2),
+                cancellation.clone(),
+            );
+            tokio::task::spawn_blocking(move || {
+                service.acquire_controlled(&selection, "cargo", &control)
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !started.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owner reached runner");
+        cancellation.cancel();
+        let (released, ready) = &*release;
+        *released.lock().expect("release lock") = true;
+        ready.notify_all();
+
+        assert!(matches!(
+            owner.await.expect("owner join"),
+            Err(MetadataError::Cancelled)
+        ));
+        assert!(
+            service
+                .state
+                .lock()
+                .expect("metadata state")
+                .cache
+                .is_empty()
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "late result was not cached"
+        );
+    }
+
+    #[tokio::test]
+    async fn healthy_follower_retries_after_owner_local_cancellation() {
+        let (_workspace, guard, selection, metadata) = fixture();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(AtomicBool::new(false));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let service = Arc::new(MetadataService::with_runner(
+            guard,
+            LateSuccessRunner {
+                metadata,
+                calls: Arc::clone(&calls),
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            },
+        ));
+        let owner_cancellation = CancellationToken::new();
+        let owner = {
+            let service = Arc::clone(&service);
+            let selection = selection.clone();
+            let control = control(
+                Instant::now() + Duration::from_secs(2),
+                owner_cancellation.clone(),
+            );
+            tokio::task::spawn_blocking(move || {
+                service.acquire_controlled(&selection, "cargo", &control)
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !started.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owner reached runner");
+        let follower = {
+            let service = Arc::clone(&service);
+            let selection = selection.clone();
+            let control = control(
+                Instant::now() + Duration::from_secs(2),
+                CancellationToken::new(),
+            );
+            tokio::task::spawn_blocking(move || {
+                service.acquire_controlled(&selection, "cargo", &control)
+            })
+        };
+
+        owner_cancellation.cancel();
+        let (released, ready) = &*release;
+        *released.lock().expect("release lock") = true;
+        ready.notify_all();
+
+        assert!(matches!(
+            owner.await.expect("owner join"),
+            Err(MetadataError::Cancelled)
+        ));
+        assert!(
+            follower
+                .await
+                .expect("follower join")
+                .expect("healthy follower refreshes metadata")
+                .snapshot
+                .metadata
+                .packages
+                .iter()
+                .any(|package| package.name == "metadata-control-fixture")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            service.state.lock().expect("metadata state").cache.len(),
+            1,
+            "only the request-independent success is cached"
+        );
+    }
+
+    #[tokio::test]
+    async fn timed_out_owner_late_success_is_not_published_to_cache() {
+        let (_workspace, guard, selection, metadata) = fixture();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let service = MetadataService::with_runner(
+            guard,
+            DeadlineSuccessRunner {
+                metadata,
+                calls: Arc::clone(&calls),
+            },
+        );
+        let control = control(
+            Instant::now() + Duration::from_millis(20),
+            CancellationToken::new(),
+        );
+
+        assert!(matches!(
+            service.acquire_controlled(&selection, "cargo", &control),
+            Err(MetadataError::TimedOut)
+        ));
+        assert!(
+            service
+                .state
+                .lock()
+                .expect("metadata state")
+                .cache
+                .is_empty()
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "late result was not cached"
+        );
+    }
+
+    #[tokio::test]
+    async fn singleflight_follower_honors_its_cancellation_and_deadline() {
+        let flight = Flight::new();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let cancelled = control(Instant::now() + Duration::from_secs(1), cancellation);
+        assert!(matches!(
+            wait_for_flight(&flight, Some(&cancelled)),
+            Err(MetadataError::Cancelled)
+        ));
+
+        let timed_out = control(Instant::now(), CancellationToken::new());
+        assert!(matches!(
+            wait_for_flight(&flight, Some(&timed_out)),
+            Err(MetadataError::TimedOut)
+        ));
+    }
 }

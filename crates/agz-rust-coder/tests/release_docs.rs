@@ -42,7 +42,8 @@ fn bilingual_public_contract_is_in_sync() {
 
 #[test]
 fn drift_validator_rejects_version_config_tool_and_link_changes() {
-    let wrong_version = TURKISH.replacen("`0.1.0`", "`9.9.9`", 1);
+    let current_version = format!("`{}`", env!("CARGO_PKG_VERSION"));
+    let wrong_version = TURKISH.replacen(&current_version, "`9.9.9`", 1);
     assert!(assert_contract(ENGLISH, &wrong_version).is_err());
 
     let wrong_config = TURKISH.replacen("`49152`", "`49151`", 1);

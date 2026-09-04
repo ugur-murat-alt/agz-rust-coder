@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agz-rust-coder"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "cap-std",
@@ -12,6 +12,7 @@ dependencies = [
  "cargo-platform",
  "cargo_metadata",
  "clap",
+ "command-fds",
  "directories",
  "fs4",
  "futures",
@@ -369,6 +370,16 @@ checksum = "cfc320937d09e6de266b31b9afb480f197d7a861be86be7cb2ea7e5d1bfffc5e"
 dependencies = [
  "bytes",
  "memchr",
+]
+
+[[package]]
+name = "command-fds"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f849b92c694fe237ecd8fafd1ba0df7ae0d45c1df6daeb7f68ed4220d51640bd"
+dependencies = [
+ "nix",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

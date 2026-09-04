@@ -302,3 +302,78 @@ fn metadata_cache_key_tracks_manifest_lock_and_local_config_changes() {
     assert_eq!(dependency_changed.cache, MetadataCacheState::Miss);
     assert_eq!(calls.load(Ordering::SeqCst), 5);
 }
+
+#[cfg(unix)]
+#[test]
+fn cargo_metadata_rejects_a_selected_child_replacement_before_cargo_runs() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sandbox = TestDir::new("root-replacement-runner");
+    let root = sandbox.path().join("workspace");
+    fs::create_dir(&root).expect("create original workspace root");
+    fs::write(
+        root.join("Cargo.toml"),
+        b"[package]\nname = \"original\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("write original manifest");
+
+    let marker = sandbox.path().join("replacement-cargo-ran");
+    let cargo = sandbox.path().join("fake-cargo");
+    fs::write(
+        &cargo,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nprintf '%s' '{{}}'\n",
+            marker.display(),
+        ),
+    )
+    .expect("write fake cargo executable");
+    let mut permissions = fs::metadata(&cargo)
+        .expect("fake cargo metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&cargo, permissions).expect("make fake cargo executable");
+
+    let guard = RootGuard::new([sandbox.path().to_owned()], std::iter::empty())
+        .expect("authorize configured parent");
+    let snapshot = guard
+        .snapshot(ClientRoots::unsupported())
+        .expect("snapshot configured parent");
+    let authority = snapshot
+        .select(Some(&root))
+        .expect("select child workspace")
+        .requested_authority()
+        .clone();
+    let original = sandbox.path().join("workspace-original");
+    fs::rename(&root, &original).expect("rename authorized root");
+    fs::create_dir(&root).expect("create replacement workspace root");
+    fs::write(
+        root.join("Cargo.toml"),
+        b"[package]\nname = \"replacement\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("write replacement manifest");
+
+    let manifest = root.join("Cargo.toml");
+    let command = MetadataCommandSpec {
+        cargo,
+        manifest_path: manifest.clone(),
+        current_dir: root,
+        args: vec![
+            "metadata".into(),
+            "--format-version".into(),
+            "1".into(),
+            "--manifest-path".into(),
+            manifest.into_os_string(),
+            "--locked".into(),
+        ],
+        locked: true,
+    };
+
+    let result = CargoMetadataRunner.run_authorized(&command, authority);
+
+    assert!(
+        result.is_err(),
+        "replacement root must fail before metadata runs: {result:?}"
+    );
+    assert!(!marker.exists(), "replacement cargo must not run");
+    assert!(original.join("Cargo.toml").is_file());
+}

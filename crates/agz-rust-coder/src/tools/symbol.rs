@@ -5,6 +5,7 @@ use std::{
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
+    sync::Arc,
     time::Duration,
 };
 
@@ -18,7 +19,7 @@ use crate::{
         ClientRef, LspClientLike, LspError, ManagerError, Position, Range, RustAnalyzerManager,
         incremental_change, normalize, value_range,
     },
-    workspace::{ClientRoots, RootError, RootGuard, parse_file_uri},
+    workspace::{AuthorizedRoot, ClientRoots, RootError, RootGuard, parse_file_uri},
 };
 
 const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
@@ -37,6 +38,16 @@ tokio::task_local! {
     static LSP_CANCELLATION: CancellationToken;
 }
 
+tokio::task_local! {
+    static LSP_CONTEXT: LspContext;
+}
+
+#[derive(Debug, Clone)]
+struct LspContext {
+    authority: Arc<AuthorizedRoot>,
+    protocol_root: PathBuf,
+}
+
 pub async fn with_lsp_cancellation<F>(cancellation: CancellationToken, future: F) -> F::Output
 where
     F: Future,
@@ -46,6 +57,46 @@ where
 
 pub(crate) fn current_lsp_cancellation() -> Option<CancellationToken> {
     LSP_CANCELLATION.try_with(Clone::clone).ok()
+}
+
+/// Scopes the already authorized workspace capability over semantic work so
+/// the manager and document reader cannot reinterpret its lexical path.
+pub async fn with_lsp_authority<F>(authority: Arc<AuthorizedRoot>, future: F) -> F::Output
+where
+    F: Future,
+{
+    let protocol_root = authority.path().to_owned();
+    with_lsp_context(authority, protocol_root, future).await
+}
+
+#[allow(dead_code)] // Retained for crate-local callers that only need capability access.
+pub(crate) fn current_lsp_authority() -> Option<Arc<AuthorizedRoot>> {
+    current_lsp_context().map(|context| context.authority)
+}
+
+fn current_lsp_context() -> Option<LspContext> {
+    LSP_CONTEXT.try_with(Clone::clone).ok()
+}
+
+/// Retains one exact root capability and the matching protocol alias until the
+/// complete semantic response has been interpreted.
+async fn with_lsp_context<F>(
+    authority: Arc<AuthorizedRoot>,
+    protocol_root: PathBuf,
+    future: F,
+) -> F::Output
+where
+    F: Future,
+{
+    LSP_CONTEXT
+        .scope(
+            LspContext {
+                authority,
+                protocol_root,
+            },
+            future,
+        )
+        .await
 }
 
 /// Errors returned by the semantic helpers before MCP response conversion.
@@ -170,6 +221,14 @@ pub async fn current_document_version(client: &dyn LspClientLike, uri: &str) -> 
 /// Resolve an existing workspace file to a slash-separated workspace-relative
 /// path. Symlink components and escapes are rejected by the capability root.
 pub fn resolve_asset_path(root: &Path, raw_path: impl AsRef<Path>) -> Option<PathBuf> {
+    if let Some(context) = current_lsp_context() {
+        let relative = lsp_relative_path(&context, raw_path.as_ref())?;
+        return context
+            .authority
+            .open_file(&relative, u64::MAX)
+            .ok()
+            .map(|file| file.relative_path().to_owned());
+    }
     let root = canonical_root(root).ok()?;
     let guard = RootGuard::new([root], std::iter::empty()).ok()?;
     let snapshot = guard.snapshot(ClientRoots::unsupported()).ok()?;
@@ -190,6 +249,18 @@ pub fn read_workspace_file_with_hook<F>(
 where
     F: FnOnce(),
 {
+    if let Some(context) = current_lsp_context() {
+        let relative = lsp_relative_path(&context, path)
+            .ok_or_else(|| ToolError::Boundary("path is outside the workspace".to_owned()))?;
+        let (_, _, bytes) = documents::read_authorized_file_with_hook(
+            &context.authority,
+            &relative,
+            MAX_FILE_BYTES,
+            after_open,
+        )
+        .map_err(|error| ToolError::Boundary(error.to_string()))?;
+        return String::from_utf8(bytes).map_err(|error| ToolError::InvalidUtf8(error.to_string()));
+    }
     let root = canonical_root(root).map_err(ToolError::Boundary)?;
     let guard = RootGuard::new([root], std::iter::empty())?;
     let snapshot = guard.snapshot(ClientRoots::unsupported())?;
@@ -294,13 +365,50 @@ where
         + 'static,
     T: Send,
 {
-    let root = canonical_root(root).map_err(ToolError::Boundary)?;
-    let relative = resolve_asset_path(&root, relative_path)
-        .ok_or_else(|| ToolError::Boundary("path is outside the workspace".to_owned()))?;
-    let file = root.join(&relative);
-    let text = read_workspace_file(&root, &file)
-        .ok_or_else(|| ToolError::Boundary("workspace file is unreadable".to_owned()))?;
-    let uri = normalize::path_to_file_uri(&file)
+    let (context, has_authorized_context) = match current_lsp_context() {
+        Some(context) => {
+            let exact = context
+                .authority
+                .authorize_dir(root)
+                .map_err(|error| ToolError::Boundary(error.to_string()))?;
+            let protocol_root = manager.protocol_root_for(exact.path());
+            (
+                LspContext {
+                    authority: exact,
+                    protocol_root,
+                },
+                true,
+            )
+        }
+        None => {
+            let root = canonical_root(root).map_err(ToolError::Boundary)?;
+            let guard = RootGuard::new([root], std::iter::empty())?;
+            let snapshot = guard.snapshot(ClientRoots::unsupported())?;
+            let authority = snapshot
+                .roots()
+                .first()
+                .cloned()
+                .ok_or_else(|| ToolError::Boundary("workspace root is empty".to_owned()))?;
+            let protocol_root = manager.protocol_root_for(authority.path());
+            (
+                LspContext {
+                    authority,
+                    protocol_root,
+                },
+                false,
+            )
+        }
+    };
+    let (_, relative, bytes) = documents::read_authorized_file_with_hook(
+        &context.authority,
+        relative_path,
+        MAX_FILE_BYTES,
+        || {},
+    )
+    .map_err(|error| ToolError::Boundary(error.to_string()))?;
+    let text =
+        String::from_utf8(bytes).map_err(|error| ToolError::InvalidUtf8(error.to_string()))?;
+    let uri = normalize::path_to_file_uri(&context.protocol_root.join(&relative))
         .map_err(|error| ToolError::Boundary(error.to_string()))?;
     let cancellation = current_lsp_cancellation();
     let operation_cancellation = cancellation.clone();
@@ -315,14 +423,38 @@ where
             operation(client, uri, text).await
         }
     };
-    let result = match cancellation {
-        Some(cancellation) => {
-            manager
-                .with_client_with_cancellation(&root, cancellation, client_operation)
-                .await
-        }
-        None => manager.with_client(&root, client_operation).await,
-    };
+    let authority = context.authority.clone();
+    let root = authority.path().to_owned();
+    let result = with_lsp_context(
+        authority.clone(),
+        context.protocol_root.clone(),
+        async move {
+            match (has_authorized_context, cancellation) {
+                (true, Some(cancellation)) => {
+                    manager
+                        .with_client_authorized_with_cancellation(
+                            authority,
+                            &root,
+                            cancellation,
+                            client_operation,
+                        )
+                        .await
+                }
+                (true, None) => {
+                    manager
+                        .with_client_authorized(authority, &root, client_operation)
+                        .await
+                }
+                (false, Some(cancellation)) => {
+                    manager
+                        .with_client_with_cancellation(&root, cancellation, client_operation)
+                        .await
+                }
+                (false, None) => manager.with_client(&root, client_operation).await,
+            }
+        },
+    )
+    .await;
     result.map_err(ToolError::from)
 }
 
@@ -667,6 +799,33 @@ pub fn snapshot_rust_files(
     current_file: &Path,
     current_text: &str,
 ) -> Result<HashMap<PathBuf, String>, ToolError> {
+    if let Some(context) = current_lsp_context() {
+        let current = lsp_relative_path(&context, current_file).ok_or_else(|| {
+            ToolError::Boundary("current file is outside the workspace".to_owned())
+        })?;
+        let mut snapshots = HashMap::new();
+        snapshots.insert(current, current_text.to_owned());
+        let walked = context
+            .authority
+            .walk_files_matching(Default::default(), |path| {
+                path.extension().is_some_and(|extension| extension == "rs")
+            })?;
+        for file in walked.files.into_iter().take(MAX_DOCUMENTS) {
+            if snapshots.contains_key(&file.path) {
+                continue;
+            }
+            if let Ok((_, relative, bytes)) = documents::read_authorized_file_with_hook(
+                &context.authority,
+                &file.path,
+                MAX_FILE_BYTES,
+                || {},
+            ) && let Ok(content) = String::from_utf8(bytes)
+            {
+                snapshots.insert(relative, content);
+            }
+        }
+        return Ok(snapshots);
+    }
     let root = canonical_root(root).map_err(ToolError::Boundary)?;
     let current = resolve_asset_path(&root, current_file)
         .ok_or_else(|| ToolError::Boundary("current file is outside the workspace".to_owned()))?;
@@ -700,6 +859,27 @@ pub fn incremental_change_for_tools(previous: &str, next: &str) -> Value {
 
 fn canonical_root(root: &Path) -> Result<PathBuf, String> {
     normalize::canonical_workspace_path(root).map_err(|error| error.to_string())
+}
+
+fn lsp_relative_path(context: &LspContext, path: &Path) -> Option<PathBuf> {
+    let relative = if path.is_absolute() {
+        path.strip_prefix(context.authority.path())
+            .or_else(|_| path.strip_prefix(&context.protocol_root))
+            .ok()?
+    } else {
+        path
+    };
+    let mut normalized = PathBuf::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(name) => normalized.push(name),
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => return None,
+        }
+    }
+    (!normalized.as_os_str().is_empty()).then_some(normalized)
 }
 
 fn path_to_slashes(path: &Path) -> String {

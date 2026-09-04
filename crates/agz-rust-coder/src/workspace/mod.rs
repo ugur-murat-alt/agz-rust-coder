@@ -9,7 +9,7 @@ pub mod select;
 pub use graph::{PackageEdge, PackageGraph, PackageNode, build_package_graph};
 pub use identity::{
     GitOutput, GitProbe, IdentityError, IdentityIncompleteReason, IdentityInput, IdentityLimits,
-    InputIdentity, StdGitProbe, compute_input_identity,
+    InputIdentity, StdGitProbe, compute_input_identity, compute_input_identity_authorized,
 };
 pub use metadata::{
     CargoMetadataRunner, DependencyClosure, MetadataCacheState, MetadataCommandSpec, MetadataError,
