@@ -10,7 +10,9 @@ use std::{
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use crate::workspace::identity::compute_input_identity_with_git_authority;
+use crate::workspace::{
+    git_probe::ControlledGitProbe, identity::compute_input_identity_with_git_authority,
+};
 use crate::{
     config::{Config, GateScope as ConfigGateScope},
     diagnostics::{Diagnostic, machine_applicable_package, parse_cargo_output},
@@ -22,8 +24,8 @@ use crate::{
     },
     process::{ProcessRunOptions, ProcessSupervisor},
     workspace::{
-        AuthorizedRoot, IdentityInput, IdentityLimits, InputIdentity, MetadataService, RootGuard,
-        StdGitProbe, WorkspaceRoot, select_workspace,
+        AuthorizedRoot, GitProbe, IdentityError, IdentityInput, IdentityLimits, InputIdentity,
+        MetadataService, RootGuard, WorkspaceRoot, select_workspace,
     },
 };
 
@@ -141,10 +143,16 @@ impl CheckService {
             self.supervisor.clone(),
             tokio::runtime::Handle::current(),
         );
+        let git = ControlledGitProbe::fixed(
+            deadline,
+            cancellation.clone(),
+            self.supervisor.clone(),
+            tokio::runtime::Handle::current(),
+        );
         let preparing = tokio::task::spawn_blocking(move || {
-            service.prepare(&prepare_request, &metadata_control)
+            service.prepare(&prepare_request, &metadata_control, &git)
         });
-        // The controlled preflight owns any metadata child through the supervisor.
+        // The controlled preflight owns metadata and Git children through the supervisor.
         // Awaiting it here prevents detaching the blocking worker while still bounding
         // cancellation and deadline handling at every metadata checkpoint.
         let prepared = match preparing.await {
@@ -261,6 +269,7 @@ impl CheckService {
         &self,
         request: &GateRequest,
         control: &crate::workspace::metadata::MetadataControl,
+        git: &dyn GitProbe,
     ) -> Result<PreparedCheck, (GateStatus, String)> {
         control.checkpoint().map_err(preflight_control_error)?;
         let roots = self
@@ -346,13 +355,9 @@ impl CheckService {
             &cache,
             &external_roots,
             identity_limits(&self.config),
+            git,
         )
-        .map_err(|error| {
-            (
-                GateStatus::Inconclusive,
-                format!("input identity failed: {error}"),
-            )
-        })?;
+        .map_err(preflight_identity_error)?;
         control.checkpoint().map_err(preflight_control_error)?;
         let mut scope = check_scope(
             &snapshot,
@@ -381,13 +386,9 @@ impl CheckService {
                 &cache,
                 &external_roots,
                 identity_limits(&self.config),
+                git,
             )
-            .map_err(|error| {
-                (
-                    GateStatus::Inconclusive,
-                    format!("input identity failed: {error}"),
-                )
-            })?;
+            .map_err(preflight_identity_error)?;
             control.checkpoint().map_err(preflight_control_error)?;
             scope.evidence.changed_paths = identity.changed_paths.clone();
         }
@@ -561,7 +562,7 @@ fn is_global_cargo_input(path: &Path) -> bool {
 async fn execute_prepared(
     context: ScheduledJobContext,
     request: GateRequest,
-    prepared: PreparedCheck,
+    mut prepared: PreparedCheck,
     cargo: PathBuf,
     config: Config,
     supervisor: ProcessSupervisor,
@@ -657,29 +658,56 @@ async fn execute_prepared(
         }
     }
 
-    let post_identity = identity_for(
-        &prepared.workspace_root,
-        &prepared.git_authority,
-        &prepared.snapshot.manifest_path,
-        &cargo,
-        &prepared.command,
-        &prepared.cache,
-        &prepared.external_roots,
-        identity_limits(&config),
-    )
-    .map_err(SchedulerError::Internal)?;
-    if status == GateStatus::FastPass
-        && (!post_identity.complete || post_identity.hash != prepared.identity.hash)
-    {
-        status = GateStatus::Stale;
-        for step in &mut steps {
-            step.suggestion_package = None;
-        }
-        warnings.push(
-            "repository inputs changed while validation was running; no pass was published"
-                .to_owned(),
+    // A failed/cancelled Cargo result needs no pass-freshness proof. Never
+    // launch extra Git children after the request has already ended.
+    if status == GateStatus::FastPass {
+        let git = ControlledGitProbe::fixed(
+            context.deadline,
+            context.cancellation.clone(),
+            supervisor.clone(),
+            tokio::runtime::Handle::current(),
         );
-    } else if status == GateStatus::FastPass && request.target == GateTargetId::All {
+        let limits = identity_limits(&config);
+        let (returned, post_identity) = tokio::task::spawn_blocking(move || {
+            let result = identity_for(
+                &prepared.workspace_root,
+                &prepared.git_authority,
+                &prepared.snapshot.manifest_path,
+                &cargo,
+                &prepared.command,
+                &prepared.cache,
+                &prepared.external_roots,
+                limits,
+                &git,
+            );
+            (prepared, result)
+        })
+        .await
+        .map_err(|error| SchedulerError::Internal(error.to_string()))?;
+        prepared = returned;
+        match post_identity {
+            Ok(identity) if !identity.complete || identity.hash != prepared.identity.hash => {
+                status = GateStatus::Stale;
+                warnings.push(
+                    "repository inputs changed while validation was running; no pass was published"
+                        .to_owned(),
+                );
+            }
+            Ok(_) => {}
+            Err(IdentityError::Cancelled) => status = GateStatus::Cancelled,
+            Err(IdentityError::TimedOut) => status = GateStatus::Timeout,
+            Err(error) => {
+                status = GateStatus::Unavailable;
+                warnings.push(format!("post-validation identity failed: {error}"));
+            }
+        }
+        if status != GateStatus::FastPass {
+            for step in &mut steps {
+                step.suggestion_package = None;
+            }
+        }
+    }
+    if status == GateStatus::FastPass && request.target == GateTargetId::All {
         status = GateStatus::FullPass;
     }
 
@@ -756,17 +784,16 @@ fn identity_for(
     cache: &CacheSelection,
     external_roots: &[Arc<AuthorizedRoot>],
     limits: IdentityLimits,
-) -> Result<InputIdentity, String> {
-    let git = StdGitProbe::default();
+    git: &dyn GitProbe,
+) -> Result<InputIdentity, IdentityError> {
     compute_input_identity_with_git_authority(
-        &IdentityInput::new(root, manifest, cargo, command, &cache.environment, &git)
+        &IdentityInput::new(root, manifest, cargo, command, &cache.environment, git)
             .with_git_cwd(git_authority.path())
             .with_external_roots(external_roots)
             .with_target_directory(&cache.target_directory)
             .with_limits(limits),
         git_authority.clone(),
     )
-    .map_err(|error| error.to_string())
 }
 
 fn authorize_external_roots(
@@ -850,6 +877,15 @@ fn forward_cancellation(
             () = shutdown.cancelled() => combined.cancel(),
         }
     })
+}
+
+fn preflight_identity_error(error: IdentityError) -> (GateStatus, String) {
+    let status = match &error {
+        IdentityError::Cancelled => GateStatus::Cancelled,
+        IdentityError::TimedOut => GateStatus::Timeout,
+        _ => GateStatus::Inconclusive,
+    };
+    (status, format!("input identity failed: {error}"))
 }
 
 fn preflight_control_error(error: crate::workspace::MetadataError) -> (GateStatus, String) {

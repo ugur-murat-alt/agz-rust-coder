@@ -81,6 +81,9 @@ pub struct ProcessRunOptions {
     pub kill_grace: Duration,
     pub cleanup_timeout: Duration,
     pub diagnostic_callback: Option<DiagnosticCallback>,
+    /// Retain an unsanitized, bounded stdout prefix for machine-readable protocols.
+    /// This is opt-in; human/tool output remains sanitized.
+    pub capture_raw_stdout: bool,
 }
 
 impl fmt::Debug for ProcessRunOptions {
@@ -118,7 +121,14 @@ impl ProcessRunOptions {
             kill_grace: DEFAULT_KILL_GRACE,
             cleanup_timeout: DEFAULT_CLEANUP_TIMEOUT,
             diagnostic_callback: None,
+            capture_raw_stdout: false,
         }
+    }
+
+    #[must_use]
+    pub fn with_raw_stdout(mut self) -> Self {
+        self.capture_raw_stdout = true;
+        self
     }
 
     #[must_use]
@@ -294,6 +304,7 @@ pub struct ProcessRunResult {
     pub output: String,
     pub stdout: String,
     pub stderr: String,
+    pub raw_stdout: Option<Vec<u8>>,
     pub drain_complete: bool,
     pub cleanup_complete: bool,
     pub token: String,
@@ -731,6 +742,9 @@ impl ProcessSupervisor {
             options.max_output_bytes,
             options.diagnostic_callback.clone(),
         );
+        if options.capture_raw_stdout {
+            collector.capture_raw_stdout();
+        }
         let mut eof = [false; 2];
         let mut stop_reason = None;
         let mut force_at = None;
@@ -739,9 +753,10 @@ impl ProcessSupervisor {
         let mut force_succeeded = false;
         let mut status = None;
         let mut events_open = true;
+        let timeout_deadline = started + options.timeout;
         let deadline = options
             .deadline
-            .unwrap_or_else(|| started + options.timeout);
+            .map_or(timeout_deadline, |deadline| deadline.min(timeout_deadline));
         let cancel = options.cancel.clone();
         let mut stop_receiver = registration.stop_receiver.clone();
 
@@ -1255,6 +1270,7 @@ fn make_result(
         output: snapshot.output,
         stdout: snapshot.stdout,
         stderr: snapshot.stderr,
+        raw_stdout: snapshot.raw_stdout,
         drain_complete,
         cleanup_complete,
         token,

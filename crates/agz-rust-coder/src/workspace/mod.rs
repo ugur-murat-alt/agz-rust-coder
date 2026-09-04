@@ -1,5 +1,6 @@
 //! Workspace selection, authorization, metadata, and bounded input identity.
 
+pub(crate) mod git_probe;
 pub mod graph;
 pub mod identity;
 pub mod metadata;

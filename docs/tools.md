@@ -3,6 +3,13 @@
 This document defines the public tool and configuration surface of
 `agz-rust-coder` `0.1.1`.
 
+Request deadlines and cancellation also cover Git probes and input-identity
+collection before and after Cargo. Git subprocesses use the shared process
+supervisor; NUL-delimited paths are read from a bounded raw stdout prefix, not
+from sanitized display text. A failed or cancelled Cargo run does not launch a
+post-validation Git probe. Truncated tool envelopes retain their original
+`status`, error flag, and `untrustedData` marker.
+
 ## Tool Catalog
 
 | Tool | Authority | Side effects | Result |

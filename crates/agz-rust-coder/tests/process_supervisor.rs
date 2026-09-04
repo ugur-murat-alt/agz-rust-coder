@@ -34,6 +34,7 @@ mod linux_process_supervisor {
             kill_grace: Duration::from_millis(50),
             cleanup_timeout: Duration::from_secs(2),
             diagnostic_callback: None,
+            capture_raw_stdout: false,
         }
     }
 

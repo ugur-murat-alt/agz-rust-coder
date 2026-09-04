@@ -5,6 +5,17 @@ Semantic Versioning and follows the Keep a Changelog structure.
 
 ## [Unreleased]
 
+### Fixed
+
+- Kept Git identity probes within the check request's deadline and cancellation
+  lifecycle, with bounded raw output and supervised process-tree cleanup.
+- Moved post-validation identity work off the async executor and avoided extra
+  Git probes after failed or cancelled Cargo runs.
+- Preserved result status and trust markers at the minimum output budget and
+  removed complete terminal escape sequences from structured tool results.
+- Fixed Linux installation in paths containing spaces, rejected failed archive
+  listings, and stopped interrupted installs without replacing the old binary.
+
 ## [0.1.1] - 2026-09-04
 
 ### Security

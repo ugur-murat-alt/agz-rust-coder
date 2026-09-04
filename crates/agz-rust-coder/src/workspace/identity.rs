@@ -26,6 +26,10 @@ const MAX_WALK_DIRECTORIES: usize = 100_000;
 
 #[derive(Debug, Error)]
 pub enum IdentityError {
+    #[error("identity computation was cancelled")]
+    Cancelled,
+    #[error("identity computation exceeded the request deadline")]
+    TimedOut,
     #[error("identity root operation failed: {0}")]
     Root(#[from] RootError),
     #[error("invalid identity input: {0}")]
@@ -98,6 +102,11 @@ pub struct GitOutput {
 }
 
 pub trait GitProbe: Send + Sync {
+    /// Cooperatively stop identity collection when its owning request ends.
+    fn checkpoint(&self) -> Result<(), IdentityError> {
+        Ok(())
+    }
+
     /// # Errors
     ///
     /// Returns an error when the bounded probe cannot be started or its output
@@ -358,6 +367,7 @@ fn compute_input_identity_inner(
     input: &IdentityInput<'_>,
     authorized: Option<Option<Arc<AuthorizedRoot>>>,
 ) -> Result<InputIdentity, IdentityError> {
+    input.git.checkpoint()?;
     validate_input(input)?;
     let command_hash = hash_command(input.cargo, input.command, input.environment);
     let environment_hash = hash_environment(input.environment);
@@ -368,6 +378,7 @@ fn compute_input_identity_inner(
 
     let head_args = git_args(["rev-parse", "--verify", "HEAD"]);
     let head_result = run_git(input, &head_args, &authorized);
+    input.git.checkpoint()?;
     let mut incomplete_reason = None;
     let (head, use_git) = match head_result {
         Ok(output) if output.truncated => ("NO_GIT".to_owned(), false),
@@ -392,12 +403,14 @@ fn compute_input_identity_inner(
     } else {
         Vec::new()
     };
+    input.git.checkpoint()?;
     let mut files = BTreeSet::new();
     let mut changed_paths = Vec::new();
     let mut collector = FileCollector::new(input, &mut files, &mut incomplete_reason);
 
     if use_git {
         for path in git_paths {
+            input.git.checkpoint()?;
             let absolute = path.absolute;
             changed_paths.push(path.relative);
             collector.collect_changed_path(&absolute)?;
@@ -413,6 +426,7 @@ fn compute_input_identity_inner(
 
     hasher.write_usize(changed_paths.len());
     for path in &changed_paths {
+        input.git.checkpoint()?;
         hasher.write_path(path);
         let absolute = input.root.authority_path().join(path);
         if !path_exists_without_following(&absolute) {
@@ -425,6 +439,7 @@ fn compute_input_identity_inner(
     let mut external_files_hashed = 0usize;
     let mut external_bytes_hashed = 0u64;
     for path in files {
+        input.git.checkpoint()?;
         let external = external_root_for(&path, input.external_roots).is_some();
         if external {
             if external_files_hashed >= input.limits.max_external_files {
@@ -495,6 +510,7 @@ fn compute_input_identity_inner(
         }
     }
 
+    input.git.checkpoint()?;
     Ok(InputIdentity {
         hash: hasher.finish(),
         command_hash,
@@ -622,6 +638,7 @@ impl<'input, 'scope, 'data> FileCollector<'input, 'scope, 'data> {
     ) -> Result<(), IdentityError> {
         let mut pending = vec![(start.to_owned(), 0usize)];
         while let Some((directory, depth)) = pending.pop() {
+            self.input.git.checkpoint()?;
             if self.workspace_directories >= MAX_WALK_DIRECTORIES {
                 set_reason(
                     self.incomplete_reason,
@@ -643,6 +660,7 @@ impl<'input, 'scope, 'data> FileCollector<'input, 'scope, 'data> {
                 Err(error) => return Err(error.into()),
             };
             for entry in entries {
+                self.input.git.checkpoint()?;
                 if should_skip_directory(&entry.name) {
                     continue;
                 }
@@ -755,6 +773,7 @@ fn run_git(
     args: &[OsString],
     authorized: &Option<Option<Arc<AuthorizedRoot>>>,
 ) -> Result<GitOutput, IdentityError> {
+    input.git.checkpoint()?;
     if let Some(authority) = authorized {
         let authority = match authority {
             Some(authority) => authority.clone(),

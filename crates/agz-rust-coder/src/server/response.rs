@@ -160,11 +160,11 @@ fn bounded_result(mut value: Value, max_bytes: u64, is_error: bool) -> CallToolR
     let minimal = json!({
         "schemaVersion": 1,
         "tool": tool,
-        "status": "TRUNCATED",
+        "status": value["status"],
         "summary": "Truncated",
         "data": {"omitted": true},
         "warnings": [],
-        "untrustedData": false,
+        "untrustedData": value["untrustedData"],
         "truncated": true
     });
     let result = make_result(minimal, is_error);
@@ -256,25 +256,9 @@ fn sanitize_value(value: &mut Value) {
 }
 
 fn sanitize_string(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut in_escape = false;
-    for character in input.chars() {
-        if in_escape {
-            if ('@'..='~').contains(&character) {
-                in_escape = false;
-            }
-            continue;
-        }
-        if character == '\u{1b}' {
-            in_escape = true;
-            continue;
-        }
-        if character.is_control() && character != '\n' && character != '\t' {
-            continue;
-        }
-        output.push(character);
-    }
-    output
+    // Share the process-output parser so CSI parameters and OSC payloads cannot
+    // survive as ordinary text after their escape prefix has been removed.
+    crate::process::sanitize_terminal_text(input).replace('\r', "")
 }
 
 #[cfg(test)]
@@ -380,7 +364,7 @@ mod tests {
             encoded.len()
         );
         let structured = result.structured_content.expect("structured content");
-        assert_eq!(structured["status"], "TRUNCATED");
+        assert_eq!(structured["status"], "RESOURCE_BLOCKED");
         assert_eq!(structured["data"]["omitted"], true);
         assert_eq!(structured["truncated"], true);
     }
@@ -403,5 +387,45 @@ mod tests {
         let schema = serde_json::to_string(&schemars::schema_for!(ToolOutput<RequiredData>))
             .expect("serialize output schema");
         assert!(schema.contains("omitted"));
+    }
+
+    #[test]
+    fn terminal_sequences_do_not_leave_parameters_or_osc_payloads_in_results() {
+        assert_eq!(sanitize_string("\u{1b}[31mred\u{1b}[0m"), "red");
+        assert_eq!(sanitize_string("a\u{1b}]0;window title\u{7}b"), "ab");
+        assert_eq!(
+            sanitize_string("a\u{1b}]8;;https://example.test\u{1b}\\link"),
+            "alink"
+        );
+        assert_eq!(sanitize_string("Türkçe\n\tmetin\r\u{7}"), "Türkçe\n\tmetin");
+    }
+
+    #[test]
+    fn minimum_result_preserves_status_trust_and_error_flags() {
+        for (status, is_error) in [("RESOURCE_BLOCKED", true), ("FOUND", false)] {
+            let result = ToolOutput::new("implementations", status, "evidence", json!({}))
+                .with_untrusted_data()
+                .with_workspace(WorkspaceInfo {
+                    requested_dir: "x".repeat(2_048),
+                    package_root: "x".repeat(2_048),
+                    workspace_root: "x".repeat(2_048),
+                    manifest_path: "x".repeat(2_048),
+                })
+                .into_call_tool_result(512, is_error);
+            assert!(wire_size(&result) <= 512);
+            assert_eq!(result.is_error, Some(is_error));
+            let structured = result
+                .structured_content
+                .as_ref()
+                .expect("structured result");
+            assert_eq!(structured["status"], status);
+            assert_eq!(structured["untrustedData"], true);
+            assert_eq!(structured["truncated"], true);
+            let text = result.content[0].as_text().expect("text fallback");
+            assert_eq!(
+                serde_json::from_str::<Value>(&text.text).expect("JSON"),
+                *structured
+            );
+        }
     }
 }
