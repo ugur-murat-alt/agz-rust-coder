@@ -35,9 +35,12 @@ Semantic Versioning and follows the Keep a Changelog structure.
 - Updated the SHA-pinned checkout, upload-artifact, and download-artifact
   actions to 7.0.1, 7.0.1, and 8.0.1 respectively, retaining explicit artifact
   checksum verification and disabled credential persistence.
-- Updated reqwest to 0.13.4, TOML to 1.1, SHA-2 to 0.11.0, and process-wrap to
-  10.0.0. Kept cargo-platform pinned to 0.3.2 to preserve Rust 1.88 support;
+- Updated reqwest to 0.13.4, TOML to 1.1, and process-wrap to 10.0.0.
+- Kept cargo-platform pinned to 0.3.2 to preserve Rust 1.88 support;
   the proposed 0.3.3 upgrade requires Rust 1.91 and was reverted.
+- Kept SHA-2 at 0.10.9 after release compilation exposed an incompatible
+  hexadecimal formatting API in 0.11.0. The upgrade was reverted together with
+  its lockfile dependencies; existing SHA-256 identities remain unchanged.
 - Added explicit `release/<Cargo version>` branch publication alongside manual
   workflow dispatch. The branch must match the package version. Publication
   still requires all existing validation jobs and the `release` environment;
