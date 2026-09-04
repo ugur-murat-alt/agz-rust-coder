@@ -103,9 +103,9 @@ impl ControlledGitProbe {
             status: Some(output.exit_code),
             // Sanitized text strips NUL separators used by Git -z. Only the
             // bounded raw prefix is authoritative for identity parsing.
-            stdout: output.raw_stdout.ok_or_else(|| {
-                IdentityError::Git("git raw stdout was not captured".to_owned())
-            })?,
+            stdout: output
+                .raw_stdout
+                .ok_or_else(|| IdentityError::Git("git raw stdout was not captured".to_owned()))?,
             truncated: output.output_truncated,
         })
     }
