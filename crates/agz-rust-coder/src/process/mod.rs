@@ -19,6 +19,7 @@ pub use journal::{
 };
 #[allow(unused_imports)]
 pub use output::DiagnosticCallback;
+pub(crate) use output::sanitize_terminal_text;
 #[allow(unused_imports)]
 pub use supervisor::{
     AsyncProcessRunner, CommandSpec, ProcessError, ProcessRunOptions, ProcessRunResult,

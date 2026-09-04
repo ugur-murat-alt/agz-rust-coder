@@ -63,7 +63,9 @@ cleanup() {
   fi
   rm -rf -- "$temp_dir"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 printf 'Downloading %s %s for %s-%s...\n' "$BINARY_NAME" "$VERSION" "$PLATFORM" "$ARCHITECTURE"
 curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --silent --show-error \
@@ -79,7 +81,9 @@ actual_checksum="$(sha256 "$temp_dir/$ASSET")"
 [[ "${actual_checksum,,}" = "${expected_checksum,,}" ]] \
   || die "checksum mismatch for $ASSET"
 
-mapfile -t archive_entries < <(tar -tzf "$temp_dir/$ASSET")
+tar -tzf "$temp_dir/$ASSET" > "$temp_dir/archive-entries" \
+  || die "could not list release archive"
+mapfile -t archive_entries < "$temp_dir/archive-entries"
 [[ "${#archive_entries[@]}" -eq 1 ]] || die "release archive must contain exactly one file"
 [[ "${archive_entries[0]#./}" = "$BINARY_NAME" ]] \
   || die "release archive contains an unexpected path: ${archive_entries[0]}"
@@ -90,7 +94,7 @@ extracted_binary="$temp_dir/extracted/$BINARY_NAME"
 [[ -f "$extracted_binary" && ! -L "$extracted_binary" ]] \
   || die "release archive did not contain a regular binary"
 chmod 0755 "$extracted_binary"
-[[ "$($extracted_binary --version)" = "$BINARY_NAME $VERSION" ]] \
+[[ "$("$extracted_binary" --version)" = "$BINARY_NAME $VERSION" ]] \
   || die "downloaded binary reported an unexpected version"
 
 mkdir -p -- "$INSTALL_DIR"
@@ -103,7 +107,7 @@ destination="$INSTALL_DIR/$BINARY_NAME"
 
 staged_binary="$(mktemp "$INSTALL_DIR/.${BINARY_NAME}.tmp.XXXXXX")"
 install -m 0755 -- "$extracted_binary" "$staged_binary"
-[[ "$($staged_binary --version)" = "$BINARY_NAME $VERSION" ]] \
+[[ "$("$staged_binary" --version)" = "$BINARY_NAME $VERSION" ]] \
   || die "staged binary failed its version check"
 mv -f -- "$staged_binary" "$destination"
 staged_binary=""

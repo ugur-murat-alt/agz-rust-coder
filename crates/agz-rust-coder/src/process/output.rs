@@ -87,6 +87,7 @@ pub(crate) struct OutputSnapshot {
     pub(crate) output: String,
     pub(crate) stdout: String,
     pub(crate) stderr: String,
+    pub(crate) raw_stdout: Option<Vec<u8>>,
     pub(crate) output_truncated: bool,
     pub(crate) first_diagnostic: Option<Duration>,
     pub(crate) read_errors: Vec<String>,
@@ -104,6 +105,8 @@ pub(crate) struct OutputCollector {
     stdout_sanitizer: TerminalSanitizer,
     stderr_sanitizer: TerminalSanitizer,
     line_buffer: String,
+    raw_stdout: Option<Vec<u8>>,
+    raw_stdout_truncated: bool,
     first_diagnostic: Option<Duration>,
     read_errors: Vec<String>,
 }
@@ -126,12 +129,25 @@ impl OutputCollector {
             stdout_sanitizer: TerminalSanitizer::default(),
             stderr_sanitizer: TerminalSanitizer::default(),
             line_buffer: String::new(),
+            raw_stdout: None,
+            raw_stdout_truncated: false,
             first_diagnostic: None,
             read_errors: Vec::new(),
         }
     }
 
+    pub(crate) fn capture_raw_stdout(&mut self) {
+        self.raw_stdout = Some(Vec::new());
+    }
+
     pub(crate) fn push(&mut self, stream: StreamKind, bytes: &[u8]) {
+        if stream == StreamKind::Stdout
+            && let Some(raw) = self.raw_stdout.as_mut()
+        {
+            let remaining = self.max_bytes.saturating_sub(raw.len());
+            raw.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+            self.raw_stdout_truncated |= bytes.len() > remaining;
+        }
         let text = match stream {
             StreamKind::Stdout => self.stdout_decoder.push(bytes),
             StreamKind::Stderr => self.stderr_decoder.push(bytes),
@@ -177,7 +193,8 @@ impl OutputCollector {
             output: self.combined.as_string(),
             stdout: self.stdout.as_string(),
             stderr: self.stderr.as_string(),
-            output_truncated: self.combined.truncated(),
+            raw_stdout: self.raw_stdout,
+            output_truncated: self.combined.truncated() || self.raw_stdout_truncated,
             first_diagnostic: self.first_diagnostic,
             read_errors: self.read_errors,
         }
@@ -307,6 +324,10 @@ impl Utf8Decoder {
     }
 }
 
+pub(crate) fn sanitize_terminal_text(input: &str) -> String {
+    TerminalSanitizer::default().push(input)
+}
+
 #[derive(Debug, Default)]
 struct TerminalSanitizer {
     state: EscapeState,
@@ -429,4 +450,38 @@ fn utf8_tail_bytes(value: &[u8], max_bytes: usize) -> Vec<u8> {
         start += 1;
     }
     value[start..].to_vec()
+}
+
+#[cfg(test)]
+mod raw_output_tests {
+    use super::*;
+
+    #[test]
+    fn raw_stdout_is_opt_in_and_does_not_change_sanitized_tool_text() {
+        let mut collector = OutputCollector::new(Instant::now(), 1_024, None);
+        collector.capture_raw_stdout();
+        collector.push(StreamKind::Stdout, b"a\0\x1b[31mb\x1b[0m\xff");
+        collector.push(StreamKind::Stderr, b"not Git stdout");
+        let snapshot = collector.finish();
+        assert_eq!(
+            snapshot.raw_stdout.as_deref(),
+            Some(&b"a\0\x1b[31mb\x1b[0m\xff"[..])
+        );
+        assert_eq!(snapshot.stdout, "ab\u{fffd}");
+        assert!(!snapshot.output_truncated);
+        let default = OutputCollector::new(Instant::now(), 1_024, None).finish();
+        assert!(default.raw_stdout.is_none());
+    }
+
+    #[test]
+    fn raw_prefix_is_bounded_even_when_all_bytes_are_sanitized_away() {
+        let mut collector = OutputCollector::new(Instant::now(), 4, None);
+        collector.capture_raw_stdout();
+        collector.push(StreamKind::Stdout, &[0; 3]);
+        collector.push(StreamKind::Stdout, &[0; 3]);
+        let snapshot = collector.finish();
+        assert_eq!(snapshot.raw_stdout, Some(vec![0; 4]));
+        assert!(snapshot.stdout.is_empty());
+        assert!(snapshot.output_truncated);
+    }
 }

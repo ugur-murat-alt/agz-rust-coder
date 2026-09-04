@@ -3,6 +3,14 @@
 Bu belge `agz-rust-coder` `0.1.1` sürümünün açık araç ve yapılandırma yüzeyini
 tanımlar.
 
+İstek zaman aşımı ve iptal denetimleri, Cargo öncesi ve sonrasındaki Git
+sorgularını ve girdi kimliği hesaplamasını da kapsar. Git alt süreçleri ortak
+süreç yöneticisini kullanır; NUL ile ayrılmış yollar temizlenmiş gösterim
+metninden değil, boyutu sınırlanmış ham standart çıktıdan okunur. Başarısız veya
+iptal edilmiş bir Cargo çalışması sonrasında yeni Git sorgusu başlatılmaz.
+Kısaltılmış araç yanıtları özgün `status`, hata bayrağı ve `untrustedData`
+işaretini korur.
+
 ## Araç Kataloğu
 
 | Tool | Authority | Side effects | Sonuç |
