@@ -5,17 +5,6 @@ Semantic Versioning and follows the Keep a Changelog structure.
 
 ## [Unreleased]
 
-### Fixed
-
-- Kept Git identity probes within the check request's deadline and cancellation
-  lifecycle, with bounded raw output and supervised process-tree cleanup.
-- Moved post-validation identity work off the async executor and avoided extra
-  Git probes after failed or cancelled Cargo runs.
-- Preserved result status and trust markers at the minimum output budget and
-  removed complete terminal escape sequences from structured tool results.
-- Fixed Linux installation in paths containing spaces, rejected failed archive
-  listings, and stopped interrupted installs without replacing the old binary.
-
 ## [0.1.1] - 2026-09-04
 
 ### Security
@@ -31,6 +20,28 @@ Semantic Versioning and follows the Keep a Changelog structure.
   shared cache.
 - Made crates.io lookup cancellation-aware while preserving bounded response
   streaming, fixed-host redirects, and immediate admission-permit release.
+- Kept Git identity probes within the check request's deadline and cancellation
+  lifecycle, with bounded raw output and supervised process-tree cleanup.
+- Honored the earlier of the per-process timeout and the request deadline.
+- Moved post-validation identity work off the async executor and avoided extra
+  Git probes after failed or cancelled Cargo runs.
+- Preserved result status and trust markers at the minimum output budget and
+  removed complete terminal escape sequences from structured tool results.
+- Fixed Linux installation in paths containing spaces, rejected failed archive
+  listings, and stopped interrupted installs without replacing the old binary.
+
+### Changed
+
+- Updated the SHA-pinned checkout, upload-artifact, and download-artifact
+  actions to 7.0.1, 7.0.1, and 8.0.1 respectively, retaining explicit artifact
+  checksum verification and disabled credential persistence.
+- Updated reqwest to 0.13.4, TOML to 1.1, SHA-2 to 0.11.0, and process-wrap to
+  10.0.0. Kept cargo-platform pinned to 0.3.2 to preserve Rust 1.88 support;
+  the proposed 0.3.3 upgrade requires Rust 1.91 and was reverted.
+- Added explicit `release/<Cargo version>` branch publication alongside manual
+  workflow dispatch. The branch must match the package version. Publication
+  still requires all existing validation jobs and the `release` environment;
+  releases are serialized across the repository.
 
 ## [0.1.0] - 2026-09-01
 
