@@ -62,9 +62,14 @@ jobs:
       - name: Verify protocol and benchmark smoke
         shell: bash
         run: |
-          cargo +1.88.0 run --locked -p xtask -- protocol-smoke
-          cargo +1.88.0 run --locked -p xtask -- opencode-smoke
-          cargo +1.88.0 run --locked -p xtask -- benchmark-smoke
+          MCP_BIN_DIR="$(mktemp -d)"
+          install -m 0755 target/release/agz-rust-coder "$MCP_BIN_DIR/agz-rust-coder"
+          AGZ_RUST_CODER_BIN="$MCP_BIN_DIR/agz-rust-coder" \
+            cargo +1.88.0 run --locked -p xtask -- protocol-smoke
+          AGZ_RUST_CODER_BIN="$MCP_BIN_DIR/agz-rust-coder" \
+            cargo +1.88.0 run --locked -p xtask -- opencode-smoke
+          AGZ_RUST_CODER_BIN="$MCP_BIN_DIR/agz-rust-coder" \
+            cargo +1.88.0 run --locked -p xtask -- benchmark-smoke
 
       - name: Validate MCP Registry metadata
         shell: bash
@@ -181,7 +186,11 @@ jobs:
           cd target/release
           ARCHIVE="agz-rust-coder-${PLATFORM}.tar.gz"
           tar -czf "$ARCHIVE" "$BINARY"
-          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+          else
+            shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
+          fi
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
