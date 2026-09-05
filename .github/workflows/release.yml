@@ -384,6 +384,7 @@ jobs:
         run: |
           gh release create "$RELEASE_TAG" \
             release-artifact/*.crate \
+            release-artifact/agz-rust-coder-source.bundle \
             release-artifact/*.tar.gz \
             release-artifact/*.tar.gz.sha256 \
             release-artifact/SHA256SUMS \
