@@ -22,7 +22,6 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import textwrap
           def replace(name, old, new):
               path = Path(name)
               text = path.read_text()
@@ -39,7 +38,7 @@ jobs:
           text = path.read_text()
           begin = text.index('#[tokio::test]\nasync fn a_new_input_supersedes_the_older_active_job()')
           end = text.index('#[tokio::test]\nasync fn streamed_error_has_request_timing', begin)
-          new = '''#[tokio::test]
+          new = r'''#[tokio::test]
           async fn a_new_input_supersedes_the_older_active_job() {
               let project = TestProject::new("supersede", "pub fn value() -> usize { 1 }\n", None);
               let ready = project.state.join("build-ready");
