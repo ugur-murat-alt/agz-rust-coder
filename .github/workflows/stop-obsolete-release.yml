@@ -1,0 +1,39 @@
+name: Stop obsolete failed release attempt
+on:
+  push:
+    branches: [chore/prepare-0.2.0]
+    paths: [.github/workflows/stop-obsolete-release.yml]
+permissions:
+  actions: write
+  contents: read
+jobs:
+  stop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Cancel only the known failed candidate; never touch another run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          root = 'https://api.github.com/repos/ugur-murat-alt/agz-rust-coder/actions/runs/33958015175'
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'User-Agent': 'agz-obsolete-release-cleanup'}
+          def read(url):
+              with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as response:
+                  return json.load(response)
+          run = read(root)
+          assert run['head_sha'] == 'c5d856ec332aad15fd01abba573771d8c798006f'
+          assert run['head_branch'] == 'release/0.2.0' and run['name'] == 'Release'
+          jobs = read(root + '/jobs?per_page=100')['jobs']
+          assert any(job['id'] == 101284751025 and job['conclusion'] == 'failure' for job in jobs)
+          assert all(job['name'] != 'Publish approved release' or job['status'] == 'completed' and job['conclusion'] == 'skipped' for job in jobs)
+          if run['status'] != 'completed':
+              request = urllib.request.Request(root + '/cancel', data=b'', headers=headers, method='POST')
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  assert response.status == 202
+              print('Cancelled only failed obsolete run 33958015175; publication had not started.')
+          else:
+              print('Obsolete run already completed; no cancellation needed.')
+          PY
