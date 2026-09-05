@@ -645,6 +645,8 @@ fn validate_directory_identity(path: &Path, directory: &Dir) -> Result<(), DocsC
             path: path.to_owned(),
             message: error.to_string(),
         })?;
+    #[cfg(not(unix))]
+    let _ = &opened;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
@@ -730,7 +732,11 @@ fn ensure_directory(path: &Path) -> Result<(), DocsCacheError> {
     let mut current = PathBuf::new();
     for component in absolute.components() {
         match component {
-            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            Component::Prefix(prefix) => {
+                // A Windows drive prefix is not a complete root until RootDir.
+                current.push(prefix.as_os_str());
+                continue;
+            }
             Component::RootDir => current.push(Path::new(std::path::MAIN_SEPARATOR_STR)),
             Component::CurDir => {}
             Component::ParentDir => return Err(DocsCacheError::UnsafePath(absolute)),

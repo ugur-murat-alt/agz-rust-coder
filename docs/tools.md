@@ -1,7 +1,7 @@
 # Tool And Configuration Reference
 
 This document defines the public tool and configuration surface of
-`agz-rust-coder` `0.1.1`.
+`agz-rust-coder` `0.2.0`.
 
 Request deadlines and cancellation also cover Git probes and input-identity
 collection before and after Cargo. Git subprocesses use the shared process
@@ -142,9 +142,9 @@ the process. `allow` is an explicit opt-in to workspace code execution.
 
 ## Explicit validation options
 
-The following additive `check` fields are **unreleased development changes**;
-the published 0.1.1 binary does not provide them. Omitting `options` retains the
-existing Cargo behavior. Examples are MCP argument objects, not shell strings:
+The following additive `check` fields are available starting with **0.2.0**.
+Omitting `options` retains the existing Cargo behavior. Examples are MCP
+argument objects, not shell strings:
 
 ```json
 {"target":"check","options":{"noDefaultFeatures":true,"features":["serde"],"context":true}}
@@ -206,3 +206,9 @@ The MCP's prior input fields and default behavior are preserved and schema-teste
 
 See [the six-part plan](rust-efficiency-plan.md) and
 [verification evidence](rust-efficiency-evidence.md).
+
+On macOS and Windows, host leases with an unverifiable foreign PID are retained
+rather than reclaimed. After a confirmed owner crash, an operator may need to
+remove that stale lease while no validation process is using it. Linux retains
+verified absent-PID recovery. With opt-in Sccache, metadata probes bypass only
+RUSTC_WRAPPER; compilation still uses the owned, validated cache session.

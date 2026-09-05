@@ -812,6 +812,8 @@ fn checked_parent(final_path: &Path) -> Result<CacheDirectory, PublishError> {
 
 fn ensure_parent_unchanged(directory: &CacheDirectory) -> Result<(), PublishError> {
     let current = open_directory(&directory.path)?;
+    #[cfg(not(unix))]
+    let _ = &current;
     #[cfg(unix)]
     {
         let expected = directory
@@ -926,7 +928,11 @@ fn verify_directory_path(path: &Path) -> Result<(), PublishError> {
     let mut current = PathBuf::new();
     for component in path.components() {
         match component {
-            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            Component::Prefix(prefix) => {
+                current.push(prefix.as_os_str());
+                // A drive prefix is not a complete directory until RootDir.
+                continue;
+            }
             Component::RootDir => current.push(component.as_os_str()),
             Component::CurDir => continue,
             Component::ParentDir => {

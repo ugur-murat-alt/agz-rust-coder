@@ -49,6 +49,7 @@ const DEFAULT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+#[cfg(unix)]
 const SIGTERM: i32 = 15;
 #[cfg(unix)]
 const ESRCH: i32 = 3;
@@ -825,7 +826,14 @@ impl ProcessSupervisor {
                 );
                 break;
             }
-            match child.try_wait() {
+            // process-wrap 10's JobObject::try_wait consumes completion-port
+            // events that its final wait also needs. Poll only the leader here;
+            // retain the outer job for tree termination and the final wait.
+            #[cfg(windows)]
+            let polled = child.inner_mut().try_wait();
+            #[cfg(not(windows))]
+            let polled = child.try_wait();
+            match polled {
                 Ok(maybe_status) => status = maybe_status,
                 Err(error) => {
                     push_warning(

@@ -813,6 +813,8 @@ fn memory_below_floor(available_memory_mb: Option<u64>, minimum_mb: u64) -> bool
     available_memory_mb.is_some_and(|available| available < minimum_mb)
 }
 
+// Preserve the shared fallible interface on platforms with a no-op implementation.
+#[cfg_attr(not(target_os = "linux"), allow(clippy::unnecessary_wraps))]
 fn available_memory_bytes() -> std::io::Result<Option<u64>> {
     #[cfg(target_os = "linux")]
     {

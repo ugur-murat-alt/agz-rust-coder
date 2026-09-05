@@ -147,7 +147,8 @@ impl CheckService {
             cancellation.clone(),
             self.supervisor.clone(),
             tokio::runtime::Handle::current(),
-        );
+        )
+        .with_supervised_sccache(request.options.sccache);
         let git = ControlledGitProbe::fixed(
             deadline,
             cancellation.clone(),

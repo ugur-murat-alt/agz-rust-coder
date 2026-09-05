@@ -749,7 +749,7 @@ impl RustCoderServer {
                     .await
                 }
                 "definition" => {
-                    with_lsp_authority(
+                    Box::pin(with_lsp_authority(
                         root.requested_authority().clone(),
                         symbol_definition(
                             &manager,
@@ -759,7 +759,7 @@ impl RustCoderServer {
                             input.line,
                             timeout,
                         ),
-                    )
+                    ))
                     .await
                 }
                 _ => unreachable!("validated semantic tool"),

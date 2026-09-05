@@ -6,9 +6,11 @@ use std::sync::{
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use agz_rust_coder::tools::audit::InvalidPathReason;
 use agz_rust_coder::tools::audit::{
     AuditCancellation, AuditError, AuditFinding, AuditLimits, AuditRequest, AuditService,
-    AuditSkipReason, AuditSummary, InvalidPathReason,
+    AuditSkipReason, AuditSummary,
 };
 use agz_rust_coder::workspace::{ClientRoots, RootGuard, WorkspaceRoot};
 use tokio_util::sync::CancellationToken;

@@ -318,7 +318,7 @@ async fn retained_authority_navigation_uses_original_root_after_replacement() {
     assert!(references.contains("pub fn mock_fn"), "{references}");
     assert!(!references.contains("replacement content"), "{references}");
 
-    let implementations = with_lsp_authority(
+    let implementations = Box::pin(with_lsp_authority(
         authority,
         symbol_implementations(
             manager.as_ref(),
@@ -329,7 +329,7 @@ async fn retained_authority_navigation_uses_original_root_after_replacement() {
             true,
             Duration::from_secs(5),
         ),
-    )
+    ))
     .await
     .expect("implementations through original authority");
     assert!(

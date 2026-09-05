@@ -446,7 +446,11 @@ fn ensure_directory(path: &Path) -> Result<(), JournalError> {
     }
 }
 
+// Preserve the shared fallible interface on platforms with a no-op implementation.
+#[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
 fn set_private_file_mode(file: &File, path: &Path) -> Result<(), JournalError> {
+    #[cfg(not(unix))]
+    let _ = (file, path);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

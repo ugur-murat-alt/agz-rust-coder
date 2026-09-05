@@ -1,8 +1,11 @@
 use std::{
     ffi::{OsStr, OsString},
-    fs, io,
+    io,
     path::{Path, PathBuf},
 };
+
+#[cfg(target_os = "linux")]
+use std::fs;
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -12,6 +15,7 @@ pub(crate) enum IdentityError {
     #[cfg(not(target_os = "linux"))]
     #[error("process identity is not available on this platform")]
     Unsupported,
+    #[cfg(target_os = "linux")]
     #[error("malformed process identity: {0}")]
     Malformed(&'static str),
     #[error("process identity I/O failed: {0}")]

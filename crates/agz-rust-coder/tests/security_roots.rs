@@ -8,8 +8,11 @@ use std::{
 use agz_rust_coder::lsp::NormalizeError;
 use agz_rust_coder::lsp::path_to_file_uri;
 use agz_rust_coder::workspace::{
-    ClientRoots, RootError, RootGuard, WalkIssueKind, WalkLimits, WorkspaceRoot, parse_file_uri,
+    ClientRoots, RootError, RootGuard, WalkLimits, WorkspaceRoot, parse_file_uri,
 };
+
+#[cfg(unix)]
+use agz_rust_coder::workspace::WalkIssueKind;
 
 struct TestDir(PathBuf);
 

@@ -73,6 +73,7 @@ impl TestProject {
         Arc::new(CheckService::new(config, guard))
     }
 
+    #[cfg(unix)]
     fn service_with_cargo(&self, cargo: PathBuf) -> Arc<CheckService> {
         let mut config = Config::defaults_at(&self.root);
         config.gate.debounce_ms = 10;
@@ -514,11 +515,14 @@ async fn different_root_epochs_do_not_join_an_active_job() {
 
 #[tokio::test]
 async fn a_new_input_supersedes_the_older_active_job() {
-    let project = TestProject::new(
-        "supersede",
-        "pub fn value() -> usize { 1 }\n",
-        Some("fn main() { std::thread::sleep(std::time::Duration::from_millis(500)); }\n"),
-    );
+    let project = TestProject::new("supersede", "pub fn value() -> usize { 1 }\n", None);
+    let ready = project.state.join("build-ready");
+    let release = project.state.join("build-release");
+    // Synchronize with actual Cargo execution, not preflight wall-clock speed.
+    fs::write(project.root.join("build.rs"), format!(
+        "fn main() {{ std::fs::write({:?}, b\"ready\").unwrap(); let start = std::time::Instant::now(); while !std::path::Path::new({:?}).exists() {{ assert!(start.elapsed() < std::time::Duration::from_secs(45), \"test barrier expired\"); std::thread::sleep(std::time::Duration::from_millis(10)); }} }}\n",
+        ready, release,
+    )).expect("write bounded build barrier");
     let service = project.service();
     let first = {
         let service = Arc::clone(&service);
@@ -529,28 +533,44 @@ async fn a_new_input_supersedes_the_older_active_job() {
                 .await
         })
     };
-    for _ in 0..200 {
-        if service.active_count() > 0 {
-            break;
+    let started = tokio::time::timeout(Duration::from_secs(30), async {
+        while !ready.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        tokio::time::sleep(Duration::from_millis(5)).await;
+    })
+    .await;
+    if started.is_err() {
+        fs::write(&release, b"release").expect("release failed fixture");
+        service.close().await;
+        panic!("first Cargo build never reached the synchronization barrier");
     }
     fs::write(
         project.root.join("src/lib.rs"),
         "pub fn value() -> usize { 2 }\n",
     )
     .expect("write new source generation");
-    let second = service
-        .run(
-            GateRequest::new(&project.root, GateTargetId::Check),
-            None,
-            None,
-        )
-        .await;
-    let first = first.await.expect("join superseded check");
+    let second = {
+        let service = Arc::clone(&service);
+        let root = project.root.clone();
+        tokio::spawn(async move {
+            service
+                .run(GateRequest::new(root, GateTargetId::Check), None, None)
+                .await
+        })
+    };
+    let first = tokio::time::timeout(Duration::from_secs(20), first).await;
+    fs::write(&release, b"release").expect("release replacement build");
+    let second = tokio::time::timeout(Duration::from_secs(30), second).await;
+    service.close().await;
+    let first = first
+        .expect("older check superseded within its bound")
+        .expect("join older check");
+    let second = second
+        .expect("replacement check completed within its bound")
+        .expect("join replacement");
     assert_eq!(first.status, GateStatus::Superseded, "{first:#?}");
     assert_eq!(second.status, GateStatus::FastPass, "{second:#?}");
-    service.close().await;
+    assert_ne!(first.input_hash, second.input_hash);
 }
 
 #[tokio::test]
@@ -736,6 +756,8 @@ async fn real_nextest_executes_test_filters_and_keeps_doctest_stage() {
 #[tokio::test]
 #[ignore = "requires explicit RUSTC_WRAPPER pointing to checksum-verified sccache 0.17.0"]
 async fn real_sccache_compiles_and_cleans_the_owned_server() {
+    #[cfg(target_os = "linux")]
+    let before = live_sccache_pids();
     use agz_rust_coder::gate::ValidationOptions;
     let project = TestProject::new("sc", "pub fn value() {}\n", None);
     let service = project.service();
@@ -758,6 +780,14 @@ async fn real_sccache_compiles_and_cleans_the_owned_server() {
             .any(|e| e.file_name().to_string_lossy().starts_with("sc-"))
     );
     service.close().await;
+    #[cfg(target_os = "linux")]
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !live_sccache_pids().is_subset(&before) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("sccache left a newly started live process outside its owned session");
 }
 
 #[tokio::test]
@@ -784,4 +814,24 @@ async fn filtered_cargo_with_no_executed_tests_cannot_grant_a_pass() {
         assert_eq!(result.status, expected, "{result:#?}");
     }
     service.close().await;
+}
+
+#[cfg(target_os = "linux")]
+fn live_sccache_pids() -> std::collections::BTreeSet<u32> {
+    let wrapper =
+        fs::canonicalize(std::env::var_os("RUSTC_WRAPPER").expect("explicit sccache wrapper"))
+            .expect("canonical sccache binary");
+    fs::read_dir("/proc")
+        .expect("read process table")
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+            if fs::read_link(entry.path().join("exe")).ok()? != wrapper {
+                return None;
+            }
+            let stat = fs::read_to_string(entry.path().join("stat")).ok()?;
+            let (_, fields) = stat.rsplit_once(')')?;
+            (fields.split_whitespace().next() != Some("Z")).then_some(pid)
+        })
+        .collect()
 }
