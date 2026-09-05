@@ -1,0 +1,103 @@
+name: Verify portable 0.2.0 repairs
+on:
+  push:
+    branches: [chore/prepare-0.2.0]
+    paths: [.github/workflows/verify-portable-release.yml]
+permissions:
+  contents: write
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: c5d856ec332aad15fd01abba573771d8c798006f
+          persist-credentials: false
+      - name: Apply the immutable reviewed repair script
+        shell: bash
+        run: |
+          curl --fail --location --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/prepare-release-repairs.py" https://raw.githubusercontent.com/ugur-murat-alt/agz-rust-coder/e83348354067daa23b3ae41dda821ab66df1e01a/maintenance/prepare_release_repairs.py
+          python3 "$RUNNER_TEMP/prepare-release-repairs.py"
+          rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy
+          cargo +1.88.0 fmt --all
+          git diff --check
+          python3 -m pip install --disable-pip-version-check PyYAML==6.0.2
+          python3 - <<'PY'
+          import yaml
+          for name in ['.github/workflows/ci.yml', '.github/workflows/release.yml']:
+              with open(name, encoding='utf-8') as source:
+                  assert isinstance(yaml.safe_load(source)['jobs'], dict)
+          PY
+      - name: Compile and test portability before the full gate
+        shell: bash
+        run: |
+          cargo +1.88.0 test -p agz-rust-coder --test release_portability --locked -- --nocapture
+          cargo +1.88.0 test -p agz-rust-coder --lib workspace::metadata::tests --locked -- --nocapture
+          cargo +1.88.0 test -p agz-rust-coder --test check_service --locked -- --nocapture
+          cargo +1.88.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Verify actual sccache leak negative control and repaired lifecycle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/sc-tool"
+          curl --fail --location --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/sc-tool/sc.tar.gz" https://github.com/mozilla/sccache/releases/download/v0.17.0/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz
+          (cd "$RUNNER_TEMP/sc-tool" && echo '67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006  sc.tar.gz' | sha256sum --check && tar -xzf sc.tar.gz --strip-components=1)
+          META=crates/agz-rust-coder/src/workspace/metadata.rs
+          cp "$META" "$RUNNER_TEMP/fixed-metadata.rs"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('crates/agz-rust-coder/src/workspace/metadata.rs')
+          text = p.read_text()
+          old = 'environment.insert("RUSTC_WRAPPER".into(), "".into());'
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, 'let _ = &mut environment;'))
+          PY
+          cargo +1.88.0 test -p agz-rust-coder --test check_service --locked --no-run --message-format=json > "$RUNNER_TEMP/tests.jsonl"
+          TEST_EXE="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "check_service" and .executable != null) | .executable' "$RUNNER_TEMP/tests.jsonl")"
+          set +e
+          RUSTC_WRAPPER="$RUNNER_TEMP/sc-tool/sccache" "$TEST_EXE" real_sccache --ignored --nocapture --test-threads=1 > "$RUNNER_TEMP/sc-before.log" 2>&1
+          BEFORE=$?
+          set -e
+          cat "$RUNNER_TEMP/sc-before.log"
+          test "$BEFORE" -ne 0
+          grep -F 'sccache left a newly started live process' "$RUNNER_TEMP/sc-before.log"
+          "$RUNNER_TEMP/sc-tool/sccache" --stop-server
+          cp "$RUNNER_TEMP/fixed-metadata.rs" "$META"
+          cargo +1.88.0 test -p agz-rust-coder --test check_service --locked --no-run --message-format=json > "$RUNNER_TEMP/tests.jsonl"
+          TEST_EXE="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "check_service" and .executable != null) | .executable' "$RUNNER_TEMP/tests.jsonl")"
+          RUSTC_WRAPPER="$RUNNER_TEMP/sc-tool/sccache" "$TEST_EXE" real_sccache --ignored --nocapture --test-threads=1
+          for attempt in 1 2 3 4 5; do
+            "$TEST_EXE" a_new_input_supersedes_the_older_active_job --exact --nocapture
+          done
+          cargo +1.88.0 fmt --all --check
+      - name: Store verified source blobs without changing refs
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, pathlib, subprocess, urllib.request
+          expected = {'.github/workflows/ci.yml', 'CHANGELOG.md', 'crates/agz-rust-coder/src/cache/atomic.rs', 'crates/agz-rust-coder/src/docs/cache.rs', 'crates/agz-rust-coder/src/gate/lease.rs', 'crates/agz-rust-coder/src/process/identity.rs', 'crates/agz-rust-coder/src/process/supervisor.rs', 'crates/agz-rust-coder/src/tools/check.rs', 'crates/agz-rust-coder/src/workspace/metadata.rs', 'crates/agz-rust-coder/tests/check_service.rs', 'crates/agz-rust-coder/tests/release_portability.rs', 'xtask/src/child_process.rs', 'docs/tools.md', 'docs/tools.tr.md'}
+          subprocess.run(['git', 'add', '--', *sorted(expected)], check=True)
+          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
+          changed = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines()
+          assert set(changed) == expected, changed
+          entries = []
+          for name in changed:
+              mode, sha, _ = subprocess.check_output(['git', 'ls-files', '--stage', name], text=True).split(maxsplit=2)
+              data = subprocess.check_output(['git', 'cat-file', 'blob', sha])
+              payload = json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()}).encode()
+              request = urllib.request.Request('https://api.github.com/repos/ugur-murat-alt/agz-rust-coder/git/blobs', data=payload, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Content-Type': 'application/json', 'User-Agent': 'agz-verified-release-repair'})
+              with urllib.request.urlopen(request, timeout=45) as response:
+                  result = json.load(response)
+              assert result['sha'] == sha
+              entries.append({'path': name, 'mode': mode, 'type': 'blob', 'sha': sha})
+          print('VERIFIED_REPAIR_TREE=' + subprocess.check_output(['git', 'write-tree'], text=True).strip())
+          print(json.dumps(entries, indent=2))
+          PY
