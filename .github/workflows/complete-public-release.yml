@@ -1,0 +1,129 @@
+name: Complete and verify approved public release
+on:
+  push:
+    branches: [maintenance/finalize-0.2.0]
+    paths: [.github/workflows/complete-public-release.yml]
+permissions:
+  contents: read
+jobs:
+  workflow-repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 24362049314192a6c78a2e50334ff4206056f294
+          persist-credentials: false
+      - name: Store the minimal future release-workflow correction
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, pathlib, subprocess, urllib.request
+          p = pathlib.Path('.github/workflows/release.yml')
+          source = p.read_text()
+          needle = '            release-artifact/*.crate ' + chr(92) + chr(10)
+          assert source.count(needle) == 1
+          source = source.replace(needle, needle + '            release-artifact/agz-rust-coder-source.bundle ' + chr(92) + chr(10))
+          p.write_text(source)
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          data = p.read_bytes()
+          expected = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+          request = urllib.request.Request('https://api.github.com/repos/ugur-murat-alt/agz-rust-coder/git/blobs', data=json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()}).encode(), headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Content-Type': 'application/json', 'User-Agent': 'agz-release-completion'})
+          with urllib.request.urlopen(request, timeout=45) as response:
+              result = json.load(response)
+          assert result['sha'] == expected
+          print('RELEASE_WORKFLOW_BLOB=' + expected)
+          PY
+  verify-publication:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ugur-murat-alt/agz-rust-coder
+      RELEASE_RUN: '33964310410'
+      RELEASE_SHA: 24362049314192a6c78a2e50334ff4206056f294
+      RELEASE_TAG: agz-rust-coder-v0.2.0
+    steps:
+      - name: Require the exact guarded release to finish successfully
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 120); do
+            gh api "repos/$GH_REPO/actions/runs/$RELEASE_RUN" > run.json
+            test "$(jq -r .head_sha run.json)" = "$RELEASE_SHA"
+            test "$(jq -r .path run.json)" = .github/workflows/release.yml
+            if [ "$(jq -r .status run.json)" = completed ]; then
+              test "$(jq -r .conclusion run.json)" = success
+              exit 0
+            fi
+            sleep 15
+          done
+          echo 'Guarded release did not finish within the verification deadline.' >&2
+          exit 1
+      - name: Match the verified source and public checksums before adding the missing asset
+        run: |
+          set -euo pipefail
+          gh run download "$RELEASE_RUN" --name "artifact-package-$RELEASE_SHA" --dir verified
+          (cd verified && sha256sum --check SHA256SUMS)
+          test "$(cat verified/SOURCE_SHA)" = "$RELEASE_SHA"
+          test "$(git bundle list-heads verified/agz-rust-coder-source.bundle HEAD | awk '{print $1}')" = "$RELEASE_SHA"
+          test "$(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq .object.sha)" = "$RELEASE_SHA"
+          gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > release.json
+          test "$(jq -r .draft release.json)" = false
+          test "$(jq -r .prerelease release.json)" = false
+          gh release download "$RELEASE_TAG" --dir public
+          cmp verified/SHA256SUMS public/SHA256SUMS
+          cmp verified/agz-rust-coder-0.2.0.crate public/agz-rust-coder-0.2.0.crate
+          cmp verified/install.sh public/install.sh
+          if [ -f public/agz-rust-coder-source.bundle ]; then
+            cmp verified/agz-rust-coder-source.bundle public/agz-rust-coder-source.bundle
+          else
+            gh release upload "$RELEASE_TAG" verified/agz-rust-coder-source.bundle
+          fi
+      - name: Independently verify downloadable assets and both published registries
+        run: |
+          set -euo pipefail
+          gh release download "$RELEASE_TAG" --dir downloaded
+          (cd downloaded && sha256sum --check SHA256SUMS)
+          for checksum in downloaded/*.tar.gz.sha256; do
+            (cd downloaded && sha256sum --check "$(basename "$checksum")")
+          done
+          gh api "repos/$GH_REPO/contents/server.json?ref=$RELEASE_SHA" --jq .content | base64 --decode > expected-server.json
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, time, urllib.error, urllib.request
+          def get(url):
+              for attempt in range(6):
+                  try:
+                      request = urllib.request.Request(url, headers={'User-Agent': 'agz-rust-coder-release-verification/0.2.0'})
+                      with urllib.request.urlopen(request, timeout=30) as response:
+                          return json.load(response)
+                  except (urllib.error.URLError, TimeoutError):
+                      if attempt == 5:
+                          raise
+                      time.sleep(5)
+          root = pathlib.Path('downloaded')
+          required = {'agz-rust-coder-0.2.0.crate', 'agz-rust-coder-source.bundle', 'SHA256SUMS', 'install.sh'}
+          for platform in ['linux-x86_64', 'macos-arm64', 'windows-x86_64']:
+              required |= {'agz-rust-coder-' + platform + '.tar.gz', 'agz-rust-coder-' + platform + '.tar.gz.sha256'}
+          assert required.issubset({p.name for p in root.iterdir()})
+          checksum = hashlib.sha256((root / 'agz-rust-coder-0.2.0.crate').read_bytes()).hexdigest()
+          package = get('https://crates.io/api/v1/crates/agz-rust-coder/0.2.0')['version']
+          assert package['num'] == '0.2.0' and package['checksum'] == checksum and not package['yanked']
+          registry = get('https://registry.modelcontextprotocol.io/v0.1/servers/io.github.ugur-murat-alt%2Fagz-rust-coder/versions/0.2.0')
+          assert registry['server'] == json.loads(pathlib.Path('expected-server.json').read_text())
+          report = {'status': 'PASS', 'version': '0.2.0', 'sourceCommit': os.environ['RELEASE_SHA'], 'guardedRun': os.environ['RELEASE_RUN'], 'assets': sorted(required), 'crateSha256': checksum, 'cratesIoVerified': True, 'mcpRegistryVerified': True, 'publicChecksumsVerified': True}
+          pathlib.Path('release-verification.json').write_text(json.dumps(report, indent=2) + '\n')
+          print(json.dumps(report, indent=2))
+          PY
+      - name: Retain publication verification evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: published-release-verification-0.2.0
+          path: release-verification.json
+          if-no-files-found: error
+          retention-days: 30
