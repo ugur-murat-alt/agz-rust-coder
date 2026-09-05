@@ -1,0 +1,232 @@
+name: Verify 0.2.0 release repairs
+
+on:
+  push:
+    branches: [chore/prepare-0.2.0]
+    paths: [.github/workflows/repair-release.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: c5d856ec332aad15fd01abba573771d8c798006f
+          persist-credentials: false
+      - name: Apply narrowly scoped release corrections
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import textwrap
+          def replace(name, old, new):
+              path = Path(name)
+              text = path.read_text()
+              assert text.count(old) == 1, (name, old)
+              path.write_text(text.replace(old, new))
+          metadata = 'crates/agz-rust-coder/src/workspace/metadata.rs'
+          replace(metadata,
+              'let root = std::env::temp_dir().join(format!(',
+              'let root = std::fs::canonicalize(std::env::temp_dir())\n                .expect("canonical temp directory")\n                .join(format!(')
+          replace(metadata,
+              'let environment = std::env::vars_os().collect::<BTreeMap<_, _>>();',
+              '// Cargo metadata may invoke RUSTC_WRAPPER for compiler information.\n        // Keep an auto-started sccache server and compiler in the supervised tree.\n        let mut environment = std::env::vars_os().collect::<BTreeMap<_, _>>();\n        environment.insert("SCCACHE_NO_DAEMON".into(), "1".into());\n        environment.insert("SCCACHE_CLIENT_SIDE".into(), "1".into());')
+          path = Path('crates/agz-rust-coder/tests/check_service.rs')
+          text = path.read_text()
+          begin = text.index('#[tokio::test]\nasync fn a_new_input_supersedes_the_older_active_job()')
+          end = text.index('#[tokio::test]\nasync fn streamed_error_has_request_timing', begin)
+          new = '''#[tokio::test]
+          async fn a_new_input_supersedes_the_older_active_job() {
+              let project = TestProject::new("supersede", "pub fn value() -> usize { 1 }\n", None);
+              let ready = project.state.join("build-ready");
+              let release = project.state.join("build-release");
+              // Wait for real Cargo execution rather than assuming preflight finishes
+              // in one second. The first build remains active until superseded.
+              fs::write(project.root.join("build.rs"), format!(
+                  "fn main() {{ std::fs::write({:?}, b\"ready\").unwrap(); let start = std::time::Instant::now(); while !std::path::Path::new({:?}).exists() {{ assert!(start.elapsed() < std::time::Duration::from_secs(45), \"test barrier expired\"); std::thread::sleep(std::time::Duration::from_millis(10)); }} }}\n",
+                  ready, release,
+              )).expect("write bounded build barrier");
+              let service = project.service();
+              let first = {
+                  let service = Arc::clone(&service);
+                  let root = project.root.clone();
+                  tokio::spawn(async move {
+                      service.run(GateRequest::new(root, GateTargetId::Check), None, None).await
+                  })
+              };
+              let started = tokio::time::timeout(Duration::from_secs(30), async {
+                  while !ready.exists() {
+                      tokio::time::sleep(Duration::from_millis(10)).await;
+                  }
+              }).await;
+              if started.is_err() {
+                  fs::write(&release, b"release").expect("release failed fixture");
+                  service.close().await;
+                  panic!("first Cargo build never reached the synchronization barrier");
+              }
+              fs::write(project.root.join("src/lib.rs"), "pub fn value() -> usize { 2 }\n")
+                  .expect("write new source generation");
+              let second = {
+                  let service = Arc::clone(&service);
+                  let root = project.root.clone();
+                  tokio::spawn(async move {
+                      service.run(GateRequest::new(root, GateTargetId::Check), None, None).await
+                  })
+              };
+              let first = tokio::time::timeout(Duration::from_secs(20), first).await;
+              fs::write(&release, b"release").expect("release replacement build");
+              let second = tokio::time::timeout(Duration::from_secs(30), second).await;
+              service.close().await;
+              let first = first.expect("older check was superseded within its bound")
+                  .expect("join superseded check");
+              let second = second.expect("replacement check completed within its bound")
+                  .expect("join replacement check");
+              assert_eq!(first.status, GateStatus::Superseded, "{first:#?}");
+              assert_eq!(second.status, GateStatus::FastPass, "{second:#?}");
+              assert_ne!(first.input_hash, second.input_hash);
+          }
+
+          '''
+          new = '\n'.join(line[10:] if line.startswith(' ' * 10) else line for line in new.split('\n'))
+          text = text[:begin] + new + text[end:]
+          anchor = 'async fn real_sccache_compiles_and_cleans_the_owned_server() {\n'
+          assert text.count(anchor) == 1
+          text = text.replace(anchor, anchor + '    #[cfg(target_os = "linux")]\n    let before = live_sccache_pids();\n')
+          begin = text.index(anchor)
+          end = text.index('\n#[tokio::test]\nasync fn filtered_cargo', begin)
+          section = text[begin:end]
+          assert section.count('    service.close().await;\n}') == 1
+          section = section.replace('    service.close().await;\n}', '''    service.close().await;
+              #[cfg(target_os = "linux")]
+              tokio::time::timeout(Duration::from_secs(5), async {
+                  while !live_sccache_pids().is_subset(&before) {
+                      tokio::time::sleep(Duration::from_millis(25)).await;
+                  }
+              }).await.expect("sccache left a newly started live process outside its owned session");
+          }
+          ''')
+          text = text[:begin] + section + text[end:]
+          text += '''
+          #[cfg(target_os = "linux")]
+          fn live_sccache_pids() -> std::collections::BTreeSet<u32> {
+              let wrapper = fs::canonicalize(std::env::var_os("RUSTC_WRAPPER")
+                  .expect("explicit sccache wrapper")).expect("canonical sccache binary");
+              fs::read_dir("/proc").expect("read process table")
+                  .filter_map(Result::ok)
+                  .filter_map(|entry| {
+                      let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+                      if fs::read_link(entry.path().join("exe")).ok()? != wrapper {
+                          return None;
+                      }
+                      let stat = fs::read_to_string(entry.path().join("stat")).ok()?;
+                      let (_, fields) = stat.rsplit_once(')')?;
+                      (fields.split_whitespace().next() != Some("Z")).then_some(pid)
+                  }).collect()
+          }
+          '''
+          path.write_text(text)
+          replace('crates/agz-rust-coder/src/process/identity.rs', '    fs, io,', '    io,')
+          replace('crates/agz-rust-coder/src/process/identity.rs', 'use sha2::{Digest, Sha256};', '#[cfg(target_os = "linux")]\nuse std::fs;\n\nuse sha2::{Digest, Sha256};')
+          replace('crates/agz-rust-coder/src/process/identity.rs', '    #[error("malformed process identity: {0}")]', '    #[cfg(target_os = "linux")]\n    #[error("malformed process identity: {0}")]')
+          replace('xtask/src/child_process.rs', '#[cfg(test)]\nmod tests {', '#[cfg(all(test, target_os = "linux"))]\nmod tests {')
+          replace('xtask/src/child_process.rs', '    #[cfg(target_os = "linux")]\n    #[tokio::test]', '    #[tokio::test]')
+          replace('.github/workflows/ci.yml', '      - name: Run protocol smoke\n', '''      - name: Install smoke server outside authorized source roots
+                  shell: bash
+                  run: |
+                    cargo +1.88.0 build -p agz-rust-coder --locked
+                    python3 - <<'PYTHON'
+                    import os, pathlib, shutil, tempfile
+                    suffix = '.exe' if os.name == 'nt' else ''
+                    directory = pathlib.Path(tempfile.mkdtemp(prefix='agz-smoke-', dir=os.environ['RUNNER_TEMP'])).resolve()
+                    source = pathlib.Path('target/debug') / ('agz-rust-coder' + suffix)
+                    destination = directory / source.name
+                    shutil.copy2(source, destination)
+                    destination.chmod(0o755)
+                    with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as environment:
+                        environment.write('AGZ_RUST_CODER_BIN=' + str(destination) + '\\n')
+                    PYTHON
+
+                - name: Run protocol smoke
+          '''.replace('\n          ', '\n').rstrip() + '\n')
+          replace('CHANGELOG.md', '- Corrected aggregate diagnostic timing, completed-stage counts, failed-test\n  tails, zero-test matches and workspace doctest selection.', '- Corrected aggregate diagnostic timing, completed-stage counts, failed-test\n  tails, zero-test matches and workspace doctest selection.\n- Kept sccache compiler-information probes in the supervised process tree.\n- Corrected canonical temporary paths and timing-independent supersession\n  fixtures, and installed smoke binaries outside authorized source roots.')
+          PY
+      - name: Format and inspect the exact repair
+        shell: bash
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy
+          cargo +1.88.0 fmt --all
+          git diff --check
+          git diff --stat
+          git diff -- .github/workflows/ci.yml crates/agz-rust-coder/src/workspace/metadata.rs crates/agz-rust-coder/tests/check_service.rs
+      - name: Install the exact optional tool for the process regression
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/agz-repair-tools"
+          cd "$RUNNER_TEMP/agz-repair-tools"
+          curl --fail --location --proto '=https' --tlsv1.2 -o sccache.tar.gz https://github.com/mozilla/sccache/releases/download/v0.17.0/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz
+          echo '67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006  sccache.tar.gz' | sha256sum --check
+          tar -xzf sccache.tar.gz --strip-components=1
+      - name: Require the leak regression to fail before the ownership fix and pass after it
+        shell: bash
+        run: |
+          META=crates/agz-rust-coder/src/workspace/metadata.rs
+          cp "$META" "$RUNNER_TEMP/fixed-metadata.rs"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('crates/agz-rust-coder/src/workspace/metadata.rs')
+          text = p.read_text()
+          for line in ['        environment.insert("SCCACHE_NO_DAEMON".into(), "1".into());\n', '        environment.insert("SCCACHE_CLIENT_SIDE".into(), "1".into());\n']:
+              assert text.count(line) == 1
+              text = text.replace(line, '')
+          p.write_text(text)
+          PY
+          cargo +1.88.0 test -p agz-rust-coder --test check_service --locked --no-run --message-format=json > "$RUNNER_TEMP/tests.jsonl"
+          TEST_EXE="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "check_service" and .executable != null) | .executable' "$RUNNER_TEMP/tests.jsonl")"
+          test -x "$TEST_EXE"
+          set +e
+          RUSTC_WRAPPER="$RUNNER_TEMP/agz-repair-tools/sccache" "$TEST_EXE" real_sccache --ignored --nocapture --test-threads=1 > "$RUNNER_TEMP/sccache-before.log" 2>&1
+          BEFORE=$?
+          set -e
+          cat "$RUNNER_TEMP/sccache-before.log"
+          test "$BEFORE" -ne 0
+          grep -F 'sccache left a newly started live process' "$RUNNER_TEMP/sccache-before.log"
+          "$RUNNER_TEMP/agz-repair-tools/sccache" --stop-server
+          cp "$RUNNER_TEMP/fixed-metadata.rs" "$META"
+          cargo +1.88.0 test -p agz-rust-coder --test check_service --locked --no-run --message-format=json > "$RUNNER_TEMP/tests.jsonl"
+          TEST_EXE="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "check_service" and .executable != null) | .executable' "$RUNNER_TEMP/tests.jsonl")"
+          RUSTC_WRAPPER="$RUNNER_TEMP/agz-repair-tools/sccache" "$TEST_EXE" real_sccache --ignored --nocapture --test-threads=1
+          for attempt in 1 2 3 4 5; do
+            "$TEST_EXE" a_new_input_supersedes_the_older_active_job --exact --nocapture
+          done
+          cargo +1.88.0 test -p agz-rust-coder --lib workspace::metadata::tests --locked
+          cargo +1.88.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo +1.88.0 fmt --all --check
+      - name: Upload only verified repair blobs; do not alter branches or releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, pathlib, subprocess, urllib.request
+          subprocess.run(['git', 'add', '-u'], check=True)
+          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
+          changed = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines()
+          expected = {'.github/workflows/ci.yml', 'CHANGELOG.md', 'crates/agz-rust-coder/src/workspace/metadata.rs', 'crates/agz-rust-coder/src/process/identity.rs', 'crates/agz-rust-coder/tests/check_service.rs', 'xtask/src/child_process.rs'}
+          assert set(changed) == expected, changed
+          entries = []
+          for name in changed:
+              mode, sha, _ = subprocess.check_output(['git', 'ls-files', '--stage', name], text=True).split(maxsplit=2)
+              payload = json.dumps({'encoding': 'base64', 'content': base64.b64encode(pathlib.Path(name).read_bytes()).decode()}).encode()
+              request = urllib.request.Request('https://api.github.com/repos/ugur-murat-alt/agz-rust-coder/git/blobs', data=payload, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json', 'User-Agent': 'agz-release-repair'})
+              with urllib.request.urlopen(request, timeout=45) as response:
+                  result = json.load(response)
+              assert result['sha'] == sha
+              entries.append({'path': name, 'mode': mode, 'type': 'blob', 'sha': sha})
+          print('VERIFIED_REPAIR_TREE=' + subprocess.check_output(['git', 'write-tree'], text=True).strip())
+          print(json.dumps(entries, indent=2))
+          print('No commit, branch, tag, secret or release changed by this job.')
+          PY
