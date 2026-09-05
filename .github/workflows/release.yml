@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Exact tag to create, for example agz-rust-coder-v0.1.1"
+        description: "Exact tag to create, for example agz-rust-coder-v0.2.0"
         required: true
         type: string
       publish:
@@ -25,6 +25,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  regression:
+    name: Release regression gate
+    uses: ./.github/workflows/ci.yml
+
   verify:
     name: Verify release artifact
     runs-on: ubuntu-24.04
@@ -226,6 +230,7 @@ jobs:
       inputs.publish == true ||
       (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/'))
     needs:
+      - regression
       - verify
       - release-binaries
     runs-on: ubuntu-24.04

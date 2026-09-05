@@ -1,6 +1,6 @@
 # Araç ve Yapılandırma Referansı
 
-Bu belge `agz-rust-coder` `0.1.1` sürümünün açık araç ve yapılandırma yüzeyini
+Bu belge `agz-rust-coder` `0.2.0` sürümünün açık araç ve yapılandırma yüzeyini
 tanımlar.
 
 İstek zaman aşımı ve iptal denetimleri, Cargo öncesi ve sonrasındaki Git
@@ -140,11 +140,11 @@ Bu doğrulanamazsa semantik araçlar süreci başlatmadan erişilememe döndür�
 - [Benchmark protokolü](benchmark.tr.md)
 - [Güvenlik politikası](../SECURITY.md)
 
-## Explicit validation options
+## Açık doğrulama seçenekleri
 
-Aşağıdaki `check` ekleri **henüz yayımlanmamış geliştirme değişiklikleridir**;
-yayımlı 0.1.1 binary'sinde yoktur. `options` verilmezse mevcut Cargo davranışı
-korunur. Örnekler kabuk komutu değil MCP argüman nesnesidir:
+Aşağıdaki `check` ekleri **0.2.0 sürümünden itibaren kullanılabilir**. `options`
+verilmezse mevcut Cargo davranışı korunur. Örnekler kabuk komutu değil MCP
+argüman nesnesidir:
 
 ```json
 {"target":"check","options":{"noDefaultFeatures":true,"features":["serde"],"context":true}}

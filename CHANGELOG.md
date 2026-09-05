@@ -5,24 +5,42 @@ Semantic Versioning and follows the Keep a Changelog structure.
 
 ## [Unreleased]
 
-- Preserve pre-spawn cancellation/timeout outcomes through Git, metadata and
-  analyzer probes; prevent lost LSP completion and capacity wakeups.
+## [0.2.0] - 2026-09-05
 
 ### Added
 
-- Bounded streaming Cargo diagnostics, explicit omission/telemetry fields and provisional progress.
-- Typed validation feature/target/test options and opt-in source/dependency context.
-- Opt-in version-checked Nextest and supervised Unix-local Sccache, plus real integration tests.
-- Property and Loom tests, a read-only identity measurement harness and strict comparison tooling.
+- Bounded streaming Cargo diagnostics, explicit omission/telemetry fields and
+  provisional progress; early compiler evidence is never a completed pass.
+- Typed feature, target and test-filter options, scoped development validation,
+  and opt-in source context with exact resolved dependency versions.
+- Opt-in version-checked Nextest and supervised Unix-local Sccache, with
+  separate doctests, no silent fallback and real integration coverage.
+- Property-based and Loom regression tests, a read-only identity measurement
+  harness, and strict same-input benchmark comparison tooling.
 
 ### Fixed
 
-- Avoid quadratic workspace file re-counting without changing content identities.
-- Prevent missed completion wakeups, expired/cancelled spawns and unbounded post-kill polling.
-- Bound compiler suggestion source reads and preserve Unicode scalar coordinates.
-- Recheck failed-compilation edit/context freshness; clear edits after cancelled or unclean execution.
-- Correct aggregate diagnostic timing, completed-stage counts, failed-test tails and workspace doctest selection.
+- Avoided quadratic workspace file re-counting without changing content
+  identities, file budgets or authorized-root boundaries.
+- Preserved pre-spawn cancellation and timeout outcomes through Git, metadata
+  and analyzer probes; prevented lost process/job/LSP completion wakeups.
+- Bounded post-kill cleanup and compiler suggestion source reads; preserved
+  Unicode scalar coordinates rather than treating columns as byte offsets.
+- Rechecked failed-compilation edit/context freshness and cleared edits after
+  cancelled, timed-out or unclean execution.
+- Corrected aggregate diagnostic timing, completed-stage counts, failed-test
+  tails, zero-test matches and workspace doctest selection.
 
+### Changed
+
+- Required the existing Linux/macOS/Windows CI, optional-acceleration tests and
+  dependency policy before release publication, in addition to artifact checks.
+- Advanced to 0.2.0 because public Rust request/evidence structs gain fields.
+  Library consumers using struct literals must supply the new fields or use
+  constructors/builders such as `GateRequest::new(...).with_options(...)`.
+  The 12 MCP tools, prior required inputs and default Cargo behavior remain
+  compatible. `all` validates the recorded configuration, not every possible
+  feature combination or platform. Supervised Sccache remains Unix-only.
 
 ## [0.1.1] - 2026-09-04
 
@@ -79,6 +97,7 @@ Semantic Versioning and follows the Keep a Changelog structure.
 - Cargo distribution through crates.io and discovery metadata for the official
   MCP Registry.
 
-[Unreleased]: https://github.com/ugur-murat-alt/agz-rust-coder/compare/agz-rust-coder-v0.1.1...HEAD
+[Unreleased]: https://github.com/ugur-murat-alt/agz-rust-coder/compare/agz-rust-coder-v0.2.0...HEAD
+[0.2.0]: https://github.com/ugur-murat-alt/agz-rust-coder/compare/agz-rust-coder-v0.1.1...agz-rust-coder-v0.2.0
 [0.1.1]: https://github.com/ugur-murat-alt/agz-rust-coder/compare/agz-rust-coder-v0.1.0...agz-rust-coder-v0.1.1
 [0.1.0]: https://github.com/ugur-murat-alt/agz-rust-coder/releases/tag/agz-rust-coder-v0.1.0
