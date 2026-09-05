@@ -275,7 +275,13 @@ fn ensure_directory(path: &Path) -> Result<(), LeaseError> {
 fn no_symlink_components(path: &Path) -> bool {
     let mut current = PathBuf::new();
     for component in path.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return false;
+        }
         current.push(component.as_os_str());
+        if matches!(component, std::path::Component::Prefix(_)) {
+            continue;
+        }
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => return false,
             Ok(_) => {}
@@ -290,14 +296,23 @@ fn process_is_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
-    #[cfg(unix)]
-    {
-        PathBuf::from(format!("/proc/{pid}/stat")).is_file()
+    if pid == std::process::id() {
+        return true;
     }
-    #[cfg(not(unix))]
+    #[cfg(target_os = "linux")]
     {
-        let _ = pid;
-        false
+        // An unreadable process is not evidence of a dead owner.
+        match fs::metadata(format!("/proc/{pid}")) {
+            Ok(_) => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(_) => true,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Without a verified OS liveness probe, fail closed instead of stealing
+        // a live foreign process's lease. Manual recovery may be required.
+        true
     }
 }
 

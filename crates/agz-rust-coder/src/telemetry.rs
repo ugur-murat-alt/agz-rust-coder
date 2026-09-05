@@ -424,6 +424,8 @@ fn set_private_file_permissions(file: &File) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
+// Preserve the shared fallible interface on platforms with a no-op implementation.
+#[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
 fn set_private_file_permissions(_file: &File) -> io::Result<()> {
     Ok(())
 }
@@ -435,6 +437,8 @@ fn set_private_directory_permissions(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
+// Preserve the shared fallible interface on platforms with a no-op implementation.
+#[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
 fn set_private_directory_permissions(_path: &Path) -> io::Result<()> {
     Ok(())
 }

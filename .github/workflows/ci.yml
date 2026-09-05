@@ -52,9 +52,29 @@ jobs:
         shell: bash
         run: cargo +1.88.0 fmt --all --check
 
+      - name: Run strict Clippy on every platform
+        shell: bash
+        run: cargo +1.88.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
+
       - name: Run workspace tests
         shell: bash
         run: cargo +1.88.0 test --workspace --all-targets --all-features --locked --no-fail-fast
+
+      - name: Install smoke server outside authorized source roots
+        shell: bash
+        run: |
+          cargo +1.88.0 build -p agz-rust-coder --locked
+          python3 - <<'PYTHON'
+          import os, pathlib, shutil, tempfile
+          suffix = '.exe' if os.name == 'nt' else ''
+          directory = pathlib.Path(tempfile.mkdtemp(prefix='agz-smoke-', dir=os.environ['RUNNER_TEMP'])).resolve()
+          source = pathlib.Path('target/debug') / ('agz-rust-coder' + suffix)
+          destination = directory / source.name
+          shutil.copy2(source, destination)
+          destination.chmod(0o755)
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as environment:
+              environment.write('AGZ_RUST_CODER_BIN=' + str(destination) + '\n')
+          PYTHON
 
       - name: Run protocol smoke
         shell: bash
@@ -72,7 +92,6 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          cargo +1.88.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
           cargo +1.88.0 check --workspace --all-targets --all-features --locked
           cargo +1.88.0 build --release --locked
 

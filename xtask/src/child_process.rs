@@ -159,12 +159,11 @@ async fn join_readers(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::{fs, time::SystemTime};
 
-    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn timeout_kills_and_reaps_the_process_group() {
         let stamp = SystemTime::now()

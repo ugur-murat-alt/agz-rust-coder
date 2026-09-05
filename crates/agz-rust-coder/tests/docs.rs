@@ -69,12 +69,14 @@ fn write_workspace(root: &Path, package: &str, lock_package: &str, source: Optio
     .expect("write lockfile");
 }
 
+#[cfg(unix)]
 #[derive(Debug)]
 struct RecordingGenerator(Arc<AtomicBool>);
 
 #[derive(Debug)]
 struct CountingGenerator(Arc<AtomicUsize>);
 
+#[cfg(unix)]
 impl LocalDocGenerator for RecordingGenerator {
     fn generate(&self, _request: &LocalDocRequest) -> Result<Vec<GeneratedPage>, String> {
         self.0.store(true, Ordering::SeqCst);

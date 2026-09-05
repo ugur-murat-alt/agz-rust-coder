@@ -645,6 +645,8 @@ fn validate_directory_identity(path: &Path, directory: &Dir) -> Result<(), DocsC
             path: path.to_owned(),
             message: error.to_string(),
         })?;
+    #[cfg(not(unix))]
+    let _ = &opened;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;

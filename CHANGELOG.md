@@ -30,6 +30,12 @@ Semantic Versioning and follows the Keep a Changelog structure.
   cancelled, timed-out or unclean execution.
 - Corrected aggregate diagnostic timing, completed-stage counts, failed-test
   tails, zero-test matches and workspace doctest selection.
+- Prevented metadata compiler-information probes from starting an unmanaged
+  sccache daemon before an explicitly requested supervised cache session.
+- Corrected Windows drive-prefix checks and job-completion polling, preserved
+  live host leases on macOS/Windows, and fixed canonical-path/timing fixtures.
+- Installed smoke binaries outside authorized source roots without weakening
+  the root-bound executable check.
 
 ### Changed
 

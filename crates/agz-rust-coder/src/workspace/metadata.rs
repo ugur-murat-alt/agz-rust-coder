@@ -162,6 +162,7 @@ pub struct MetadataControl {
     cancellation: CancellationToken,
     supervisor: ProcessSupervisor,
     runtime: Handle,
+    supervised_sccache: bool,
 }
 
 impl MetadataControl {
@@ -177,7 +178,14 @@ impl MetadataControl {
             cancellation,
             supervisor,
             runtime,
+            supervised_sccache: false,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn with_supervised_sccache(mut self, enabled: bool) -> Self {
+        self.supervised_sccache = enabled;
+        self
     }
 
     pub(crate) fn checkpoint(&self) -> Result<(), MetadataError> {
@@ -288,7 +296,14 @@ impl MetadataRunner for CargoMetadataRunner {
             return Err(MetadataError::LockedRequired);
         }
         control.checkpoint()?;
-        let environment = std::env::vars_os().collect::<BTreeMap<_, _>>();
+        // An explicitly supervised sccache session starts only after metadata.
+        // Metadata's rustc information probes must not start an ambient daemon.
+        // Empty RUSTC_WRAPPER overrides Cargo config for this subprocess only;
+        // compilation still uses the validated, owned wrapper session.
+        let mut environment = std::env::vars_os().collect::<BTreeMap<_, _>>();
+        if control.supervised_sccache {
+            environment.insert("RUSTC_WRAPPER".into(), "".into());
+        }
         let result = control
             .runtime
             .block_on(
@@ -376,6 +391,7 @@ struct MetadataKey {
     epoch: u64,
     generation: u64,
     graph_fingerprint: [u8; 32],
+    supervised_sccache: bool,
 }
 
 #[derive(Debug)]
@@ -569,6 +585,7 @@ impl<R: MetadataRunner> MetadataService<R> {
             epoch: selection.epoch(),
             generation,
             graph_fingerprint,
+            supervised_sccache: control.is_some_and(|control| control.supervised_sccache),
         };
 
         let (flight, _) = loop {
@@ -1295,10 +1312,12 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .expect("system time")
                 .as_nanos();
-            let root = std::env::temp_dir().join(format!(
-                "agz-rust-coder-metadata-control-{label}-{}-{stamp}",
-                std::process::id()
-            ));
+            let root = std::fs::canonicalize(std::env::temp_dir())
+                .expect("canonical temp directory")
+                .join(format!(
+                    "agz-rust-coder-metadata-control-{label}-{}-{stamp}",
+                    std::process::id()
+                ));
             std::fs::create_dir_all(root.join("src")).expect("create workspace");
             std::fs::write(root.join(".git"), "fixture worktree marker").expect("write marker");
             std::fs::write(

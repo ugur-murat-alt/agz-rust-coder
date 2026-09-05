@@ -2466,6 +2466,8 @@ fn authorize_exact_root(
     Ok((exact.path().to_owned(), exact))
 }
 
+// Preserve the shared fallible interface on platforms with a no-op implementation.
+#[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
 fn authorities_match(left: &AuthorizedRoot, right: &AuthorizedRoot) -> Result<bool, ManagerError> {
     if left.path() != right.path() {
         return Ok(false);

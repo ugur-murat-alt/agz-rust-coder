@@ -203,3 +203,10 @@ tercih edilmelidir. Önceki MCP alanları ve varsayılanlar şema testleriyle ko
 
 [Altı başlık planı](rust-efficiency-plan.tr.md) ve
 [doğrulama kanıtı](rust-efficiency-evidence.md).
+
+macOS ve Windows üzerinde başka bir sürece ait olduğu görülen, fakat sahibinin
+sonlandığı doğrulanamayan host lease dosyaları silinmez. Sahip sürecin çöktüğü
+doğrulandıktan ve doğrulama işlemi çalışmadığından emin olunduktan sonra eski
+lease dosyasını elle temizlemek gerekebilir. Linux üzerinde PID yokluğu
+doğrulanarak kurtarma korunur. Sccache açıkken yalnız metadata sorgularında
+RUSTC_WRAPPER devre dışıdır; derleme yönetilen ve doğrulanmış cache oturumunu kullanır.

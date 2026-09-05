@@ -206,3 +206,9 @@ The MCP's prior input fields and default behavior are preserved and schema-teste
 
 See [the six-part plan](rust-efficiency-plan.md) and
 [verification evidence](rust-efficiency-evidence.md).
+
+On macOS and Windows, host leases with an unverifiable foreign PID are retained
+rather than reclaimed. After a confirmed owner crash, an operator may need to
+remove that stale lease while no validation process is using it. Linux retains
+verified absent-PID recovery. With opt-in Sccache, metadata probes bypass only
+RUSTC_WRAPPER; compilation still uses the owned, validated cache session.
