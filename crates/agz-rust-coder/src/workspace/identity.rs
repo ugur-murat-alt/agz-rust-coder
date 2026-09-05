@@ -561,6 +561,8 @@ struct FileCollector<'input, 'scope, 'data> {
     files: &'data mut BTreeSet<PathBuf>,
     incomplete_reason: &'data mut Option<IdentityIncompleteReason>,
     workspace_directories: usize,
+    workspace_files: usize,
+    external_files: usize,
 }
 
 impl<'input, 'scope, 'data> FileCollector<'input, 'scope, 'data> {
@@ -574,6 +576,8 @@ impl<'input, 'scope, 'data> FileCollector<'input, 'scope, 'data> {
             files,
             incomplete_reason,
             workspace_directories: 0,
+            workspace_files: 0,
+            external_files: 0,
         }
     }
 
@@ -716,13 +720,11 @@ impl<'input, 'scope, 'data> FileCollector<'input, 'scope, 'data> {
         if self.files.contains(&path) {
             return;
         }
-        let count = self
-            .files
-            .iter()
-            .filter(|candidate| {
-                external_root_for(candidate, self.input.external_roots).is_some() == external
-            })
-            .count();
+        let count = if external {
+            self.external_files
+        } else {
+            self.workspace_files
+        };
         if count >= max_files {
             set_reason(
                 self.incomplete_reason,
@@ -733,6 +735,11 @@ impl<'input, 'scope, 'data> FileCollector<'input, 'scope, 'data> {
                 },
             );
             return;
+        }
+        if external_root_for(&path, self.input.external_roots).is_some() {
+            self.external_files += 1;
+        } else {
+            self.workspace_files += 1;
         }
         self.files.insert(path);
     }

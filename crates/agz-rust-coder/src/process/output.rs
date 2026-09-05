@@ -11,6 +11,8 @@ use tokio::{
 };
 
 pub type DiagnosticCallback = Arc<dyn Fn(&str) -> bool + Send + Sync + 'static>;
+/// Nonblocking, bounded consumer of stdout bytes. True marks useful diagnostic evidence.
+pub type StdoutCallback = Arc<dyn Fn(&[u8]) -> bool + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StreamKind {
@@ -97,6 +99,7 @@ pub(crate) struct OutputCollector {
     started: Instant,
     max_bytes: usize,
     callback: Option<DiagnosticCallback>,
+    stdout_callback: Option<StdoutCallback>,
     combined: TailBuffer,
     stdout: TailBuffer,
     stderr: TailBuffer,
@@ -121,6 +124,7 @@ impl OutputCollector {
             started,
             max_bytes,
             callback,
+            stdout_callback: None,
             combined: TailBuffer::new(max_bytes),
             stdout: TailBuffer::new(max_bytes),
             stderr: TailBuffer::new(max_bytes),
@@ -136,11 +140,24 @@ impl OutputCollector {
         }
     }
 
+    pub(crate) fn set_stdout_callback(&mut self, callback: Option<StdoutCallback>) {
+        self.stdout_callback = callback;
+    }
+
     pub(crate) fn capture_raw_stdout(&mut self) {
         self.raw_stdout = Some(Vec::new());
     }
 
     pub(crate) fn push(&mut self, stream: StreamKind, bytes: &[u8]) {
+        if stream == StreamKind::Stdout
+            && self
+                .stdout_callback
+                .as_ref()
+                .is_some_and(|callback| callback(bytes))
+            && self.first_diagnostic.is_none()
+        {
+            self.first_diagnostic = Some(self.started.elapsed());
+        }
         if stream == StreamKind::Stdout
             && let Some(raw) = self.raw_stdout.as_mut()
         {

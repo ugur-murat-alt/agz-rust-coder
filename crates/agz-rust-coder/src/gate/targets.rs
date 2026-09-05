@@ -93,7 +93,7 @@ pub fn target_for(
         args.insert(separator, OsString::from("--workspace"));
     }
 
-    if id == GateTargetId::Check && !scope_args.is_empty() {
+    if !full_workspace && id != GateTargetId::Fmt && !scope_args.is_empty() {
         let separator = args
             .iter()
             .position(|argument| argument == "--")
@@ -154,18 +154,24 @@ pub fn target_by_id(id: GateTargetId, manifest: &Path) -> Option<GateTarget> {
 }
 
 pub fn has_doctestable_target(snapshot: &WorkspaceSnapshot) -> bool {
-    snapshot.metadata.packages.iter().any(|package| {
-        package.targets.iter().any(|target| {
-            target.kind.iter().any(|kind| {
-                matches!(
-                    kind,
-                    cargo_metadata::TargetKind::Lib
-                        | cargo_metadata::TargetKind::RLib
-                        | cargo_metadata::TargetKind::ProcMacro
-                )
+    snapshot
+        .metadata
+        .packages
+        .iter()
+        .filter(|package| snapshot.metadata.workspace_members.contains(&package.id))
+        .any(|package| {
+            package.targets.iter().any(|target| {
+                target.doctest
+                    && target.kind.iter().any(|kind| {
+                        matches!(
+                            kind,
+                            cargo_metadata::TargetKind::Lib
+                                | cargo_metadata::TargetKind::RLib
+                                | cargo_metadata::TargetKind::ProcMacro
+                        )
+                    })
             })
         })
-    })
 }
 
 fn manifest_path_from_args(args: &[OsString]) -> &Path {

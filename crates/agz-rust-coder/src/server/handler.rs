@@ -103,6 +103,8 @@ impl CheckDetail {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CheckInput {
+    #[serde(default)]
+    pub options: crate::gate::ValidationOptions,
     /// Optional absolute workspace or package directory.
     #[serde(default)]
     #[schemars(length(min = 1))]
@@ -287,6 +289,8 @@ pub struct RefactorInput {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckData {
+    #[serde(default)]
+    pub options: crate::gate::ValidationOptions,
     pub target: String,
     pub authority: String,
     pub timings_requested: bool,
@@ -366,6 +370,9 @@ pub struct CheckBuildData {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckStepData {
+    pub evidence: crate::diagnostics::EvidenceStats,
+    pub diagnostics_omitted: u64,
+    pub contexts: Vec<crate::diagnostics::DiagnosticContext>,
     pub target: String,
     pub command: String,
     pub exit_code: i32,
@@ -1553,7 +1560,11 @@ fn validate_line(line: Option<u32>) -> Result<(), McpError> {
 }
 
 fn validate_check(input: &CheckInput) -> Result<(), McpError> {
-    validate_dir(input.dir.as_deref())
+    validate_dir(input.dir.as_deref())?;
+    input
+        .options
+        .validate(gate_request(input, ClientRoots::unsupported(), 0).target)
+        .map_err(|message| McpError::invalid_params(message, None))
 }
 
 fn validate_audit(input: &AuditInput) -> Result<(), McpError> {
@@ -1647,6 +1658,7 @@ fn validate_refactor(input: &RefactorInput) -> Result<(), McpError> {
 
 fn gate_request(input: &CheckInput, client_roots: ClientRoots, root_epoch: u64) -> GateRequest {
     GateRequest {
+        options: input.options.clone(),
         directory: input.dir.as_deref().map(PathBuf::from),
         target: match input.target {
             CheckTarget::Check => GateTargetId::Check,
@@ -1700,7 +1712,7 @@ fn check_result(
                 diagnostic.message
             ));
         }
-        if is_error && !step.tail.trim().is_empty() {
+        if (is_error || step.exit_code != 0) && !step.tail.trim().is_empty() {
             reason.push_str("\n");
             reason.push_str(&step.tail);
         }
@@ -1721,6 +1733,9 @@ fn check_result(
         .steps
         .iter()
         .map(|step| CheckStepData {
+            evidence: step.evidence.clone(),
+            diagnostics_omitted: step.diagnostics_omitted,
+            contexts: step.contexts.clone(),
             target: step.target.as_str().to_owned(),
             command: step.command.clone(),
             exit_code: step.exit_code,
@@ -1774,8 +1789,16 @@ fn check_result(
     let output = ToolOutput::new(
         "check",
         evidence.status.as_str(),
-        format!("Cargo validation finished with {} authority.", authority),
+        format!(
+            "Cargo validation finished with {} authority for the recorded scope/options only.",
+            authority
+        ),
         CheckData {
+            options: evidence
+                .profile
+                .as_ref()
+                .map(|p| p.options.clone())
+                .unwrap_or_default(),
             target: target.as_str().to_owned(),
             authority,
             timings_requested: timings,
@@ -1822,6 +1845,7 @@ fn empty_check_data(
     reason: String,
 ) -> CheckData {
     CheckData {
+        options: crate::gate::ValidationOptions::default(),
         target: target.as_str().to_owned(),
         authority: authority.into(),
         timings_requested: timings,

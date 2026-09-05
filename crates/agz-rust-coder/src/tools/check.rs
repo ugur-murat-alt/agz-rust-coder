@@ -3,7 +3,7 @@
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -15,7 +15,9 @@ use crate::workspace::{
 };
 use crate::{
     config::{Config, GateScope as ConfigGateScope},
-    diagnostics::{Diagnostic, machine_applicable_package, parse_cargo_output},
+    diagnostics::{
+        CargoStream, Diagnostic, diagnostic_contexts, machine_applicable_package_authorized,
+    },
     gate::{
         CacheSelection, GateAuthority, GateBuildInfo, GateDiagnostic, GateEvidence, GateScheduler,
         GateScope, GateScopeStrategy, GateStatus, GateStepResult, ProgressCallback, ProgressEvent,
@@ -93,6 +95,9 @@ impl CheckService {
         cancellation: Option<CancellationToken>,
     ) -> GateEvidence {
         let accepted_at = Instant::now();
+        if let Err(message) = request.options.validate(request.target) {
+            return terminal_evidence(&request, GateStatus::Inconclusive, message, accepted_at);
+        }
         emit_progress(
             progress.as_ref(),
             accepted_at,
@@ -204,12 +209,13 @@ impl CheckService {
         }
 
         let key = format!(
-            "{}:{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}:{:?}",
             request.target.as_str(),
             request.timings,
             detail_name(request.detail),
             prepared.identity.hash,
-            request.root_epoch
+            request.root_epoch,
+            request.options
         );
         let identity_key = prepared.identity.hash.clone();
         let root = prepared.snapshot.workspace_root.clone();
@@ -317,7 +323,10 @@ impl CheckService {
                     format!("gate cache selection failed: {error}"),
                 )
             })?;
-        let initial_scope_args = if request.target == GateTargetId::Check {
+        let initial_scope_args = if matches!(
+            request.target,
+            GateTargetId::Check | GateTargetId::Clippy | GateTargetId::Test | GateTargetId::Doc
+        ) {
             vec![OsString::from("--workspace")]
         } else {
             Vec::new()
@@ -334,6 +343,9 @@ impl CheckService {
                 GateStatus::Inconclusive,
                 "no applicable Cargo target was selected".to_owned(),
             ));
+        }
+        for target in &mut targets {
+            request.options.apply(target);
         }
         let mut command = targets
             .iter()
@@ -365,7 +377,16 @@ impl CheckService {
             self.config.gate.scope,
             identity.changed_paths.clone(),
         );
-        if request.target == GateTargetId::Check && scope.args != initial_scope_args {
+        if request.options.has_build_selection() && !initial_scope_args.is_empty() {
+            scope = CheckScope {
+                evidence: GateScope::workspace(
+                    identity.changed_paths.clone(),
+                    "explicit feature/platform selection requires workspace scope",
+                ),
+                args: vec![OsString::from("--workspace")],
+            };
+        }
+        if !initial_scope_args.is_empty() && scope.args != initial_scope_args {
             targets = targets_for(
                 &snapshot,
                 request.target,
@@ -373,6 +394,9 @@ impl CheckService {
                 request.timings,
                 &scope.args,
             );
+            for target in &mut targets {
+                request.options.apply(target);
+            }
             command = targets
                 .iter()
                 .flat_map(|target| target.args.iter().cloned())
@@ -394,6 +418,13 @@ impl CheckService {
         }
         control.checkpoint().map_err(preflight_control_error)?;
         Ok(PreparedCheck {
+            optional_tool_roots: self
+                .guard
+                .configured_roots()
+                .iter()
+                .chain(self.guard.dependency_roots())
+                .cloned()
+                .collect(),
             workspace_root,
             workspace_authority,
             git_authority,
@@ -421,6 +452,7 @@ impl CheckService {
 
 #[derive(Debug)]
 struct PreparedCheck {
+    optional_tool_roots: Vec<Arc<AuthorizedRoot>>,
     workspace_root: WorkspaceRoot,
     workspace_authority: Arc<AuthorizedRoot>,
     git_authority: Arc<AuthorizedRoot>,
@@ -445,11 +477,11 @@ fn check_scope(
     configured: ConfigGateScope,
     changed_paths: Vec<PathBuf>,
 ) -> CheckScope {
-    if target != GateTargetId::Check {
+    if matches!(target, GateTargetId::All | GateTargetId::Fmt) {
         return CheckScope {
             evidence: GateScope::workspace(
                 changed_paths,
-                "gate.scope applies only to target=check",
+                "full validation and formatting use workspace scope",
             ),
             args: Vec::new(),
         };
@@ -514,6 +546,19 @@ fn affected_packages(
     if changed_paths.is_empty() {
         return Err("changed set is empty; widened to workspace".to_owned());
     }
+    if !snapshot.external_paths.is_empty() {
+        return Err("external path dependencies require workspace scope".to_owned());
+    }
+    if snapshot.metadata.packages.iter().any(|package| {
+        package.targets.iter().any(|target| {
+            target
+                .kind
+                .iter()
+                .any(|kind| matches!(kind, cargo_metadata::TargetKind::ProcMacro))
+        })
+    }) {
+        return Err("procedural macro workspace requires workspace scope".to_owned());
+    }
     if changed_paths.iter().any(|path| is_global_cargo_input(path)) {
         return Err("global Cargo input changed; widened to workspace".to_owned());
     }
@@ -552,11 +597,13 @@ fn affected_packages(
 }
 
 fn is_global_cargo_input(path: &Path) -> bool {
-    path == Path::new("Cargo.toml")
-        || path == Path::new("Cargo.lock")
-        || path == Path::new("rust-toolchain")
-        || path == Path::new("rust-toolchain.toml")
-        || path.starts_with(".cargo")
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("Cargo.toml" | "Cargo.lock" | "build.rs" | "rust-toolchain" | "rust-toolchain.toml")
+    ) || path
+        .components()
+        .any(|component| component.as_os_str() == ".cargo")
+        || path.extension().is_none_or(|extension| extension != "rs")
 }
 
 async fn execute_prepared(
@@ -570,7 +617,48 @@ async fn execute_prepared(
     let mut steps = Vec::new();
     let mut warnings = Vec::new();
     let mut status = GateStatus::FastPass;
+    let mut request_first_diagnostic_ms = None;
     let target_count = prepared.targets.len().max(1) as f64;
+    let nextest = if request.options.runner == crate::gate::TestRunner::Nextest {
+        let executable =
+            crate::gate::acceleration::find_tool("cargo-nextest", &prepared.optional_tool_roots)
+                .map_err(|error| acceleration_error(&context, error))?;
+        crate::gate::acceleration::verify_tool(
+            &supervisor,
+            &executable,
+            &["nextest", "--version"],
+            "cargo-nextest 0.9.143",
+            prepared.workspace_authority.clone(),
+            &prepared.cache.environment,
+            context.deadline,
+            context.cancellation.clone(),
+        )
+        .await
+        .map_err(|error| acceleration_error(&context, error))?;
+        Some(executable)
+    } else {
+        None
+    };
+    // Runtime-only socket/config paths never enter the semantic input fingerprint.
+    let mut runtime_environment = prepared.cache.environment.clone();
+    runtime_environment.insert(OsString::from("CARGO"), cargo.clone().into_os_string());
+    let sccache = if request.options.sccache {
+        let session = crate::gate::acceleration::SccacheSession::start(
+            supervisor.clone(),
+            prepared.workspace_authority.clone(),
+            &mut runtime_environment,
+            &config.gate.lease_dir,
+            &prepared.optional_tool_roots,
+            context.deadline,
+            context.cancellation.clone(),
+        )
+        .await
+        .map_err(|error| acceleration_error(&context, error))?;
+        warnings.push("sccache: supervised local cache, client-side compilation; incremental settings unchanged".into());
+        Some(session)
+    } else {
+        None
+    };
 
     for (index, target) in prepared.targets.iter().enumerate() {
         if context.cancellation.is_cancelled() {
@@ -585,30 +673,119 @@ async fn execute_prepared(
             target.label,
             false,
         );
+        let stream = Arc::new(Mutex::new(CargoStream::default()));
+        let observed_stream = stream.clone();
+        let progress = context.progress.clone();
+        let target_id = target.id;
+        let step_started = Instant::now();
+        // A mutex-owned flag avoids separate atomics and only emits one early event.
+        let early = Arc::new(Mutex::new(false));
         let options = ProcessRunOptions::new(&prepared.snapshot.workspace_root)
+            .on_stdout(move |bytes| {
+                let (useful, summary) = {
+                    let mut stream = observed_stream.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let useful = stream.push(bytes);
+                    (useful, useful.then(|| stream.first_summary()).flatten())
+                };
+                if useful {
+                    let mut emitted = early
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if !*emitted {
+                        *emitted = true;
+                        progress.emit(
+                            ProgressStage::Running,
+                            Some(target_id),
+                            index as f64 / target_count,
+                            Some(1.0),
+                            summary.as_deref().unwrap_or("Early compiler evidence omitted by budget; validation is not complete"),
+                            false,
+                        );
+                    }
+                }
+                useful
+            })
             .with_timeout(target.timeout)
             .with_deadline(context.deadline)
             .with_cancellation(context.cancellation.clone())
-            .with_environment(prepared.cache.environment.clone())
+            .with_environment(runtime_environment.clone())
             .with_max_output_bytes(
                 usize::try_from(config.limits.process_output_bytes).unwrap_or(usize::MAX),
             );
         let result = supervisor
             .run_authorized(
-                cargo.clone(),
+                if target.id == GateTargetId::Test {
+                    nextest.as_ref().unwrap_or(&cargo).clone()
+                } else {
+                    cargo.clone()
+                },
                 target.args.clone(),
                 options,
                 prepared.workspace_authority.clone(),
             )
             .await
-            .map_err(|error| SchedulerError::Internal(error.to_string()))?;
+            .map_err(|error| match error {
+                crate::process::ProcessError::Cancelled => SchedulerError::Cancelled,
+                crate::process::ProcessError::TimedOut => SchedulerError::TimedOut,
+                other => SchedulerError::Internal(other.to_string()),
+            })?;
         warnings.extend(result.warnings.iter().cloned());
-        let parsed = parse_cargo_output(&format!("{}\n{}", result.stdout, result.stderr));
-        let suggestion_package = convert_suggestion_package(machine_applicable_package(
-            &prepared.snapshot.workspace_root,
-            &parsed.diagnostics,
-        ));
+        let (mut parsed, evidence_stats) = std::mem::take(
+            &mut *stream
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+        .finish();
+        // Prioritize actionable errors over warnings in compact responses.
+        parsed.diagnostics.sort_by_key(|diagnostic| {
+            diagnostic.level != crate::diagnostics::DiagnosticLevel::Error
+        });
+        let omitted = evidence_stats.omitted_records.saturating_add(
+            parsed
+                .diagnostics
+                .len()
+                .saturating_sub(diagnostic_limit(request.detail)) as u64,
+        );
+        let diagnostics = parsed.diagnostics.clone();
+        let authority = prepared.workspace_authority.clone();
+        let snapshot = prepared.snapshot.clone();
+        let include_context = request.options.context;
+        let context_limit = diagnostic_limit(request.detail);
+        let (suggestion_package, contexts) = tokio::task::spawn_blocking(move || {
+            let package = machine_applicable_package_authorized(authority.clone(), &diagnostics);
+            let contexts = if include_context {
+                diagnostic_contexts(
+                    &authority,
+                    &snapshot,
+                    &diagnostics[..diagnostics.len().min(context_limit)],
+                )
+            } else {
+                Vec::new()
+            };
+            (convert_suggestion_package(package), contexts)
+        })
+        .await
+        .map_err(|error| SchedulerError::Internal(error.to_string()))?;
+        if request_first_diagnostic_ms.is_none() {
+            request_first_diagnostic_ms = result.first_diagnostic_ms.map(|time| {
+                time.saturating_add(
+                    step_started
+                        .duration_since(context.timing.requested_at)
+                        .as_millis()
+                        .min(u128::from(u64::MAX)) as u64,
+                )
+            });
+        }
+        let telemetry_partial = evidence_stats.malformed_lines > 0
+            || evidence_stats.oversized_lines > 0
+            || !evidence_stats.build_finished
+            || !result.drain_complete
+            || result.cancelled
+            || result.timed_out;
         let step = GateStepResult {
+            evidence: evidence_stats,
+            diagnostics_omitted: omitted,
+            contexts,
             target: target.id,
             command: result.command,
             exit_code: result.exit_code,
@@ -638,7 +815,7 @@ async fn execute_prepared(
                     rebuilt_units: build.rebuilt_units as u64,
                     build_scripts: build.build_scripts as u64,
                     linked_units: build.linked_units as u64,
-                    partial: parsed.truncated,
+                    partial: telemetry_partial,
                 }),
         };
         status = if step.cancelled {
@@ -647,20 +824,35 @@ async fn execute_prepared(
             GateStatus::Timeout
         } else if !step.drain_complete || !step.cleanup_complete {
             GateStatus::Unavailable
-        } else if step.exit_code != 0 {
+        } else if step.exit_code != 0 || step.evidence.build_success == Some(false) {
             GateStatus::Fail
         } else {
             status
         };
+        if status == GateStatus::FastPass
+            && target.id == GateTargetId::Test
+            && request.options.runner == crate::gate::TestRunner::Cargo
+            && request.options.test_filter.is_some()
+            && step.evidence.tests_executed.unwrap_or(0) == 0
+        {
+            status = GateStatus::Inconclusive;
+            warnings.push("filtered Cargo test produced no evidence of executed tests; zero matches, ignored tests or a custom harness cannot grant a pass".into());
+        }
         steps.push(step);
         if !matches!(status, GateStatus::FastPass) {
             break;
         }
     }
 
-    // A failed/cancelled Cargo result needs no pass-freshness proof. Never
-    // launch extra Git children after the request has already ended.
-    if status == GateStatus::FastPass {
+    if let Some(session) = sccache {
+        if let Err(error) = session.close().await {
+            status = GateStatus::Unavailable;
+            warnings.push(error);
+        }
+    }
+    // Failed compilations also carry edits/context: validate their freshness before
+    // offering patches. Cancelled/timed-out or unclean children never start new probes.
+    if matches!(status, GateStatus::FastPass | GateStatus::Fail) {
         let git = ControlledGitProbe::fixed(
             context.deadline,
             context.cancellation.clone(),
@@ -693,7 +885,15 @@ async fn execute_prepared(
                         .to_owned(),
                 );
             }
-            Ok(_) => {}
+            Ok(_) => {
+                for step in &mut steps {
+                    for context in &mut step.contexts {
+                        if context.source_hash.is_some() && context.reason.is_none() {
+                            context.freshness = "input-identity-matched".into();
+                        }
+                    }
+                }
+            }
             Err(IdentityError::Cancelled) => status = GateStatus::Cancelled,
             Err(IdentityError::TimedOut) => status = GateStatus::Timeout,
             Err(error) => {
@@ -701,9 +901,17 @@ async fn execute_prepared(
                 warnings.push(format!("post-validation identity failed: {error}"));
             }
         }
-        if status != GateStatus::FastPass {
+        if !matches!(status, GateStatus::FastPass | GateStatus::Fail) {
             for step in &mut steps {
                 step.suggestion_package = None;
+            }
+        }
+    }
+    if !matches!(status, GateStatus::FastPass | GateStatus::Fail) {
+        for step in &mut steps {
+            step.suggestion_package = None;
+            for context in &mut step.contexts {
+                context.freshness = "stale-or-unverified".into();
             }
         }
     }
@@ -724,6 +932,7 @@ async fn execute_prepared(
         status.as_str(),
         false,
     );
+    let completed_targets = steps.len();
     Ok(GateEvidence {
         version: 1,
         job_id: context.id,
@@ -731,18 +940,15 @@ async fn execute_prepared(
         authority: status.authority(),
         mode: request.mode(),
         generation: context.generation,
-        requested_at: timestamp_now(),
-        started_at: Some(timestamp_now()),
+        requested_at: timestamp_at(context.timing.requested_at),
+        started_at: Some(timestamp_at(context.timing.started_at)),
         finished_at: Some(timestamp_now()),
         response_ms: finished_at
             .duration_since(context.timing.requested_at)
             .as_millis()
             .min(u128::from(u64::MAX)) as u64,
         queue_ms: context.timing.queue_ms,
-        first_diagnostic_ms: steps
-            .iter()
-            .filter_map(|step| step.first_diagnostic_ms)
-            .min(),
+        first_diagnostic_ms: request_first_diagnostic_ms,
         requested_dir: request
             .directory
             .clone()
@@ -760,6 +966,7 @@ async fn execute_prepared(
             target_directory: prepared.cache.target_directory.clone(),
         }),
         profile: Some(ValidationProfile {
+            options: request.options.clone(),
             id: profile_id(
                 &prepared.identity,
                 request.target,
@@ -770,7 +977,11 @@ async fn execute_prepared(
             target: request.target.as_str().to_owned(),
         }),
         source: request.source,
-        message: Some(format!("{} target(s) completed", prepared.targets.len())),
+        message: Some(format!(
+            "{} of {} target(s) completed",
+            completed_targets,
+            prepared.targets.len()
+        )),
         warnings,
     })
 }
@@ -910,7 +1121,7 @@ fn terminal_evidence(
     let mut evidence = GateEvidence::pending("gate-preflight", request);
     evidence.status = status;
     evidence.authority = GateAuthority::None;
-    evidence.requested_at = timestamp_now();
+    evidence.requested_at = timestamp_at(started);
     evidence.finished_at = Some(timestamp_now());
     evidence.response_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
     evidence.message = Some(message);
@@ -1107,6 +1318,16 @@ fn profile_id(identity: &InputIdentity, target: GateTargetId, cache: &str) -> St
     format!("{:x}", hasher.finalize())
 }
 
+fn timestamp_at(instant: Instant) -> String {
+    SystemTime::now()
+        .checked_sub(instant.elapsed())
+        .unwrap_or(UNIX_EPOCH)
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .to_string()
+}
+
 fn timestamp_now() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1139,5 +1360,15 @@ const fn detail_name(detail: crate::gate::GateDetail) -> &'static str {
         crate::gate::GateDetail::Compact => "compact",
         crate::gate::GateDetail::Standard => "standard",
         crate::gate::GateDetail::Full => "full",
+    }
+}
+
+fn acceleration_error(context: &ScheduledJobContext, message: String) -> SchedulerError {
+    if context.cancellation.is_cancelled() {
+        SchedulerError::Cancelled
+    } else if Instant::now() >= context.deadline {
+        SchedulerError::TimedOut
+    } else {
+        SchedulerError::Internal(message)
     }
 }

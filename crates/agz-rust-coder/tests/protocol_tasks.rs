@@ -56,12 +56,12 @@ fn spawn_server_for(
     )
     .expect("canonical task fixture");
     let (config, state) = isolated_config(root);
-    spawn_configured_server(config, state)
+    spawn_configured_server(config, std::sync::Arc::new(state))
 }
 
 fn spawn_configured_server(
     config: Config,
-    state: IsolatedState,
+    state: std::sync::Arc<IsolatedState>,
 ) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<Result<()>>) {
     let (server_transport, client_transport) = tokio::io::duplex(1 << 20);
     let task = tokio::spawn(async move {
@@ -95,10 +95,6 @@ fn spawn_local_docs_server(
     (client_transport, task)
 }
 
-fn spawn_server() -> (tokio::io::DuplexStream, tokio::task::JoinHandle<Result<()>>) {
-    spawn_server_for("clean")
-}
-
 fn client_info(capabilities: ClientCapabilities) -> ClientInfo {
     ClientInfo::new(
         capabilities,
@@ -108,7 +104,12 @@ fn client_info(capabilities: ClientCapabilities) -> ClientInfo {
 
 #[tokio::test]
 async fn task_result_matches_the_capability_free_sync_result() -> Result<()> {
-    let (task_transport, task_server) = spawn_server();
+    let root = std::fs::canonicalize(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/stage7/clean"),
+    )?;
+    let (config, state) = isolated_config(root);
+    let state = std::sync::Arc::new(state);
+    let (task_transport, task_server) = spawn_configured_server(config.clone(), state.clone());
     let task_client = client_info(ClientCapabilities::builder().enable_tasks().build())
         .serve_with_lifecycle(
             task_transport,
@@ -143,7 +144,7 @@ async fn task_result_matches_the_capability_free_sync_result() -> Result<()> {
         }
     };
 
-    let (sync_transport, sync_server) = spawn_server();
+    let (sync_transport, sync_server) = spawn_configured_server(config, state);
     let sync_client = client_info(ClientCapabilities::default())
         .serve(sync_transport)
         .await?;
@@ -213,7 +214,7 @@ async fn typed_tool_error_completes_the_task_instead_of_failing_it() -> Result<(
     )?;
     let (mut config, state) = isolated_config(root.clone());
     config.cargo.path = Some(root.join("missing-cargo"));
-    let (transport, server) = spawn_configured_server(config, state);
+    let (transport, server) = spawn_configured_server(config, std::sync::Arc::new(state));
     let client = client_info(ClientCapabilities::builder().enable_tasks().build())
         .serve_with_lifecycle(
             transport,
@@ -424,7 +425,12 @@ async fn cancelling_a_docs_task_stops_the_real_local_cargo_process() -> Result<(
     assert!(cancelled_at.elapsed() < std::time::Duration::from_secs(5));
     #[cfg(target_os = "linux")]
     assert!(
-        !std::path::Path::new(&format!("/proc/{build_pid}")).exists(),
+        !std::fs::read_to_string(format!("/proc/{build_pid}/stat"))
+            .ok()
+            .is_some_and(|stat| {
+                stat.rsplit_once(')')
+                    .is_some_and(|(_, fields)| fields.split_whitespace().next() != Some("Z"))
+            }),
         "cancelled build-script process {build_pid} is still alive"
     );
 

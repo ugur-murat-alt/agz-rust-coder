@@ -132,7 +132,7 @@ fn is_safe_project_target(workspace_root: &Path, target: &Path) -> bool {
         && no_symlink_components(&target)
 }
 
-fn ensure_directory(path: &Path) -> Result<(), CacheError> {
+pub(crate) fn ensure_directory(path: &Path) -> Result<(), CacheError> {
     if !path.is_absolute() {
         return Err(CacheError::Relative(path.to_owned()));
     }

@@ -162,7 +162,7 @@ async fn join_readers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, path::PathBuf, time::SystemTime};
+    use std::{fs, time::SystemTime};
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
@@ -191,7 +191,12 @@ mod tests {
             .parse::<u32>()
             .expect("child pid");
         assert!(
-            !PathBuf::from(format!("/proc/{child_pid}")).exists(),
+            !std::fs::read_to_string(format!("/proc/{child_pid}/stat"))
+                .ok()
+                .is_some_and(|stat| {
+                    stat.rsplit_once(')')
+                        .is_some_and(|(_, fields)| fields.split_whitespace().next() != Some("Z"))
+                }),
             "timed-out process-group child {child_pid} is still alive"
         );
         fs::remove_dir_all(root).expect("remove timeout fixture");

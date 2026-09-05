@@ -1,10 +1,13 @@
 //! Authoritative Cargo validation, scheduling, and evidence.
 
+pub(crate) mod acceleration;
 pub mod cache;
 pub mod lease;
+pub mod profile;
 pub mod scheduler;
 pub mod targets;
 pub mod types;
+pub use profile::{TestRunner, ValidationOptions};
 
 pub use cache::{CacheMode, CacheSelection, select_gate_cache};
 pub use scheduler::{

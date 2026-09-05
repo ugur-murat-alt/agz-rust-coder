@@ -70,3 +70,15 @@ cargo publish -p agz-rust-coder --dry-run --locked
 `cargo deny check`, workflow lint ve secret/vulnerability taramaları release
 kanıtını tamamlar. Platform CI, Linux iş istasyonunda çalıştırılamayan macOS ve
 Windows süreç/yol kapsamını sağlar.
+
+## Girdi kimliği karşılaştırması (henüz yayımlanmadı)
+
+`crates/agz-rust-coder/examples/identity_measure.rs` örneğini aynı toolchain/profil
+ile eski ve yeni kod üzerinde derleyin. İki binary ile
+`python3 benchmark/identity_compare.py BASELINE CANDIDATE --output comparison.json`
+komutunu çalıştırın. Betik özdeş örnekler üretir, çalışma sırasını dönüşümlü seçer,
+üç ısınma sonrası varsayılan 15 örnek kaydeder. Tek kaynak ve manifest değişikliği
+ayrı senaryolardır. Hash eşitsizliğinde karşılaştırma reddedilir.
+`python3 -m unittest discover -s benchmark -p test_identity_compare.py` bu reddetme
+kurallarını sınar. Ölçülen aşamada LLM, ağ veya Cargo çalıştırılmaz.
+[Kaydedilmiş kanıt](rust-efficiency-evidence.md).

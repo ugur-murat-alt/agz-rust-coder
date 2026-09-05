@@ -34,6 +34,7 @@ pub fn machine_applicable_package(
         root.as_ref(),
         diagnostics,
         None::<&BTreeMap<String, String>>,
+        None,
     )
 }
 
@@ -43,7 +44,20 @@ pub fn machine_applicable_package_with_snapshots<S: SnapshotLookup>(
     diagnostics: &[Diagnostic],
     snapshots: &S,
 ) -> WriteFreePackage {
-    package_internal(root.as_ref(), diagnostics, Some(snapshots))
+    package_internal(root.as_ref(), diagnostics, Some(snapshots), None)
+}
+
+pub fn machine_applicable_package_authorized(
+    authority: std::sync::Arc<crate::workspace::AuthorizedRoot>,
+    diagnostics: &[Diagnostic],
+) -> WriteFreePackage {
+    let root = authority.path().to_owned();
+    package_internal(
+        &root,
+        diagnostics,
+        None::<&BTreeMap<String, String>>,
+        Some(authority),
+    )
 }
 
 pub fn advisory_edit(edit: &CompilerSuggestionEdit) -> AdvisoryEdit {
@@ -67,6 +81,7 @@ fn package_internal<S: SnapshotLookup>(
     root: &Path,
     diagnostics: &[Diagnostic],
     snapshots: Option<&S>,
+    retained: Option<std::sync::Arc<crate::workspace::AuthorizedRoot>>,
 ) -> WriteFreePackage {
     let canonical_root = match fs::canonicalize(root) {
         Ok(root) if root.is_dir() => root,
@@ -77,8 +92,18 @@ fn package_internal<S: SnapshotLookup>(
             };
         }
     };
+    let authority = if let Some(authority) = retained {
+        authority
+    } else {
+        match crate::workspace::RootGuard::new([canonical_root.clone()], std::iter::empty()) {
+            Ok(guard) => guard.configured_roots()[0].clone(),
+            Err(_) => return WriteFreePackage::default(),
+        }
+    };
     let mut skipped = Vec::new();
     let mut groups = Vec::new();
+    let mut edits_seen = 0usize;
+    let mut source_bytes = 0usize;
 
     for diagnostic in diagnostics {
         for suggestion in &diagnostic.suggestions {
@@ -91,12 +116,29 @@ fn package_internal<S: SnapshotLookup>(
             if suggestion.edits.is_empty() {
                 continue;
             }
+            if edits_seen.saturating_add(suggestion.edits.len()) > 200 {
+                if let Some(edit) = suggestion.edits.first() {
+                    skipped.push(SkippedEdit {
+                        edit: advisory_edit(edit),
+                        reason: "compiler suggestion edit budget exceeded".into(),
+                    });
+                }
+                continue;
+            }
+            edits_seen += suggestion.edits.len();
             let group_index = groups.len();
             let mut edits = Vec::new();
             let mut failure = None;
             for edit in &suggestion.edits {
-                match resolve_edit(&canonical_root, group_index, edit) {
-                    Ok(resolved) => edits.push(resolved),
+                match resolve_edit(&canonical_root, &authority, group_index, edit) {
+                    Ok(resolved) => {
+                        source_bytes = source_bytes.saturating_add(resolved.source.len());
+                        if source_bytes > super::model::MAX_SOURCE_SNAPSHOT_BYTES as usize {
+                            failure = Some("compiler suggestion source budget exceeded".into());
+                            break;
+                        }
+                        edits.push(resolved);
+                    }
                     Err(reason) => {
                         failure = Some(reason);
                         break;
@@ -170,7 +212,7 @@ fn package_internal<S: SnapshotLookup>(
                 complete = false;
                 continue;
             }
-            let current = match read_regular_source(&edit.file) {
+            let current = match read_regular_source(&authority, &edit.file) {
                 Ok(source) => source,
                 Err(_) => {
                     complete = false;
@@ -208,7 +250,7 @@ fn package_internal<S: SnapshotLookup>(
     let mut stable_groups = Vec::new();
     for group in snapshot_valid_groups {
         let stable = group.iter().all(|edit| {
-            read_regular_source(&edit.file)
+            read_regular_source(&authority, &edit.file)
                 .ok()
                 .is_some_and(|current| snapshots_by_file.get(&edit.edit.file) == Some(&current))
         });
@@ -269,6 +311,7 @@ fn package_internal<S: SnapshotLookup>(
 
 fn resolve_edit(
     root: &Path,
+    authority: &crate::workspace::AuthorizedRoot,
     group: usize,
     edit: &CompilerSuggestionEdit,
 ) -> Result<ResolvedEdit, String> {
@@ -280,7 +323,7 @@ fn resolve_edit(
         return Err("an edit contains a zero or missing source coordinate".to_owned());
     }
     let (file, relative) = resolve_regular_source(root, &edit.file)?;
-    let source = read_regular_source(&file)?;
+    let source = read_regular_source(authority, &file)?;
     let start = offset_for_position(&source, edit.line_start, edit.column_start)
         .ok_or_else(|| "an edit start range is invalid for the UTF-8 source snapshot".to_owned())?;
     let end = offset_for_position(&source, edit.line_end, edit.column_end)
@@ -402,13 +445,13 @@ fn resolve_regular_source(root: &Path, value: &str) -> Result<(PathBuf, String),
     Ok((canonical, relative))
 }
 
-fn read_regular_source(path: &Path) -> Result<String, String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| "the source snapshot could not be read".to_owned())?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err("the source snapshot is not a regular file".to_owned());
-    }
-    let bytes = fs::read(path).map_err(|_| "the source snapshot could not be read".to_owned())?;
+fn read_regular_source(
+    authority: &crate::workspace::AuthorizedRoot,
+    path: &Path,
+) -> Result<String, String> {
+    let bytes = authority
+        .read_file(path, super::model::MAX_SOURCE_SNAPSHOT_BYTES)
+        .map_err(|error| format!("the bounded source snapshot could not be read: {error}"))?;
     String::from_utf8(bytes).map_err(|_| "the source snapshot is not valid UTF-8".to_owned())
 }
 
@@ -430,8 +473,14 @@ fn offset_for_position(source: &str, line: usize, column: usize) -> Option<usize
                 },
             )
         });
-    let offset = line_start.checked_add(column - 1)?;
-    (offset <= line_end && source.is_char_boundary(offset)).then_some(offset)
+    // rustc columns count Unicode scalar values, not UTF-8 bytes or UTF-16 units.
+    let line_text = source.get(line_start..line_end)?;
+    let byte_column = line_text
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(line_text.len()))
+        .nth(column - 1)?;
+    line_start.checked_add(byte_column)
 }
 
 fn line_starts(source: &str) -> Vec<usize> {
@@ -570,4 +619,26 @@ fn occurrence_count(source: &str, needle: &str) -> usize {
         return 0;
     }
     source.match_indices(needle).count()
+}
+
+#[cfg(test)]
+mod unicode_properties {
+    use super::offset_for_position;
+    use proptest::prelude::*;
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+        #[test]
+        fn rustc_columns_count_characters_not_bytes(chars in prop::collection::vec(prop::char::range(' ', '\u{10ffff}'), 0..80)) {
+            let text: String=chars.iter().collect();
+            for (column, (expected, _)) in text.char_indices().chain(std::iter::once((text.len(), '\0'))).enumerate() {
+                prop_assert_eq!(offset_for_position(&text, 1, column+1), Some(expected));
+            }
+        }
+    }
+    #[test]
+    fn unicode_and_crlf_coordinates_are_bounded() {
+        assert_eq!(offset_for_position("ğ😀x\r\ny", 1, 3), Some(6));
+        assert_eq!(offset_for_position("ğ😀x\r\ny", 2, 1), Some(9));
+        assert_eq!(offset_for_position("ğ", 1, 3), None);
+    }
 }

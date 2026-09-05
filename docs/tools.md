@@ -6,8 +6,8 @@ This document defines the public tool and configuration surface of
 Request deadlines and cancellation also cover Git probes and input-identity
 collection before and after Cargo. Git subprocesses use the shared process
 supervisor; NUL-delimited paths are read from a bounded raw stdout prefix, not
-from sanitized display text. A failed or cancelled Cargo run does not launch a
-post-validation Git probe. Truncated tool envelopes retain their original
+from sanitized display text. Cancelled or timed-out Cargo runs do not launch post-validation Git probes.
+Failed compilations are revalidated before offering edit/context evidence. Truncated tool envelopes retain their original
 `status`, error flag, and `untrustedData` marker.
 
 ## Tool Catalog
@@ -139,3 +139,70 @@ the process. `allow` is an explicit opt-in to workspace code execution.
 - [Architecture](architecture.md)
 - [Benchmark protocol](benchmark.md)
 - [Security policy](../SECURITY.md)
+
+## Explicit validation options
+
+The following additive `check` fields are **unreleased development changes**;
+the published 0.1.1 binary does not provide them. Omitting `options` retains the
+existing Cargo behavior. Examples are MCP argument objects, not shell strings:
+
+```json
+{"target":"check","options":{"noDefaultFeatures":true,"features":["serde"],"context":true}}
+```
+
+```json
+{"target":"test","options":{"runner":"nextest","testFilter":"parses_empty_input"}}
+```
+
+`options` accepts `features` (at most 64 names, each at most 128 bytes),
+`allFeatures`, `noDefaultFeatures`, `targetTriple` (built-in target, not a JSON
+file), `testFilter` (bounded test-name substring), `runner` (`cargo` or `nextest`),
+`sccache`, and `context`. Unknown options, leading flags, control characters,
+conflicting feature choices, or a test filter on `target=all` are rejected.
+`allFeatures` enables one combined selection; it does not test all combinations.
+A non-host target must already be installed. Cross-target test execution needs
+a working Cargo runner configured by the operator; check success alone is not
+an execution test. No toolchain is downloaded automatically.
+
+`gate.scope` now applies to check, Clippy, test and doc development stages.
+`all` always executes the workspace stages in the requested configuration.
+Global/ambiguous input changes and explicit feature/platform choices widen
+scope conservatively. `FULL_PASS` therefore means the recorded stages and
+options passed, not every possible Rust configuration. A filtered Cargo test
+without evidence of at least one executed libtest case is `INCONCLUSIVE`, even
+if Cargo exits zero. Custom harness output that cannot establish this is also
+inconclusive; it is not silently treated as test success.
+Nextest rejects zero matching tests with `--no-tests=fail`.
+
+Step evidence includes `evidence`, `diagnosticsOmitted`, `contexts`, and existing
+output/cleanup flags. `firstDiagnosticMs` in a step is process-relative; the
+request-level value includes preflight and queue time. A truncated log does not
+necessarily mean lost compiler diagnostics. Conversely, malformed/oversized
+records and omitted diagnostics are explicit. Provisional progress messages
+are untrusted compiler text and never final results.
+
+Context excerpts carry source hashes and exact resolved direct dependencies,
+not speculative repair advice. `input-identity-matched` means complete pre/post
+input identities agree. Files are not atomically snapshotted: recheck source
+hashes or `old_string` before applying an edit. Failed compilations are also
+revalidated before returning suggestions/context. Cancelled/timed-out/unclean
+work never publishes usable edits. Source budgets and missing-context reasons
+remain visible. The MCP still never applies an edit to workspace source.
+
+Nextest must report 0.9.143 from a trusted absolute PATH directory outside every
+configured workspace/dependency root. No silent runner fallback is performed.
+For supervised Sccache, configure an absolute `RUSTC_WRAPPER` for version 0.17.0
+and request `sccache=true`. This mode currently requires Unix; it owns a private
+foreground local cache server and socket, uses client-side compilation, and
+cleans the process tree before returning. It excludes remote/distributed cache
+configuration, preserves incremental settings, and limits its local disk cache
+to 256 MiB beneath `gate.lease_dir`. A long Unix socket path returns an actionable
+error: choose a shorter `gate.lease_dir`. This is an opt-in safety-constrained
+mode, not transparent support for arbitrary Sccache configurations.
+
+The Rust library adds fields to public request/evidence structs. Consumers using
+struct literals may need adjustments; prefer `GateRequest::new(...).with_options(...)`.
+The MCP's prior input fields and default behavior are preserved and schema-tested.
+
+See [the six-part plan](rust-efficiency-plan.md) and
+[verification evidence](rust-efficiency-evidence.md).

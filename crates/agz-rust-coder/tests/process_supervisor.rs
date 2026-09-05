@@ -35,6 +35,7 @@ mod linux_process_supervisor {
             cleanup_timeout: Duration::from_secs(2),
             diagnostic_callback: None,
             capture_raw_stdout: false,
+            stdout_callback: None,
         }
     }
 

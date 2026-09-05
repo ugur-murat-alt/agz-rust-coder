@@ -6,8 +6,8 @@ tanımlar.
 İstek zaman aşımı ve iptal denetimleri, Cargo öncesi ve sonrasındaki Git
 sorgularını ve girdi kimliği hesaplamasını da kapsar. Git alt süreçleri ortak
 süreç yöneticisini kullanır; NUL ile ayrılmış yollar temizlenmiş gösterim
-metninden değil, boyutu sınırlanmış ham standart çıktıdan okunur. Başarısız veya
-iptal edilmiş bir Cargo çalışması sonrasında yeni Git sorgusu başlatılmaz.
+metninden değil, boyutu sınırlanmış ham standart çıktıdan okunur. İptal veya zaman aşımı sonrasında yeni Git sorgusu başlatılmaz. Başarısız
+derlemeler öneri/bağlam dönüşünden önce güncellik denetiminden geçer.
 Kısaltılmış araç yanıtları özgün `status`, hata bayrağı ve `untrustedData`
 işaretini korur.
 
@@ -139,3 +139,67 @@ Bu doğrulanamazsa semantik araçlar süreci başlatmadan erişilememe döndür�
 - [Mimari](architecture.tr.md)
 - [Benchmark protokolü](benchmark.tr.md)
 - [Güvenlik politikası](../SECURITY.md)
+
+## Explicit validation options
+
+Aşağıdaki `check` ekleri **henüz yayımlanmamış geliştirme değişiklikleridir**;
+yayımlı 0.1.1 binary'sinde yoktur. `options` verilmezse mevcut Cargo davranışı
+korunur. Örnekler kabuk komutu değil MCP argüman nesnesidir:
+
+```json
+{"target":"check","options":{"noDefaultFeatures":true,"features":["serde"],"context":true}}
+```
+
+```json
+{"target":"test","options":{"runner":"nextest","testFilter":"parses_empty_input"}}
+```
+
+`options`: `features` (en fazla 64 ad, ad başına 128 bayt), `allFeatures`,
+`noDefaultFeatures`, `targetTriple` (yerleşik hedef, JSON dosyası değil),
+`testFilter` (sınırlı test adı alt dizgesi), `runner` (`cargo` / `nextest`),
+`sccache`, `context`. Bilinmeyen seçenek, komut bayrağı, kontrol karakteri,
+çelişkili feature seçimi ve `target=all` ile test filtresi reddedilir.
+`allFeatures` tek birleşik seçimdir; bütün kombinasyonların testi değildir.
+Farklı platform hedefi önceden kurulu olmalıdır. Çapraz hedefte test çalıştırmak
+için operatörün Cargo runner yapılandırması gerekir; check başarısı çalıştırma
+testi değildir. Otomatik toolchain indirilmez.
+
+`gate.scope`, geliştirme sırasında check, Clippy, test ve doc için geçerlidir.
+`all`, istenen yapılandırmada workspace aşamalarını çalıştırır. Genel/belirsiz
+girdi değişiklikleri ve açık feature/platform seçimi kapsamı genişletir.
+`FULL_PASS` yalnız kaydedilen aşamalar ve seçeneklerin başarısıdır. Filtreli
+Cargo testinde en az bir çalıştırılmış libtest kanıtı yoksa Cargo sıfır koduyla
+çıksa bile `INCONCLUSIVE` döner. Aynı kanıtı vermeyen özel test harness çıktısı
+da başarılı sayılmaz. Nextest `--no-tests=fail` ile sıfır eşleşmeyi reddeder.
+
+Aşama kanıtında `evidence`, `diagnosticsOmitted`, `contexts` ve mevcut çıktı/temizlik
+bayrakları bulunur. Aşamadaki `firstDiagnosticMs` süreç başlangıcına göredir;
+istek düzeyindeki değer ön kontrol ve kuyruğu da içerir. Log kesilmesi mutlaka
+derleyici tanısının kaybolduğu anlamına gelmez. Bozuk/büyük kayıtlar ve atlanan
+tanılar ayrı gösterilir. Geçici ilerleme metinleri güvenilmeyen derleyici verisidir;
+nihai sonuç değildir.
+
+Bağlam kesitleri kaynak hash'i ve çözümlenmiş doğrudan bağımlılık sürümlerini taşır;
+tahmini düzeltme tavsiyesi üretmez. `input-identity-matched`, tam önce/sonra girdi
+kimliklerinin aynı olduğunu belirtir. Atomik dosya fotoğrafı değildir; düzenleme
+öncesi kaynak hash'i veya `old_string` tekrar doğrulanmalıdır. Başarısız derlemeler
+de öneri/bağlam dönüşünden önce tekrar denetlenir. İptal, zaman aşımı veya eksik
+temizlikte kullanılabilir öneri verilmez. Kaynak bütçeleri ve eksiklik gerekçeleri
+gösterilir; MCP kaynak dosyalarını yine değiştirmez.
+
+Nextest 0.9.143, yapılandırılmış tüm workspace/dependency köklerinin dışında,
+güvenilen mutlak PATH dizininden bulunmalıdır. Sessiz çalıştırıcı geri dönüşü yoktur.
+Gözetilen Sccache için 0.17.0 sürümüne işaret eden mutlak `RUSTC_WRAPPER` ve
+`sccache=true` gerekir. Bu kip şu anda Unix gerektirir; özel ön plan yerel
+önbellek sunucusu/soketi açar, derlemeyi istemci tarafında tutar ve dönüşten önce
+süreç ağacını temizler. Uzak/dağıtık ayarlar aktarılmaz; incremental seçimi
+korunur. `gate.lease_dir` altında yerel disk önbelleği 256 MiB ile sınırlıdır.
+Unix soket yolu çok uzunsa daha kısa `gate.lease_dir` seçilmesini isteyen açık
+hata döner. Her Sccache yapılandırmasını şeffafça destekleyen bir kip değildir.
+
+Rust kütüphanesinin açık istek/kanıt struct'larına alanlar eklendi. Struct literal
+kullanan istemcilerde uyarlama gerekebilir; `GateRequest::new(...).with_options(...)`
+tercih edilmelidir. Önceki MCP alanları ve varsayılanlar şema testleriyle korunur.
+
+[Altı başlık planı](rust-efficiency-plan.tr.md) ve
+[doğrulama kanıtı](rust-efficiency-evidence.md).

@@ -13,8 +13,8 @@
       "destructiveHint": true,
       "openWorldHint": true
     },
-    "inputSchemaHash": "fnv1a64:aa6152d0c1ec6e8e",
-    "outputSchemaHash": "fnv1a64:b15f001428fb24e0"
+    "inputSchemaHash": "fnv1a64:31844fe83727cfe2",
+    "outputSchemaHash": "fnv1a64:c4521d513d0c3238"
   },
   "crate_lookup": {
     "annotations": {

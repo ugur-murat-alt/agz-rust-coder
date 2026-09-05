@@ -17,9 +17,9 @@ pub use journal::{
     JournalError, JournalRecord, ProcessGroupIdentity, ProcessJournal, RecoveryDisposition,
     RecoveryEntry, RecoveryReport,
 };
-#[allow(unused_imports)]
-pub use output::DiagnosticCallback;
 pub(crate) use output::sanitize_terminal_text;
+#[allow(unused_imports)]
+pub use output::{DiagnosticCallback, StdoutCallback};
 #[allow(unused_imports)]
 pub use supervisor::{
     AsyncProcessRunner, CommandSpec, ProcessError, ProcessRunOptions, ProcessRunResult,

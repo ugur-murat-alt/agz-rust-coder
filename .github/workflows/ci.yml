@@ -85,6 +85,43 @@ jobs:
           AGZ_RUST_CODER_RUST_ANALYZER__PATH="$RA_BIN" \
             cargo +1.88.0 test -p agz-rust-coder --test lsp_real --locked -- --ignored
 
+  optional-acceleration:
+    name: Optional acceleration (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust and checksum-pinned optional tools
+        shell: bash
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal --component clippy --component rustfmt
+          mkdir -p "$RUNNER_TEMP/agz-tools"
+          cd "$RUNNER_TEMP/agz-tools"
+          curl --fail --location --proto '=https' --tlsv1.2 -o nextest.tar.gz https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-x86_64-unknown-linux-gnu.tar.gz
+          curl --fail --location --proto '=https' --tlsv1.2 -o sccache.tar.gz https://github.com/mozilla/sccache/releases/download/v0.17.0/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz
+          echo '66786b9abe23920d022a182d1416b1bbc8130dd4872a9553d76985a1708dcd1e  nextest.tar.gz' | sha256sum --check
+          echo '67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006  sccache.tar.gz' | sha256sum --check
+          tar -xzf nextest.tar.gz
+          tar -xzf sccache.tar.gz --strip-components=1
+          echo "$RUNNER_TEMP/agz-tools" >> "$GITHUB_PATH"
+      - name: Compile harness before enabling the wrapper
+        shell: bash
+        run: |
+          cargo +1.88.0 test -p agz-rust-coder --test check_service --locked --no-run --message-format=json > "$RUNNER_TEMP/tests.jsonl"
+          TEST_EXE="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "check_service" and .executable != null) | .executable' "$RUNNER_TEMP/tests.jsonl")"
+          test -x "$TEST_EXE"
+          echo "TEST_EXE=$TEST_EXE" >> "$GITHUB_ENV"
+      - name: Verify real nextest filtering and retained doctests
+        shell: bash
+        run: '"$TEST_EXE" real_nextest --ignored --nocapture --test-threads=1'
+      - name: Verify real sccache compilation and process cleanup
+        shell: bash
+        run: 'RUSTC_WRAPPER="$RUNNER_TEMP/agz-tools/sccache" "$TEST_EXE" real_sccache --ignored --nocapture --test-threads=1'
+      - name: Reject incomparable benchmark evidence
+        run: python3 -m unittest discover -s benchmark -p test_identity_compare.py
+
   dependency-policy:
     name: Dependency policy
     runs-on: ubuntu-24.04

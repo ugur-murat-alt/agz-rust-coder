@@ -87,7 +87,7 @@ fn semantic_annotations_are_conservative_when_workspace_code_is_allowed() {
 }
 
 #[test]
-fn rust_inputs_preserve_the_legacy_schema_except_optional_dir() {
+fn rust_inputs_preserve_legacy_fields_and_add_only_optional_check_options() {
     let reference: BTreeMap<String, Value> =
         serde_json::from_str(include_str!("../../../tests/reference/tool-schemas.json"))
             .expect("legacy schema fixture is valid JSON");
@@ -103,8 +103,14 @@ fn rust_inputs_preserve_the_legacy_schema_except_optional_dir() {
         let actual = Value::Object(tool.input_schema.as_ref().clone());
 
         assert_eq!(actual["type"], expected["type"], "{} type", tool.name);
+        let mut actual_properties = property_names(&actual);
+        if tool.name == "check" {
+            assert!(actual_properties.remove("options"));
+            assert!(!required(&actual).contains("options"));
+            assert!(actual["properties"]["options"].get("default").is_some());
+        }
         assert_eq!(
-            property_names(&actual),
+            actual_properties,
             property_names(expected),
             "{} properties",
             tool.name
