@@ -1,0 +1,54 @@
+name: Materialize reviewed release repairs
+on:
+  push:
+    branches: [maintenance/finalize-0.2.0]
+    paths: [.github/workflows/store-release-repairs.yml]
+permissions:
+  contents: write
+jobs:
+  store:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 79d8e245a57ec5c826ef309ed50e996cf19357cc
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reconstruct the exact reviewed repairs
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import subprocess, textwrap
+          source = subprocess.check_output(['git', 'show', 'f5c49b62adcca36fe05133d3898864a92d7a897d:.github/workflows/finalize-approved-release.yml'], text=True)
+          assert subprocess.check_output(['git', 'rev-parse', 'f5c49b62adcca36fe05133d3898864a92d7a897d:.github/workflows/finalize-approved-release.yml'], text=True).strip() == 'b701092af71b9782a1aa39154a4d0b282d7ea530'
+          for name in ['Reconstruct reviewed portable source corrections', 'Correct native Windows launcher and isolated environment']:
+              block = source.split('      - name: ' + name + '\n', 1)[1].split('\n      - name:', 1)[0]
+              script = textwrap.dedent(block.split('        run: |\n', 1)[1])
+              subprocess.run(['bash', '-euo', 'pipefail', '-c', script], check=True)
+          PY
+      - name: Store blobs and report exact tree entries without changing refs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, subprocess, urllib.request
+          expected = {'.github/workflows/release.yml', 'crates/agz-rust-coder/src/workspace/roots.rs', 'crates/agz-rust-coder/src/workspace/metadata.rs', 'crates/agz-rust-coder/src/docs/resolver.rs', 'crates/agz-rust-coder/tests/lsp_manager.rs', 'crates/agz-rust-coder/tests/lsp_navigation.rs', 'crates/agz-rust-coder/tests/workspace_selection.rs', 'crates/agz-rust-coder/tests/protocol_tasks.rs', 'crates/agz-rust-coder/tests/windows_path_identity.rs', 'tests/fixtures/lsp/semantic_ra.rs', 'xtask/src/opencode.rs'}
+          subprocess.run(['git', 'add', '--', *sorted(expected)], check=True)
+          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
+          changed = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines()
+          assert set(changed) == expected, changed
+          assert not subprocess.check_output(['git', 'diff', '--name-only'])
+          entries = []
+          for name in changed:
+              mode, sha, _ = subprocess.check_output(['git', 'ls-files', '--stage', name], text=True).split(maxsplit=2)
+              data = subprocess.check_output(['git', 'cat-file', 'blob', sha])
+              request = urllib.request.Request('https://api.github.com/repos/ugur-murat-alt/agz-rust-coder/git/blobs', data=json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()}).encode(), headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Content-Type': 'application/json', 'User-Agent': 'agz-release-repair'})
+              with urllib.request.urlopen(request, timeout=45) as response:
+                  result = json.load(response)
+              assert result['sha'] == sha
+              entries.append({'path': name, 'mode': mode, 'type': 'blob', 'sha': sha})
+          print('REPAIR_TREE=' + subprocess.check_output(['git', 'write-tree'], text=True).strip(), flush=True)
+          print(json.dumps(entries, indent=2), flush=True)
+          PY
