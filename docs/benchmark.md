@@ -70,3 +70,15 @@ The three provider-free smokes, real pinned Rust Analyzer/doc adapters,
 `cargo deny check`, workflow lint, and secret/vulnerability scans complete the
 release evidence. Platform CI supplies macOS and Windows process and path
 coverage unavailable on a Linux workstation.
+
+## Input-identity comparisons (unreleased)
+
+Build `crates/agz-rust-coder/examples/identity_measure.rs` against the baseline and
+candidate using the same toolchain/profile. Keep both binaries, then run
+`python3 benchmark/identity_compare.py BASELINE CANDIDATE --output comparison.json`.
+The script generates identical fixtures, alternates measurement order, warms
+each case three times and records 15 samples by default. Source edits and manifest
+edits are separate scenarios. Unequal input hashes invalidate a comparison.
+Run `python3 -m unittest discover -s benchmark -p test_identity_compare.py` to test
+comparison rejection. No LLM, network or Cargo execution is involved in the
+measured stage. See [recorded evidence](rust-efficiency-evidence.md).

@@ -37,10 +37,13 @@ impl AdmissionController {
         if self.is_closing() {
             return Err(ToolAdmissionError::Closing);
         }
-        self.permits
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ToolAdmissionError::InFlightLimit)
+        self.permits.clone().try_acquire_owned().map_err(|_| {
+            if self.permits.is_closed() {
+                ToolAdmissionError::Closing
+            } else {
+                ToolAdmissionError::InFlightLimit
+            }
+        })
     }
 
     pub fn close(&self) {

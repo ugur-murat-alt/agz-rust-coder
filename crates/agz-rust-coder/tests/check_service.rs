@@ -552,3 +552,236 @@ async fn a_new_input_supersedes_the_older_active_job() {
     assert_eq!(second.status, GateStatus::FastPass, "{second:#?}");
     service.close().await;
 }
+
+#[tokio::test]
+async fn streamed_error_has_request_timing_and_bounded_source_context() {
+    use agz_rust_coder::gate::ValidationOptions;
+    let project = TestProject::new(
+        "context",
+        "pub fn broken() -> u32 { let value: u32 = \"wrong\"; value }\n",
+        None,
+    );
+    let service = project.service();
+    let evidence = service
+        .run(
+            GateRequest::new(&project.root, GateTargetId::Check).with_options(ValidationOptions {
+                context: true,
+                ..Default::default()
+            }),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(evidence.status, GateStatus::Fail, "{evidence:#?}");
+    assert!(evidence.first_diagnostic_ms.is_some());
+    assert!(evidence.first_diagnostic_ms.unwrap() <= evidence.response_ms);
+    let step = &evidence.steps[0];
+    assert!(step.evidence.diagnostic_records > 0);
+    assert!(step.first_diagnostic_ms.is_some());
+    assert!(
+        step.contexts.iter().any(|c| c.excerpt.contains("wrong")
+            && c.source_hash.is_some()
+            && c.freshness == "input-identity-matched"),
+        "{:?}",
+        step.contexts
+    );
+    assert!(step.contexts.iter().all(|c| c.untrusted_data));
+    service.close().await;
+}
+
+#[tokio::test]
+async fn explicit_features_are_executed_and_distinguish_validation_profiles() {
+    use agz_rust_coder::gate::ValidationOptions;
+    let project = TestProject::new(
+        "features",
+        "#[cfg(feature = \"broken\")]\ncompile_error!(\"selected feature fails\");\npub fn value() {}\n",
+        None,
+    );
+    let manifest = project.root.join("Cargo.toml");
+    fs::write(
+        &manifest,
+        format!(
+            "{}\n[features]\ndefault = []\nbroken = []\n",
+            fs::read_to_string(&manifest).unwrap()
+        ),
+    )
+    .unwrap();
+    let service = project.service_with_scope(ConfigGateScope::Affected);
+    let good = service
+        .run(
+            GateRequest::new(&project.root, GateTargetId::Check),
+            None,
+            None,
+        )
+        .await;
+    let options = ValidationOptions {
+        features: vec!["broken".into()],
+        ..Default::default()
+    };
+    let bad = service
+        .run(
+            GateRequest::new(&project.root, GateTargetId::Check).with_options(options.clone()),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(good.status, GateStatus::FastPass, "{good:#?}");
+    assert_eq!(bad.status, GateStatus::Fail, "{bad:#?}");
+    assert_eq!(bad.scope.strategy, GateScopeStrategy::Workspace);
+    assert_eq!(bad.profile.as_ref().unwrap().options, options);
+    assert_ne!(good.command_hash, bad.command_hash);
+    service.close().await;
+}
+
+#[tokio::test]
+async fn clippy_and_test_scope_widens_for_build_scripts() {
+    let project = TestProject::new("scope2", "pub fn value() {}\n", None);
+    let service = project.service_with_scope(ConfigGateScope::Affected);
+    fs::write(
+        project.root.join("src/lib.rs"),
+        "pub fn value() {}\n#[test] fn works() { value(); }\n",
+    )
+    .unwrap();
+    for target in [GateTargetId::Clippy, GateTargetId::Test] {
+        let narrow = service
+            .run(GateRequest::new(&project.root, target), None, None)
+            .await;
+        assert_eq!(narrow.status, GateStatus::FastPass, "{narrow:#?}");
+        assert_eq!(narrow.scope.strategy, GateScopeStrategy::Affected);
+    }
+    fs::write(project.root.join("build.rs"), "fn main() {}\n").unwrap();
+    let broad = service
+        .run(
+            GateRequest::new(&project.root, GateTargetId::Clippy),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(
+        broad.scope.strategy,
+        GateScopeStrategy::Workspace,
+        "{broad:#?}"
+    );
+    service.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires checksum-verified cargo-nextest 0.9.143 on PATH"]
+async fn real_nextest_executes_test_filters_and_keeps_doctest_stage() {
+    use agz_rust_coder::gate::{TestRunner, ValidationOptions};
+    let project = TestProject::new(
+        "nx",
+        "pub fn value() {}\n#[test]\nfn works() {}\n#[test]\nfn fails() { panic!(\"expected failure\"); }\n",
+        None,
+    );
+    let service = project.service();
+    let options = ValidationOptions {
+        runner: TestRunner::Nextest,
+        test_filter: Some("works".into()),
+        ..Default::default()
+    };
+    let good = service
+        .run(
+            GateRequest::new(&project.root, GateTargetId::Test).with_options(options.clone()),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(good.status, GateStatus::FastPass, "{good:#?}");
+    let bad = service
+        .run(
+            GateRequest::new(&project.root, GateTargetId::Test).with_options(ValidationOptions {
+                test_filter: Some("fails".into()),
+                ..options.clone()
+            }),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(bad.status, GateStatus::Fail, "{bad:#?}");
+    let none = service
+        .run(
+            GateRequest::new(&project.root, GateTargetId::Test).with_options(ValidationOptions {
+                test_filter: Some("no_such_test".into()),
+                ..options
+            }),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(none.status, GateStatus::Fail, "{none:#?}");
+    // A compile-failing doctest cannot be skipped by an otherwise passing nextest run.
+    fs::write(project.root.join("src/lib.rs"),"/// ```\n/// let value: u32 = \"wrong\";\n/// ```\npub fn value() {}\n#[test]\nfn works() {}\n").unwrap();
+    let all = service
+        .run(
+            GateRequest::for_all(&project.root).with_options(ValidationOptions {
+                runner: TestRunner::Nextest,
+                ..Default::default()
+            }),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(all.status, GateStatus::Fail, "{all:#?}");
+    assert!(
+        all.steps
+            .iter()
+            .any(|s| s.target == GateTargetId::Doc && s.exit_code != 0),
+        "{all:#?}"
+    );
+    service.close().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires explicit RUSTC_WRAPPER pointing to checksum-verified sccache 0.17.0"]
+async fn real_sccache_compiles_and_cleans_the_owned_server() {
+    use agz_rust_coder::gate::ValidationOptions;
+    let project = TestProject::new("sc", "pub fn value() {}\n", None);
+    let service = project.service();
+    let evidence = service
+        .run(
+            GateRequest::new(&project.root, GateTargetId::Check).with_options(ValidationOptions {
+                sccache: true,
+                ..Default::default()
+            }),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(evidence.status, GateStatus::FastPass, "{evidence:#?}");
+    assert!(evidence.warnings.iter().any(|s| s.contains("client-side")));
+    let entries = fs::read_dir(project.state.join("leases")).unwrap();
+    assert!(
+        !entries
+            .filter_map(Result::ok)
+            .any(|e| e.file_name().to_string_lossy().starts_with("sc-"))
+    );
+    service.close().await;
+}
+
+#[tokio::test]
+async fn filtered_cargo_with_no_executed_tests_cannot_grant_a_pass() {
+    use agz_rust_coder::gate::ValidationOptions;
+    let project = TestProject::new("empty-filter", "#[test] fn works() {}\n", None);
+    let service = project.service();
+    for (filter, expected) in [
+        ("works", GateStatus::FastPass),
+        ("does_not_exist", GateStatus::Inconclusive),
+    ] {
+        let result = service
+            .run(
+                GateRequest::new(&project.root, GateTargetId::Test).with_options(
+                    ValidationOptions {
+                        test_filter: Some(filter.into()),
+                        ..Default::default()
+                    },
+                ),
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(result.status, expected, "{result:#?}");
+    }
+    service.close().await;
+}

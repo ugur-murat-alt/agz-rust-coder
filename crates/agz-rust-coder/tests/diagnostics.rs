@@ -215,7 +215,7 @@ fn rejects_overlapping_suggestions_and_accepts_utf8_byte_ranges() {
     let root = TestRoot::new("ranges");
     root.source("let café = 1;\n");
     let mut diagnostics = parse_compiler_diagnostics(
-        r#"{"reason":"compiler-message","message":{"level":"error","message":"unicode","spans":[{"file_name":"src/lib.rs","line_start":1,"line_end":1,"column_start":8,"column_end":10,"byte_start":7,"byte_end":9,"is_primary":true,"suggested_replacement":"e","suggestion_applicability":"MachineApplicable"}]}}"#,
+        r#"{"reason":"compiler-message","message":{"level":"error","message":"unicode","spans":[{"file_name":"src/lib.rs","line_start":1,"line_end":1,"column_start":8,"column_end":9,"byte_start":7,"byte_end":9,"is_primary":true,"suggested_replacement":"e","suggestion_applicability":"MachineApplicable"}]}}"#,
     );
     let package = machine_applicable_package(&root.path, &diagnostics);
     assert_eq!(package.patches.len(), 1);
@@ -263,4 +263,22 @@ fn exposes_borrow_hints_for_compiler_codes() {
     assert!(borrow_errors::hint_for("E0596").is_some());
     assert!(borrow_errors::hint_for("E9999").is_none());
     assert!(borrow_errors::EXPLAIN_ADVICE.contains("rustc --explain"));
+}
+
+#[test]
+fn suggestion_sources_larger_than_the_snapshot_budget_are_rejected() {
+    let root = TestRoot::new("bounded");
+    let file = fs::File::create(root.path.join("src/lib.rs")).unwrap();
+    file.set_len(agz_rust_coder::diagnostics::MAX_SOURCE_SNAPSHOT_BYTES + 1)
+        .unwrap();
+    let diagnostics = parse_compiler_diagnostics(
+        r#"{"reason":"compiler-message","message":{"level":"error","message":"bounded","spans":[{"file_name":"src/lib.rs","line_start":1,"line_end":1,"column_start":1,"column_end":2,"byte_start":0,"byte_end":1,"is_primary":true,"suggested_replacement":"x","suggestion_applicability":"MachineApplicable"}]}}"#,
+    );
+    let package = machine_applicable_package(&root.path, &diagnostics);
+    assert!(package.patches.is_empty());
+    assert!(!package.skipped.is_empty());
+    assert_eq!(
+        file.metadata().unwrap().len(),
+        agz_rust_coder::diagnostics::MAX_SOURCE_SNAPSHOT_BYTES + 1
+    );
 }

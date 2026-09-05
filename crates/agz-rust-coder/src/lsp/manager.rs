@@ -756,7 +756,11 @@ impl BinarySchemaProbe for ConcreteBinarySchemaProbe {
                     authority,
                 )
                 .await
-                .map_err(|error| ProbeError::Io(error.to_string()))?;
+                .map_err(|error| match error {
+                    crate::process::ProcessError::Cancelled => ProbeError::Cancelled,
+                    crate::process::ProcessError::TimedOut => ProbeError::TimedOut,
+                    error => ProbeError::Io(error.to_string()),
+                })?;
             supervised_schema_result(result)
         })
     }
@@ -950,6 +954,7 @@ impl StopState {
 
     async fn wait_until(&self, deadline: Instant) -> bool {
         loop {
+            let notified = self.notify.notified();
             if self.complete.load(Ordering::Acquire) {
                 return true;
             }
@@ -957,7 +962,6 @@ impl StopState {
             if remaining.is_zero() {
                 return self.complete.load(Ordering::Acquire);
             }
-            let notified = self.notify.notified();
             if time::timeout(remaining, notified).await.is_err() {
                 return self.complete.load(Ordering::Acquire);
             }
@@ -970,6 +974,7 @@ impl StopState {
         cancellation: Option<&CancellationToken>,
     ) -> Result<bool, ManagerError> {
         loop {
+            let notified = self.notify.notified();
             if self.complete.load(Ordering::Acquire) {
                 return Ok(true);
             }
@@ -977,7 +982,6 @@ impl StopState {
             if remaining.is_zero() {
                 return Ok(self.complete.load(Ordering::Acquire));
             }
-            let notified = self.notify.notified();
             if let Some(cancellation) = cancellation {
                 tokio::select! {
                     result = time::timeout(remaining, notified) => {
@@ -1605,6 +1609,7 @@ where
 
         let deadline = Instant::now() + self.close_budget();
         loop {
+            let notified = self.inner.availability.notified();
             let starts = self
                 .inner
                 .state
@@ -1643,7 +1648,9 @@ where
                     remaining,
                 };
             }
-            let _ = self.wait_for_availability(deadline).await;
+            let _ = self
+                .wait_for_availability_with_cancellation(deadline, None, notified)
+                .await;
         }
     }
 
@@ -1818,7 +1825,8 @@ where
             self.ensure_schema(&binary, authority.clone(), cancellation.clone())
                 .await?;
         }
-        self.ensure_capacity(root, cancellation.clone()).await?;
+        // Keep the capacity wait state out of every nested navigation future.
+        Box::pin(self.ensure_capacity(root, cancellation.clone())).await?;
         check_cancellation(cancellation.as_ref())?;
         let protocol_root = self.protocol_root_for(root);
         let spec = CommandSpec {
@@ -2089,6 +2097,7 @@ where
     ) -> Result<(), ManagerError> {
         let deadline = Instant::now() + self.inner.options.wait_timeout;
         loop {
+            let notified = self.inner.availability.notified();
             check_cancellation(cancellation.as_ref())?;
             enum CapacityAction {
                 Ready,
@@ -2136,7 +2145,11 @@ where
                 }
                 CapacityAction::Wait => {
                     if !self
-                        .wait_for_availability_with_cancellation(deadline, cancellation.as_ref())
+                        .wait_for_availability_with_cancellation(
+                            deadline,
+                            cancellation.as_ref(),
+                            notified,
+                        )
                         .await?
                     {
                         return Err(ManagerError::WaitTimeout);
@@ -2351,22 +2364,16 @@ where
         }));
     }
 
-    async fn wait_for_availability(&self, deadline: Instant) -> bool {
-        self.wait_for_availability_with_cancellation(deadline, None)
-            .await
-            .unwrap_or(false)
-    }
-
     async fn wait_for_availability_with_cancellation(
         &self,
         deadline: Instant,
         cancellation: Option<&CancellationToken>,
+        notified: tokio::sync::futures::Notified<'_>,
     ) -> Result<bool, ManagerError> {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Ok(false);
         }
-        let notified = self.inner.availability.notified();
         if let Some(cancellation) = cancellation {
             tokio::select! {
                 result = time::timeout(remaining, notified) => Ok(result.is_ok()),
@@ -2504,6 +2511,7 @@ async fn wait_for_start(
     cancellation: Option<&CancellationToken>,
 ) -> Result<Arc<Instance>, ManagerError> {
     loop {
+        let notified = flight.notify.notified();
         if let Some(result) = flight
             .result
             .lock()
@@ -2516,7 +2524,6 @@ async fn wait_for_start(
         if remaining.is_zero() {
             return Err(ManagerError::WaitTimeout);
         }
-        let notified = flight.notify.notified();
         if let Some(cancellation) = cancellation {
             tokio::select! {
                 result = time::timeout(remaining, notified) => {
@@ -2538,6 +2545,7 @@ async fn wait_for_schema(
     cancellation: Option<&CancellationToken>,
 ) -> Result<(), ManagerError> {
     loop {
+        let notified = flight.notify.notified();
         if let Some(result) = flight
             .result
             .lock()
@@ -2550,7 +2558,6 @@ async fn wait_for_schema(
         if remaining.is_zero() {
             return Err(ManagerError::WaitTimeout);
         }
-        let notified = flight.notify.notified();
         if let Some(cancellation) = cancellation {
             tokio::select! {
                 result = time::timeout(remaining, notified) => {

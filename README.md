@@ -156,3 +156,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), [architecture](docs/architecture.md),
 ## License
 
 [MIT](LICENSE), Copyright (c) 2026 Ugur Murat Altintas.
+
+Unreleased: see [six-part correctness/efficiency work](docs/rust-efficiency-plan.md) for streaming diagnostics, explicit validation options and opt-in acceleration.

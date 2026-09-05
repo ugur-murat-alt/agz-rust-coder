@@ -10,6 +10,7 @@ use super::model::{
 
 #[derive(Debug, Deserialize)]
 struct CargoMessage {
+    package_id: Option<String>,
     reason: Option<String>,
     message: Option<RawDiagnostic>,
     fresh: Option<bool>,
@@ -19,6 +20,7 @@ struct CargoMessage {
 
 #[derive(Debug, Deserialize)]
 struct RawTarget {
+    name: Option<String>,
     kind: Option<Vec<String>>,
 }
 
@@ -126,7 +128,10 @@ pub fn parse_cargo_output(output: &str) -> CargoOutput {
                     }
                     Some("compiler-message") => {
                         if let Some(raw) = message.message {
-                            if let Some(diagnostic) = normalize_diagnostic(raw) {
+                            if let Some(mut diagnostic) = normalize_diagnostic(raw) {
+                                diagnostic.package_id = message.package_id;
+                                diagnostic.target_name =
+                                    message.target.and_then(|target| target.name);
                                 insert_diagnostic(&mut diagnostics, &mut indexes, diagnostic);
                             }
                         }
@@ -195,6 +200,8 @@ pub fn parse_short_diagnostic_line(line: &str) -> Option<Diagnostic> {
     };
 
     Some(Diagnostic {
+        package_id: None,
+        target_name: None,
         code,
         level,
         file: Some(file.to_owned()),
@@ -273,6 +280,8 @@ fn normalize_diagnostic(raw: RawDiagnostic) -> Option<Diagnostic> {
         .collect::<Vec<_>>();
     let suggestions = collect_suggestions(&raw.message, &spans, &children);
     let mut diagnostic = Diagnostic {
+        package_id: None,
+        target_name: None,
         code: raw.code.and_then(normalize_code),
         level,
         file: primary.map(|span| span.file.clone()),
@@ -455,10 +464,12 @@ fn insert_diagnostic(
     indexes: &mut BTreeMap<String, usize>,
     mut diagnostic: Diagnostic,
 ) {
-    let key = diagnostic
-        .root_key
-        .clone()
-        .unwrap_or_else(|| root_key(&diagnostic));
+    let key = format!(
+        "{:?}:{:?}:{}",
+        diagnostic.package_id,
+        diagnostic.target_name,
+        root_key(&diagnostic)
+    );
     diagnostic.root_key = Some(key.clone());
     if let Some(index) = indexes.get(&key).copied() {
         if detail_score(&diagnostic) > detail_score(&diagnostics[index]) {
@@ -518,4 +529,24 @@ enum EscapeState {
     Csi,
     Osc,
     OscEscape,
+}
+
+/// Validate recognized Cargo records without rejecting future reason variants.
+pub(super) fn valid_known_message(line: &str, value: &serde_json::Value) -> bool {
+    match value["reason"].as_str() {
+        Some("compiler-message" | "compiler-artifact") => {
+            let Ok(message) = serde_json::from_str::<CargoMessage>(line) else {
+                return false;
+            };
+            if message.reason.as_deref() == Some("compiler-message") {
+                message
+                    .message
+                    .is_some_and(|d| d.level.is_some() && d.message.is_some())
+            } else {
+                message.target.is_some() && message.fresh.is_some()
+            }
+        }
+        Some("build-finished") => value["success"].is_boolean(),
+        _ => true,
+    }
 }

@@ -1,9 +1,14 @@
 #![allow(dead_code, unused_imports)]
 
+mod context;
 mod model;
 mod parser;
 mod render;
+mod stream;
 mod suggestions;
+pub(crate) use context::diagnostic_contexts;
+pub use context::{DiagnosticContext, ResolvedDependency};
+pub use stream::{CargoStream, EvidenceStats};
 
 pub use model::{
     AdvisoryEdit, CargoBuildTelemetry, CargoOutput, CompilerSuggestion, CompilerSuggestionEdit,
@@ -21,5 +26,5 @@ pub use render::{
 };
 pub use suggestions::{
     SnapshotLookup, advisory_edit, machine_applicable_package,
-    machine_applicable_package_with_snapshots,
+    machine_applicable_package_authorized, machine_applicable_package_with_snapshots,
 };

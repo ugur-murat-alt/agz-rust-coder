@@ -55,6 +55,10 @@ const ESRCH: i32 = 3;
 
 #[derive(Debug, Error)]
 pub enum ProcessError {
+    #[error("process request was cancelled before spawn")]
+    Cancelled,
+    #[error("process deadline elapsed before spawn")]
+    TimedOut,
     #[error("process supervisor is closing")]
     Closing,
     #[error("invalid process specification: {0}")]
@@ -84,6 +88,7 @@ pub struct ProcessRunOptions {
     /// Retain an unsanitized, bounded stdout prefix for machine-readable protocols.
     /// This is opt-in; human/tool output remains sanitized.
     pub capture_raw_stdout: bool,
+    pub stdout_callback: Option<super::output::StdoutCallback>,
 }
 
 impl fmt::Debug for ProcessRunOptions {
@@ -110,6 +115,15 @@ impl fmt::Debug for ProcessRunOptions {
 }
 
 impl ProcessRunOptions {
+    #[must_use]
+    pub fn on_stdout<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(&[u8]) -> bool + Send + Sync + 'static,
+    {
+        self.stdout_callback = Some(Arc::new(callback));
+        self
+    }
+
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
         Self {
             cwd: cwd.into(),
@@ -122,6 +136,7 @@ impl ProcessRunOptions {
             cleanup_timeout: DEFAULT_CLEANUP_TIMEOUT,
             diagnostic_callback: None,
             capture_raw_stdout: false,
+            stdout_callback: None,
         }
     }
 
@@ -366,6 +381,7 @@ impl Completion {
 
     async fn wait(&self, deadline: Instant) -> bool {
         loop {
+            let notified = self.notify.notified();
             if self.complete.load(Ordering::Acquire) {
                 return true;
             }
@@ -373,7 +389,6 @@ impl Completion {
             if remaining.is_zero() {
                 return self.complete.load(Ordering::Acquire);
             }
-            let notified = self.notify.notified();
             if time::timeout(remaining, notified).await.is_err() {
                 return self.complete.load(Ordering::Acquire);
             }
@@ -649,6 +664,21 @@ impl ProcessSupervisor {
                 return Err(error);
             }
         };
+        if options
+            .cancel
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+            || *registration.stop_receiver.borrow() == StopCommand::Cancel
+        {
+            return Err(ProcessError::Cancelled);
+        }
+        if options.timeout.is_zero()
+            || options
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(ProcessError::TimedOut);
+        }
         let evidence_spec = logical_spec.as_ref().unwrap_or(&normalized);
         let mut command = CommandWrap::with_new(&normalized.executable, |command| {
             command
@@ -742,6 +772,7 @@ impl ProcessSupervisor {
             options.max_output_bytes,
             options.diagnostic_callback.clone(),
         );
+        collector.set_stdout_callback(options.stdout_callback.clone());
         if options.capture_raw_stdout {
             collector.capture_raw_stdout();
         }
@@ -787,6 +818,13 @@ impl ProcessSupervisor {
                     &mut warnings,
                 );
             }
+            if cleanup_deadline.is_some_and(|bound| now >= bound) {
+                push_warning(
+                    &mut warnings,
+                    "process leader did not exit within the cleanup bound".to_owned(),
+                );
+                break;
+            }
             match child.try_wait() {
                 Ok(maybe_status) => status = maybe_status,
                 Err(error) => {
@@ -817,7 +855,15 @@ impl ProcessSupervisor {
                 }
             }
 
-            let wake_at = next_wake(now, deadline, force_at.filter(|_| !force_sent));
+            let wake_at = next_wake(
+                now,
+                if stop_reason.is_some() {
+                    now + POLL_INTERVAL
+                } else {
+                    deadline
+                },
+                force_at.filter(|_| !force_sent),
+            );
             let sleep = time::sleep(wake_at.saturating_duration_since(now));
             tokio::pin!(sleep);
             tokio::select! {
@@ -1014,6 +1060,17 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 fn validate_options(options: &ProcessRunOptions) -> Result<(), ProcessError> {
+    let now = Instant::now();
+    if now.checked_add(options.timeout).is_none()
+        || now
+            .checked_add(options.kill_grace)
+            .and_then(|time| time.checked_add(options.cleanup_timeout))
+            .is_none()
+    {
+        return Err(ProcessError::InvalidSpecification(
+            "process durations exceed the monotonic clock range".into(),
+        ));
+    }
     if options.max_output_bytes == 0 {
         return Err(ProcessError::InvalidSpecification(
             "max_output_bytes must be greater than zero".to_owned(),

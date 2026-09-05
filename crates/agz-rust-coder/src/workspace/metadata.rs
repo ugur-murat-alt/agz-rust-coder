@@ -302,7 +302,11 @@ impl MetadataRunner for CargoMetadataRunner {
                     authority,
                 ),
             )
-            .map_err(|error| MetadataError::Runner(error.to_string()))?;
+            .map_err(|error| match error {
+                crate::process::ProcessError::Cancelled => MetadataError::Cancelled,
+                crate::process::ProcessError::TimedOut => MetadataError::TimedOut,
+                error => MetadataError::Runner(error.to_string()),
+            })?;
         if result.cancelled {
             return Err(MetadataError::Cancelled);
         }

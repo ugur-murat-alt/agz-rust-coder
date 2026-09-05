@@ -136,6 +136,10 @@ pub struct CompilerSuggestion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Diagnostic {
+    #[serde(default)]
+    pub package_id: Option<String>,
+    #[serde(default)]
+    pub target_name: Option<String>,
     pub code: Option<String>,
     pub level: DiagnosticLevel,
     pub file: Option<String>,

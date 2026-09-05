@@ -21,3 +21,42 @@ async fn a_later_request_deadline_does_not_disable_the_process_timeout() {
     assert!(result.drain_complete);
     assert_eq!(supervisor.active_count(), 0);
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn pre_cancelled_or_expired_commands_never_start() {
+    use agz_rust_coder::process::{ProcessError, ProcessRunOptions, ProcessSupervisor};
+    use std::time::{Duration, Instant};
+    let supervisor = ProcessSupervisor::without_journal();
+    let token = tokio_util::sync::CancellationToken::new();
+    token.cancel();
+    let cancelled = supervisor
+        .run(
+            "/bin/sh",
+            ["-c", "exit 99"],
+            ProcessRunOptions::new("/tmp").with_cancellation(token),
+        )
+        .await;
+    assert!(matches!(cancelled, Err(ProcessError::Cancelled)));
+    let expired = supervisor
+        .run(
+            "/bin/sh",
+            ["-c", "exit 99"],
+            ProcessRunOptions::new("/tmp")
+                .with_deadline(Instant::now().checked_sub(Duration::from_secs(1)).unwrap()),
+        )
+        .await;
+    assert!(matches!(expired, Err(ProcessError::TimedOut)));
+    let overflow = supervisor
+        .run(
+            "/bin/sh",
+            ["-c", "exit 99"],
+            ProcessRunOptions::new("/tmp").with_timeout(Duration::MAX),
+        )
+        .await;
+    assert!(matches!(
+        overflow,
+        Err(ProcessError::InvalidSpecification(_))
+    ));
+    assert_eq!(supervisor.active_count(), 0);
+}

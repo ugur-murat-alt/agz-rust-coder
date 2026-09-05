@@ -364,6 +364,7 @@ impl fmt::Debug for JobSubscription {
 impl JobSubscription {
     pub async fn wait(&self) -> Result<GateEvidence, SchedulerError> {
         loop {
+            let notified = self.state.notify.notified();
             if let Some(result) = self
                 .state
                 .result
@@ -373,7 +374,6 @@ impl JobSubscription {
             {
                 return result;
             }
-            let notified = self.state.notify.notified();
             tokio::select! {
                 () = notified => {}
                 () = async {
@@ -750,8 +750,12 @@ fn spawn_heartbeat(
 }
 
 async fn wait_for_job(job: &JobState) {
-    while !job.complete.load(Ordering::Acquire) {
-        job.notify.notified().await;
+    loop {
+        let notified = job.notify.notified();
+        if job.complete.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
     }
 }
 

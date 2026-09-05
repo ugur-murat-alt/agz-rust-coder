@@ -5,6 +5,25 @@ Semantic Versioning and follows the Keep a Changelog structure.
 
 ## [Unreleased]
 
+- Preserve pre-spawn cancellation/timeout outcomes through Git, metadata and
+  analyzer probes; prevent lost LSP completion and capacity wakeups.
+
+### Added
+
+- Bounded streaming Cargo diagnostics, explicit omission/telemetry fields and provisional progress.
+- Typed validation feature/target/test options and opt-in source/dependency context.
+- Opt-in version-checked Nextest and supervised Unix-local Sccache, plus real integration tests.
+- Property and Loom tests, a read-only identity measurement harness and strict comparison tooling.
+
+### Fixed
+
+- Avoid quadratic workspace file re-counting without changing content identities.
+- Prevent missed completion wakeups, expired/cancelled spawns and unbounded post-kill polling.
+- Bound compiler suggestion source reads and preserve Unicode scalar coordinates.
+- Recheck failed-compilation edit/context freshness; clear edits after cancelled or unclean execution.
+- Correct aggregate diagnostic timing, completed-stage counts, failed-test tails and workspace doctest selection.
+
+
 ## [0.1.1] - 2026-09-04
 
 ### Security

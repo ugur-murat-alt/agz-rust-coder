@@ -12,7 +12,7 @@ use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
 use super::{AuthorizedRoot, GitOutput, GitProbe, IdentityError, StdGitProbe};
-use crate::process::{ProcessRunOptions, ProcessSupervisor};
+use crate::process::{ProcessError, ProcessRunOptions, ProcessSupervisor};
 
 #[derive(Debug)]
 pub(crate) struct ControlledGitProbe {
@@ -86,7 +86,7 @@ impl ControlledGitProbe {
                     self.supervisor.run(&self.executable, args, options).await
                 }
             })
-            .map_err(|error| IdentityError::Git(error.to_string()))?;
+            .map_err(identity_process_error)?;
         self.checkpoint()?;
         if output.cancelled {
             return Err(IdentityError::Cancelled);
@@ -108,6 +108,14 @@ impl ControlledGitProbe {
                 .ok_or_else(|| IdentityError::Git("git raw stdout was not captured".to_owned()))?,
             truncated: output.output_truncated,
         })
+    }
+}
+
+fn identity_process_error(error: ProcessError) -> IdentityError {
+    match error {
+        ProcessError::Cancelled => IdentityError::Cancelled,
+        ProcessError::TimedOut => IdentityError::TimedOut,
+        error => IdentityError::Git(error.to_string()),
     }
 }
 
@@ -147,6 +155,22 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn pre_spawn_lifecycle_errors_keep_their_typed_identity_status() {
+        assert!(matches!(
+            identity_process_error(ProcessError::Cancelled),
+            IdentityError::Cancelled
+        ));
+        assert!(matches!(
+            identity_process_error(ProcessError::TimedOut),
+            IdentityError::TimedOut
+        ));
+        assert!(matches!(
+            identity_process_error(ProcessError::Closing),
+            IdentityError::Git(_)
+        ));
+    }
 
     fn shell_probe(
         deadline: Instant,

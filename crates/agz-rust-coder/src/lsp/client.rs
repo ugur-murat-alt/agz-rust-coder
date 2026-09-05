@@ -1039,6 +1039,7 @@ impl LspClient {
     pub async fn wait_process_exited(&self, timeout: Duration) -> bool {
         let deadline = time::Instant::now() + nonzero_duration(timeout);
         loop {
+            let notified = self.process_exit_notify.notified();
             if self.process_exited.load(Ordering::Acquire) {
                 return true;
             }
@@ -1046,7 +1047,6 @@ impl LspClient {
             if remaining.is_zero() {
                 return self.process_exited.load(Ordering::Acquire);
             }
-            let notified = self.process_exit_notify.notified();
             if time::timeout(remaining, notified).await.is_err() {
                 return self.process_exited.load(Ordering::Acquire);
             }
@@ -1056,6 +1056,7 @@ impl LspClient {
     pub async fn wait_closed(&self, timeout: Duration) -> bool {
         let deadline = time::Instant::now() + nonzero_duration(timeout);
         loop {
+            let notified = self.closed_notify.notified();
             if self.is_closed() {
                 return true;
             }
@@ -1063,7 +1064,6 @@ impl LspClient {
             if remaining.is_zero() {
                 return self.is_closed();
             }
-            let notified = self.closed_notify.notified();
             if time::timeout(remaining, notified).await.is_err() {
                 return self.is_closed();
             }

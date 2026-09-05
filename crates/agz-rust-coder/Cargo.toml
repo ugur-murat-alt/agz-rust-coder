@@ -48,6 +48,8 @@ tracing-subscriber.workspace = true
 command-fds.workspace = true
 
 [dev-dependencies]
+proptest = "=1.6.0"
+loom = "=0.7.2"
 anyhow.workspace = true
 rmcp = { workspace = true, features = ["client", "transport-child-process"] }
 

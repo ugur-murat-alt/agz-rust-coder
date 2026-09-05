@@ -155,3 +155,5 @@ cargo run -p xtask -- benchmark-smoke
 ## Lisans
 
 [MIT](LICENSE), Copyright (c) 2026 Ugur Murat Altintas.
+
+Henüz yayımlanmamış akış tanıları, açık doğrulama seçenekleri ve isteğe bağlı hızlandırma için [altı başlık çalışmasına](docs/rust-efficiency-plan.tr.md) bakınız.

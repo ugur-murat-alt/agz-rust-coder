@@ -144,6 +144,7 @@ impl Default for GateSource {
 /// A protocol-independent request accepted by [`crate::gate::CheckService`].
 #[derive(Debug, Clone)]
 pub struct GateRequest {
+    pub options: super::ValidationOptions,
     pub directory: Option<PathBuf>,
     pub target: GateTargetId,
     pub timings: bool,
@@ -163,6 +164,7 @@ impl GateRequest {
             directory: Some(directory.into()),
             target,
             timings: false,
+            options: super::ValidationOptions::default(),
             detail: GateDetail::Compact,
             client_roots: ClientRoots::unsupported(),
             root_epoch: 0,
@@ -179,11 +181,17 @@ impl GateRequest {
             directory: None,
             target,
             timings: false,
+            options: super::ValidationOptions::default(),
             detail: GateDetail::Compact,
             client_roots: ClientRoots::unsupported(),
             root_epoch: 0,
             source: GateSource::Explicit,
         }
+    }
+
+    pub fn with_options(mut self, options: super::ValidationOptions) -> Self {
+        self.options = options;
+        self
     }
 
     pub fn with_timings(mut self, timings: bool) -> Self {
@@ -374,6 +382,12 @@ pub struct CargoBuildTelemetry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GateStepResult {
+    #[serde(default)]
+    pub evidence: crate::diagnostics::EvidenceStats,
+    #[serde(default)]
+    pub diagnostics_omitted: u64,
+    #[serde(default)]
+    pub contexts: Vec<crate::diagnostics::DiagnosticContext>,
     pub target: GateTargetId,
     pub command: String,
     pub exit_code: i32,
@@ -396,6 +410,8 @@ pub struct GateStepResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ValidationProfile {
+    #[serde(default)]
+    pub options: super::ValidationOptions,
     pub id: String,
     pub command_hash: String,
     pub cache_mode: String,
