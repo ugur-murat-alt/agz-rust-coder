@@ -57,6 +57,7 @@ jobs:
         run: cargo +1.88.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: Run workspace tests
+        timeout-minutes: 15
         shell: bash
         run: cargo +1.88.0 test --workspace --all-targets --all-features --locked --no-fail-fast
 
