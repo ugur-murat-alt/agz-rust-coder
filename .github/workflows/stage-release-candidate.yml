@@ -1,0 +1,74 @@
+name: Stage corrected 0.2.0 candidate
+on:
+  push:
+    branches: [chore/prepare-0.2.0]
+    paths: [.github/workflows/stage-release-candidate.yml]
+permissions:
+  contents: write
+jobs:
+  stage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: c5d856ec332aad15fd01abba573771d8c798006f
+          persist-credentials: false
+      - name: Prepare the exact candidate without publishing
+        shell: bash
+        run: |
+          curl --fail --location --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/prepare.py" https://raw.githubusercontent.com/ugur-murat-alt/agz-rust-coder/e83348354067daa23b3ae41dda821ab66df1e01a/maintenance/prepare_release_repairs.py
+          curl --fail --location --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/finalize.py" https://raw.githubusercontent.com/ugur-murat-alt/agz-rust-coder/762e940aef4205333f3175ce78435151f07f9d4a/maintenance/finalize_release_repairs.py
+          python3 "$RUNNER_TEMP/prepare.py"
+          python3 "$RUNNER_TEMP/finalize.py"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('crates/agz-rust-coder/tests/lsp_navigation.rs')
+          text = p.read_text()
+          old = '    let implementations = with_lsp_authority('
+          end = '    )\n    .await\n    .expect("implementations through original authority");'
+          assert text.count(old) == 1 and text.count(end) == 1
+          text = text.replace(old, '    let implementations = Box::pin(with_lsp_authority(')
+          text = text.replace(end, '    ))\n    .await\n    .expect("implementations through original authority");')
+          p.write_text(text)
+          p = Path('.github/workflows/ci.yml')
+          text = p.read_text()
+          anchor = '      - name: Run workspace tests\n'
+          assert text.count(anchor) == 1
+          text = text.replace(anchor, '      - name: Run strict Clippy on every platform\n        shell: bash\n        run: cargo +1.88.0 clippy --workspace --all-targets --all-features --locked -- -D warnings\n\n' + anchor)
+          # Strict Clippy now runs on every platform, not twice on Linux.
+          repeated = '          cargo +1.88.0 clippy --workspace --all-targets --all-features --locked -- -D warnings\n'
+          assert text.count(repeated) == 1
+          text = text.replace(repeated, '')
+          p.write_text(text)
+          PY
+          rustup toolchain install 1.88.0 --profile minimal --component rustfmt
+          cargo +1.88.0 fmt --all
+          git diff --check
+      - name: Store candidate blobs only; release checks remain mandatory
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, pathlib, subprocess, urllib.request
+          expected = {'.github/workflows/ci.yml', 'CHANGELOG.md', 'crates/agz-rust-coder/src/cache/atomic.rs', 'crates/agz-rust-coder/src/docs/cache.rs', 'crates/agz-rust-coder/src/gate/lease.rs', 'crates/agz-rust-coder/src/process/identity.rs', 'crates/agz-rust-coder/src/process/supervisor.rs', 'crates/agz-rust-coder/src/tools/check.rs', 'crates/agz-rust-coder/src/workspace/metadata.rs', 'crates/agz-rust-coder/tests/check_service.rs', 'crates/agz-rust-coder/tests/release_portability.rs', 'xtask/src/child_process.rs', 'docs/tools.md', 'docs/tools.tr.md', 'crates/agz-rust-coder/src/gate/scheduler.rs', 'crates/agz-rust-coder/src/lsp/manager.rs', 'crates/agz-rust-coder/src/process/journal.rs', 'crates/agz-rust-coder/src/server/handler.rs', 'crates/agz-rust-coder/src/telemetry.rs', 'crates/agz-rust-coder/tests/audit.rs', 'crates/agz-rust-coder/tests/docs.rs', 'crates/agz-rust-coder/tests/security_roots.rs', 'crates/agz-rust-coder/tests/lsp_navigation.rs'}
+          subprocess.run(['git', 'add', '--', *sorted(expected)], check=True)
+          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
+          changed = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines()
+          assert set(changed) == expected, changed
+          assert subprocess.check_output(['git', 'diff', '--', '.github/workflows/release.yml', 'Cargo.lock', 'Cargo.toml']) == b''
+          entries = []
+          for name in changed:
+              mode, sha, _ = subprocess.check_output(['git', 'ls-files', '--stage', name], text=True).split(maxsplit=2)
+              data = subprocess.check_output(['git', 'cat-file', 'blob', sha])
+              payload = json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()}).encode()
+              request = urllib.request.Request('https://api.github.com/repos/ugur-murat-alt/agz-rust-coder/git/blobs', data=payload, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Content-Type': 'application/json', 'User-Agent': 'agz-release-candidate-staging'})
+              with urllib.request.urlopen(request, timeout=45) as response:
+                  result = json.load(response)
+              assert result['sha'] == sha
+              entries.append({'path': name, 'mode': mode, 'type': 'blob', 'sha': sha})
+          print('CANDIDATE_TREE=' + subprocess.check_output(['git', 'write-tree'], text=True).strip())
+          print(json.dumps(entries, indent=2))
+          print('Candidate only: no branch, tag, release, registry or test status was changed.')
+          PY
