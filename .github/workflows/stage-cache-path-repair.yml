@@ -1,0 +1,128 @@
+name: Stage Windows cache path repair
+on:
+  push:
+    branches: [chore/prepare-0.2.0]
+    paths: [.github/workflows/stage-cache-path-repair.yml]
+permissions:
+  contents: write
+  actions: write
+jobs:
+  stage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Cancel only the superseded release attempt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          test "$(gh api repos/$GH_REPO/actions/runs/33960287146 --jq .head_sha)" = "760b17172dc5e5e4a5bf1b6b87863ec95fbd3d59"
+          STATUS="$(gh api repos/$GH_REPO/actions/runs/33960287146 --jq .status)"
+          if [ "$STATUS" != completed ]; then
+            gh api --method POST repos/$GH_REPO/actions/runs/33960287146/cancel
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 760b17172dc5e5e4a5bf1b6b87863ec95fbd3d59
+          persist-credentials: false
+      - name: Correct cache path components without relaxing authorization
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ['crates/agz-rust-coder/src/docs/cache.rs', 'crates/agz-rust-coder/src/cache/retention.rs']:
+              p = Path(name)
+              text = p.read_text()
+              old = '            Component::Prefix(prefix) => current.push(prefix.as_os_str()),'
+              new = '''            Component::Prefix(prefix) => {
+                          // A Windows drive prefix is not a complete root until RootDir.
+                          current.push(prefix.as_os_str());
+                          continue;
+                      }'''
+              assert text.count(old) == 1, name
+              p.write_text(text.replace(old, new))
+          p = Path('.github/workflows/ci.yml')
+          text = p.read_text()
+          old = '      - name: Run workspace tests\n        shell: bash\n'
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, '      - name: Run workspace tests\n        timeout-minutes: 15\n        shell: bash\n'))
+          Path('crates/agz-rust-coder/tests/cache_paths.rs').write_text(r'''use agz_rust_coder::{
+              cache::{OwnedCacheRetention, RetentionLimits},
+              docs::{CacheIdentity, DocsCache, GeneratedPage, page_candidates},
+          };
+          use std::{fs, path::PathBuf, time::{Duration, Instant, SystemTime}};
+
+          struct TestRoot(PathBuf);
+          impl Drop for TestRoot {
+              fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+          }
+
+          #[test]
+          fn canonical_cache_paths_support_the_complete_docs_and_retention_lifecycle() {
+              // canonicalize produces the verbatim drive path on Windows, including
+              // expansion of short user names. Do not strip that prefix in this test.
+              let base = fs::canonicalize(std::env::temp_dir()).expect("canonical temporary root");
+              let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
+                  .expect("system clock").as_nanos();
+              let root = TestRoot(base.join(format!("agz-cache-paths-{}-{stamp}", std::process::id())));
+              fs::create_dir(&root.0).expect("create isolated fixture");
+              let cache_root = root.0.join("nested").join("docs");
+              let cache = DocsCache::new(&cache_root);
+              let identity = CacheIdentity {
+                  crate_name: "demo-crate".into(), version: "1.2.3".into(),
+                  source: "path".into(), fingerprint: "canonical-path-fixture".into(),
+              };
+              let deadline = Some(Instant::now() + Duration::from_secs(10));
+              let generation = cache.prepare_generation_bounded(&identity, deadline, None)
+                  .expect("prepare generation through canonical drive root");
+              generation.validate().expect("retain cache directory identity");
+              drop(generation);
+              let page = GeneratedPage {
+                  path: "struct.Widget.html".into(),
+                  html: b"<html><main><p>Canonical cache Widget.</p></main></html>".to_vec(),
+              };
+              let entry = cache.publish_pages(&identity, "demo-crate", &[page], deadline)
+                  .expect("publish through canonical drive root");
+              assert!(cache.is_complete(&identity));
+              assert!(cache.read_page(&identity, "demo-crate", &page_candidates(Some("Widget")))
+                  .expect("read completed page").text.contains("Canonical cache Widget"));
+              let retention = OwnedCacheRetention::with_limits(&cache_root, RetentionLimits {
+                  max_age: Duration::ZERO, max_bytes: u64::MAX, max_entries: 10, max_nodes: 100,
+              });
+              assert!(retention.touch(&entry), "canonical root must be accepted for retention");
+              let lease = retention.lease(&entry);
+              let now = SystemTime::now() + Duration::from_secs(1);
+              assert_eq!(retention.prune_at(now).removed, 0, "active entry stays protected");
+              assert!(entry.exists());
+              drop(lease);
+              assert_eq!(retention.prune_at(now).removed, 1, "unleased completed entry is pruned");
+              assert!(!entry.exists());
+          }
+          ''')
+          PY
+          rustup toolchain install 1.88.0 --profile minimal --component rustfmt
+          cargo +1.88.0 fmt --all
+          git diff --check
+      - name: Store candidate blobs without changing branches or publication checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, subprocess, urllib.request
+          expected = {'.github/workflows/ci.yml', 'crates/agz-rust-coder/src/docs/cache.rs', 'crates/agz-rust-coder/src/cache/retention.rs', 'crates/agz-rust-coder/tests/cache_paths.rs'}
+          subprocess.run(['git', 'add', '--', *sorted(expected)], check=True)
+          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
+          changed = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines()
+          assert set(changed) == expected, changed
+          entries = []
+          for name in changed:
+              mode, sha, _ = subprocess.check_output(['git', 'ls-files', '--stage', name], text=True).split(maxsplit=2)
+              data = subprocess.check_output(['git', 'cat-file', 'blob', sha])
+              request = urllib.request.Request('https://api.github.com/repos/ugur-murat-alt/agz-rust-coder/git/blobs', data=json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()}).encode(), headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Content-Type': 'application/json', 'User-Agent': 'agz-cache-path-repair'})
+              with urllib.request.urlopen(request, timeout=45) as response:
+                  result = json.load(response)
+              assert result['sha'] == sha
+              entries.append({'path': name, 'mode': mode, 'type': 'blob', 'sha': sha})
+          print('CANDIDATE_TREE=' + subprocess.check_output(['git', 'write-tree'], text=True).strip())
+          print(json.dumps(entries, indent=2))
+          PY
