@@ -1,0 +1,45 @@
+name: Development bootstrap
+
+on:
+  push:
+    branches: [feat/rust-evidence-and-efficiency]
+    paths: [.github/workflows/development-bootstrap.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare pinned offline development dependencies
+        shell: bash
+        env:
+          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy --component rust-analyzer
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('crates/agz-rust-coder/Cargo.toml')
+          text = p.read_text().replace('[dev-dependencies]', '[dev-dependencies]\nproptest = "=1.6.0"\nloom = "=0.7.2"')
+          p.write_text(text)
+          PY
+          cargo +1.88.0 fetch
+          mkdir -p offline-kit
+          cp Cargo.lock offline-kit/Cargo.lock
+          cp crates/agz-rust-coder/Cargo.toml offline-kit/crate-Cargo.toml
+          tar -C "$HOME/.rustup/toolchains" -czf offline-kit/toolchain.tar.gz 1.88.0-x86_64-unknown-linux-gnu
+          tar -C "$HOME/.cargo" -czf offline-kit/registry.tar.gz registry
+          (cd offline-kit && sha256sum *.tar.gz Cargo.lock crate-Cargo.toml > SHA256SUMS)
+      - name: Export only compiler and public registry inputs, never credentials
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: offline-rust-1.88-development
+          path: offline-kit/*
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
