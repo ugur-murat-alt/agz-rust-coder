@@ -12,34 +12,58 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2025]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: c5d856ec332aad15fd01abba573771d8c798006f
+          fetch-depth: 0
           persist-credentials: false
-      - name: Apply the immutable reviewed repair script
+      - name: Apply immutable release corrections
         shell: bash
         run: |
           curl --fail --location --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/prepare-release-repairs.py" https://raw.githubusercontent.com/ugur-murat-alt/agz-rust-coder/e83348354067daa23b3ae41dda821ab66df1e01a/maintenance/prepare_release_repairs.py
+          curl --fail --location --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/finalize-release-repairs.py" https://raw.githubusercontent.com/ugur-murat-alt/agz-rust-coder/762e940aef4205333f3175ce78435151f07f9d4a/maintenance/finalize_release_repairs.py
           python3 "$RUNNER_TEMP/prepare-release-repairs.py"
+          python3 "$RUNNER_TEMP/finalize-release-repairs.py"
           rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy
           cargo +1.88.0 fmt --all
           git diff --check
-          python3 -m pip install --disable-pip-version-check PyYAML==6.0.2
-          python3 - <<'PY'
-          import yaml
-          for name in ['.github/workflows/ci.yml', '.github/workflows/release.yml']:
-              with open(name, encoding='utf-8') as source:
-                  assert isinstance(yaml.safe_load(source)['jobs'], dict)
-          PY
-      - name: Compile and test portability before the full gate
+      - name: Validate workflow syntax in an isolated Python environment
         shell: bash
         run: |
-          cargo +1.88.0 test -p agz-rust-coder --test release_portability --locked -- --nocapture
-          cargo +1.88.0 test -p agz-rust-coder --lib workspace::metadata::tests --locked -- --nocapture
-          cargo +1.88.0 test -p agz-rust-coder --test check_service --locked -- --nocapture
-          cargo +1.88.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
+          python3 - <<'PY'
+          import os, pathlib, subprocess, venv
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'agz-yaml-venv'
+          venv.EnvBuilder(with_pip=True).create(root)
+          python = root / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+          subprocess.run([str(python), '-m', 'pip', 'install', '--disable-pip-version-check', 'PyYAML==6.0.2'], check=True)
+          subprocess.run([str(python), '-c', "import yaml; [yaml.safe_load(open(p, encoding='utf-8'))['jobs'] for p in ['.github/workflows/ci.yml', '.github/workflows/release.yml']]"], check=True)
+          PY
+      - name: Require strict Clippy on every platform
+        shell: bash
+        run: cargo +1.88.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Run complete workspace tests on every platform
+        shell: bash
+        timeout-minutes: 12
+        run: cargo +1.88.0 test --workspace --all-targets --all-features --locked --no-fail-fast
+      - name: Verify installed protocol and client integration
+        shell: bash
+        run: |
+          npm install --global @opencode-ai/cli@0.0.0-beta-18743
+          test "$(opencode2 --version)" = "opencode2 v0.0.0-beta-18743"
+          cargo +1.88.0 build -p agz-rust-coder --locked
+          python3 - <<'PY'
+          import os, pathlib, shutil, subprocess, tempfile
+          suffix = '.exe' if os.name == 'nt' else ''
+          with tempfile.TemporaryDirectory(prefix='agz-smoke-', dir=os.environ['RUNNER_TEMP']) as temporary:
+              binary = pathlib.Path(temporary).resolve() / ('agz-rust-coder' + suffix)
+              shutil.copy2(pathlib.Path('target/debug') / binary.name, binary)
+              binary.chmod(0o755)
+              environment = dict(os.environ, AGZ_RUST_CODER_BIN=str(binary))
+              for smoke in ['protocol-smoke', 'opencode-smoke', 'benchmark-smoke']:
+                  subprocess.run(['cargo', '+1.88.0', 'run', '--locked', '-p', 'xtask', '--', smoke], env=environment, check=True)
+          PY
       - name: Verify actual sccache leak negative control and repaired lifecycle
         if: runner.os == 'Linux'
         shell: bash
@@ -83,7 +107,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import base64, json, os, pathlib, subprocess, urllib.request
-          expected = {'.github/workflows/ci.yml', 'CHANGELOG.md', 'crates/agz-rust-coder/src/cache/atomic.rs', 'crates/agz-rust-coder/src/docs/cache.rs', 'crates/agz-rust-coder/src/gate/lease.rs', 'crates/agz-rust-coder/src/process/identity.rs', 'crates/agz-rust-coder/src/process/supervisor.rs', 'crates/agz-rust-coder/src/tools/check.rs', 'crates/agz-rust-coder/src/workspace/metadata.rs', 'crates/agz-rust-coder/tests/check_service.rs', 'crates/agz-rust-coder/tests/release_portability.rs', 'xtask/src/child_process.rs', 'docs/tools.md', 'docs/tools.tr.md'}
+          expected = {'.github/workflows/ci.yml', 'CHANGELOG.md', 'crates/agz-rust-coder/src/cache/atomic.rs', 'crates/agz-rust-coder/src/docs/cache.rs', 'crates/agz-rust-coder/src/gate/lease.rs', 'crates/agz-rust-coder/src/process/identity.rs', 'crates/agz-rust-coder/src/process/supervisor.rs', 'crates/agz-rust-coder/src/tools/check.rs', 'crates/agz-rust-coder/src/workspace/metadata.rs', 'crates/agz-rust-coder/tests/check_service.rs', 'crates/agz-rust-coder/tests/release_portability.rs', 'xtask/src/child_process.rs', 'docs/tools.md', 'docs/tools.tr.md', 'crates/agz-rust-coder/src/gate/scheduler.rs', 'crates/agz-rust-coder/src/lsp/manager.rs', 'crates/agz-rust-coder/src/process/journal.rs', 'crates/agz-rust-coder/src/server/handler.rs', 'crates/agz-rust-coder/src/telemetry.rs', 'crates/agz-rust-coder/tests/audit.rs', 'crates/agz-rust-coder/tests/docs.rs', 'crates/agz-rust-coder/tests/security_roots.rs'}
           subprocess.run(['git', 'add', '--', *sorted(expected)], check=True)
           subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
           changed = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines()
