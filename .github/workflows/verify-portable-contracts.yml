@@ -6,21 +6,42 @@ on:
 permissions:
   contents: read
 jobs:
-  cancel-obsolete:
-    runs-on: ubuntu-24.04
-    permissions:
-      actions: write
+  linker-path-probe:
+    runs-on: windows-2025
+    timeout-minutes: 5
     steps:
-      - name: Stop only the known failed release source
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+      - name: Measure short and long normal and verbatim Cargo output paths
+        shell: bash
         run: |
-          test "$(gh api repos/$GH_REPO/actions/runs/33960967720 --jq .head_sha)" = "ffa5eb7956c4297ed73f4cb304449aba11ae7856"
-          STATUS="$(gh api repos/$GH_REPO/actions/runs/33960967720 --jq .status)"
-          if [ "$STATUS" != completed ]; then
-            gh api --method POST repos/$GH_REPO/actions/runs/33960967720/cancel
-          fi
+          rustup toolchain install 1.88.0 --profile minimal
+          python3 - <<'PY'
+          import os, pathlib, shutil, subprocess, tempfile, time
+          stamp = str(time.time_ns())
+          temp = pathlib.Path(tempfile.gettempdir()).resolve()
+          root = temp / ('agz-doc-probe-' + stamp)
+          root.mkdir()
+          (root / 'src').mkdir()
+          (root / 'Cargo.toml').write_text('[package]\nname="cancel-docs"\nversion="0.1.0"\nedition="2024"\nbuild="build.rs"\n[workspace]\n')
+          (root / 'Cargo.lock').write_text('version = 4\n\n[[package]]\nname = "cancel-docs"\nversion = "0.1.0"\n')
+          (root / 'src/lib.rs').write_text('pub struct CancelDocs;\n')
+          (root / 'build.rs').write_text('fn main() { println!("cargo:warning=build script executed"); }\n')
+          for label in ['short', 'long']:
+              prefix = ('agz-c-' if label == 'short' else 'agz-rust-coder-docs-task-cache-12345-') + stamp
+              cache = temp / prefix
+              try:
+                  for mode in ['normal', 'verbatim']:
+                      target = cache / ('a' * 64) / ('target-' + mode)
+                      target.mkdir(parents=True)
+                      path = str(target)
+                      if mode == 'verbatim':
+                          path = '\\\\?\\' + path
+                      result = subprocess.run(['cargo', '+1.88.0', 'doc', '--manifest-path', str(root / 'Cargo.toml'), '--locked', '--offline', '--no-deps', '--target-dir', path], capture_output=True, text=True, timeout=60)
+                      print('PROBE', label, mode, 'target_chars=', len(path), 'exit=', result.returncode, flush=True)
+                      print(result.stdout, result.stderr, flush=True)
+              finally:
+                  shutil.rmtree(cache, ignore_errors=True)
+          shutil.rmtree(root)
+          PY
   verify:
     strategy:
       fail-fast: false
@@ -38,7 +59,9 @@ jobs:
         shell: bash
         run: |
           curl --fail --location --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/repair.py" https://raw.githubusercontent.com/ugur-murat-alt/agz-rust-coder/10cd693b18a18fff7259d6b75cea8f82f4f502af/maintenance/repair_portable_contracts.py
+          curl --fail --location --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/bounds.py" https://raw.githubusercontent.com/ugur-murat-alt/agz-rust-coder/897c681e46ba5429cdc07bad760065ad91907198/maintenance/repair_fixture_bounds.py
           python3 "$RUNNER_TEMP/repair.py"
+          python3 "$RUNNER_TEMP/bounds.py"
           rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy
           cargo +1.88.0 fmt --all
           git diff --check
@@ -49,6 +72,12 @@ jobs:
         shell: bash
         timeout-minutes: 12
         run: cargo +1.88.0 test --workspace --all-targets --all-features --locked --no-fail-fast
+      - name: Repeat the absolute deadline regression
+        shell: bash
+        run: |
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            cargo +1.88.0 test -p agz-rust-coder --lib timed_out_owner_late_success_is_not_published_to_cache --locked -- --nocapture
+          done
       - name: Verify bounded parser negative control
         if: runner.os == 'Linux'
         shell: bash
@@ -103,7 +132,9 @@ jobs:
         shell: bash
         run: |
           curl --fail --location --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/repair.py" https://raw.githubusercontent.com/ugur-murat-alt/agz-rust-coder/10cd693b18a18fff7259d6b75cea8f82f4f502af/maintenance/repair_portable_contracts.py
+          curl --fail --location --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/bounds.py" https://raw.githubusercontent.com/ugur-murat-alt/agz-rust-coder/897c681e46ba5429cdc07bad760065ad91907198/maintenance/repair_fixture_bounds.py
           python3 "$RUNNER_TEMP/repair.py"
+          python3 "$RUNNER_TEMP/bounds.py"
           rustup toolchain install 1.88.0 --profile minimal --component rustfmt
           cargo +1.88.0 fmt --all
           git diff --check
@@ -113,7 +144,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import base64, json, os, subprocess, urllib.request
-          expected = {'crates/agz-rust-coder/src/workspace/roots.rs', 'crates/agz-rust-coder/tests/lsp_manager.rs', 'crates/agz-rust-coder/tests/lsp_navigation.rs', 'crates/agz-rust-coder/tests/workspace_selection.rs', 'crates/agz-rust-coder/tests/protocol_tasks.rs', 'crates/agz-rust-coder/tests/windows_path_identity.rs', 'tests/fixtures/lsp/semantic_ra.rs', 'xtask/src/opencode.rs'}
+          expected = {'crates/agz-rust-coder/src/workspace/roots.rs', 'crates/agz-rust-coder/src/workspace/metadata.rs', 'crates/agz-rust-coder/tests/lsp_manager.rs', 'crates/agz-rust-coder/tests/lsp_navigation.rs', 'crates/agz-rust-coder/tests/workspace_selection.rs', 'crates/agz-rust-coder/tests/protocol_tasks.rs', 'crates/agz-rust-coder/tests/windows_path_identity.rs', 'tests/fixtures/lsp/semantic_ra.rs', 'xtask/src/opencode.rs'}
           subprocess.run(['git', 'add', '--', *sorted(expected)], check=True)
           subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
           changed = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines()
