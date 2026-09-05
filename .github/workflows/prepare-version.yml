@@ -1,0 +1,131 @@
+name: Prepare 0.2.0 release metadata
+
+on:
+  push:
+    branches: [chore/prepare-0.2.0]
+    paths: [.github/workflows/prepare-version.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the merged and reviewed source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 48230e79df4cc3f28fec5e5dc97b998b520e96a3
+          persist-credentials: false
+      - name: Prepare exact version and documentation changes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, json, os, subprocess, tomllib, urllib.request
+          r = Path.cwd()
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip() == '7ea7929b58e4e749d9f0e3bd41e8a5892dd57233'
+          def replace(name, old, new, count=1):
+              p = r / name
+              text = p.read_text()
+              assert text.count(old) >= count, (name, old)
+              p.write_text(text.replace(old, new, count))
+          replace('Cargo.toml', 'version = "0.1.1"', 'version = "0.2.0"')
+          replace('Cargo.lock', 'name = "agz-rust-coder"\nversion = "0.1.1"', 'name = "agz-rust-coder"\nversion = "0.2.0"')
+          for name in ['README.md', 'README.tr.md', 'crates/agz-rust-coder/README.md']:
+              replace(name, '`0.1.1`', '`0.2.0`')
+          replace('install.sh', 'AGZ_RUST_CODER_VERSION:-0.1.1', 'AGZ_RUST_CODER_VERSION:-0.2.0')
+          p = r / 'server.json'
+          metadata = json.loads(p.read_text())
+          metadata['version'] = '0.2.0'
+          metadata['packages'][0]['version'] = '0.2.0'
+          p.write_text(json.dumps(metadata, indent=2) + '\n')
+          replace('docs/tools.md', '`agz-rust-coder` `0.1.1`.', '`agz-rust-coder` `0.2.0`.')
+          replace('docs/tools.md', 'The following additive `check` fields are **unreleased development changes**;\nthe published 0.1.1 binary does not provide them. Omitting `options` retains the\nexisting Cargo behavior. Examples are MCP argument objects, not shell strings:', 'The following additive `check` fields are available starting with **0.2.0**.\nOmitting `options` retains the existing Cargo behavior. Examples are MCP\nargument objects, not shell strings:')
+          replace('docs/tools.tr.md', '`agz-rust-coder` `0.1.1`', '`agz-rust-coder` `0.2.0`')
+          replace('docs/tools.tr.md', '## Explicit validation options', '## Açık doğrulama seçenekleri')
+          replace('docs/tools.tr.md', "Aşağıdaki `check` ekleri **henüz yayımlanmamış geliştirme değişiklikleridir**;\nyayımlı 0.1.1 binary'sinde yoktur. `options` verilmezse mevcut Cargo davranışı\nkorunur. Örnekler kabuk komutu değil MCP argüman nesnesidir:", 'Aşağıdaki `check` ekleri **0.2.0 sürümünden itibaren kullanılabilir**. `options`\nverilmezse mevcut Cargo davranışı korunur. Örnekler kabuk komutu değil MCP\nargüman nesnesidir:')
+          p = r / 'CHANGELOG.md'
+          text = p.read_text()
+          start = text.index('## [Unreleased]')
+          end = text.index('## [0.1.1]')
+          release = '''## [Unreleased]
+
+          ## [0.2.0] - 2026-09-05
+
+          ### Added
+
+          - Bounded streaming Cargo diagnostics, explicit omission/telemetry fields and
+            provisional progress; early compiler evidence is never a completed pass.
+          - Typed feature, target and test-filter options, scoped development validation,
+            and opt-in source context with exact resolved dependency versions.
+          - Opt-in version-checked Nextest and supervised Unix-local Sccache, with
+            separate doctests, no silent fallback and real integration coverage.
+          - Property-based and Loom regression tests, a read-only identity measurement
+            harness, and strict same-input benchmark comparison tooling.
+
+          ### Fixed
+
+          - Avoided quadratic workspace file re-counting without changing content
+            identities, file budgets or authorized-root boundaries.
+          - Preserved pre-spawn cancellation and timeout outcomes through Git, metadata
+            and analyzer probes; prevented lost process/job/LSP completion wakeups.
+          - Bounded post-kill cleanup and compiler suggestion source reads; preserved
+            Unicode scalar coordinates rather than treating columns as byte offsets.
+          - Rechecked failed-compilation edit/context freshness and cleared edits after
+            cancelled, timed-out or unclean execution.
+          - Corrected aggregate diagnostic timing, completed-stage counts, failed-test
+            tails, zero-test matches and workspace doctest selection.
+
+          ### Changed
+
+          - Required the existing Linux/macOS/Windows CI, optional-acceleration tests and
+            dependency policy before release publication, in addition to artifact checks.
+          - Advanced to 0.2.0 because public Rust request/evidence structs gain fields.
+            Library consumers using struct literals must supply the new fields or use
+            constructors/builders such as `GateRequest::new(...).with_options(...)`.
+            The 12 MCP tools, prior required inputs and default Cargo behavior remain
+            compatible. `all` validates the recorded configuration, not every possible
+            feature combination or platform. Supervised Sccache remains Unix-only.
+
+          '''
+          text = text[:start] + release + text[end:]
+          text = text.replace('[Unreleased]: https://github.com/ugur-murat-alt/agz-rust-coder/compare/agz-rust-coder-v0.1.1...HEAD', '[Unreleased]: https://github.com/ugur-murat-alt/agz-rust-coder/compare/agz-rust-coder-v0.2.0...HEAD\n[0.2.0]: https://github.com/ugur-murat-alt/agz-rust-coder/compare/agz-rust-coder-v0.1.1...agz-rust-coder-v0.2.0')
+          p.write_text(text)
+          replace('.github/workflows/ci.yml', 'on:\n  pull_request:', 'on:\n  workflow_call:\n  pull_request:')
+          replace('.github/workflows/release.yml', 'for example agz-rust-coder-v0.1.1', 'for example agz-rust-coder-v0.2.0')
+          replace('.github/workflows/release.yml', 'jobs:\n  verify:', 'jobs:\n  regression:\n    name: Release regression gate\n    uses: ./.github/workflows/ci.yml\n\n  verify:')
+          replace('.github/workflows/release.yml', '    needs:\n      - verify\n      - release-binaries', '    needs:\n      - regression\n      - verify\n      - release-binaries')
+          before = tomllib.loads(subprocess.check_output(['git', 'show', 'HEAD:Cargo.lock'], text=True))
+          after = tomllib.loads((r / 'Cargo.lock').read_text())
+          for package in before['package']:
+              if package['name'] == 'agz-rust-coder':
+                  package['version'] = '0.2.0'
+          assert before == after, 'Registry dependency records must remain unchanged'
+          subprocess.run(['bash', '-n', 'install.sh', 'tests/installer.sh'], check=True)
+          subprocess.run(['bash', 'tests/installer.sh'], check=True)
+          subprocess.run(['git', 'add', '-u'], check=True)
+          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
+          expected_tree = 'eae0f434e9f3c7b26f7fcbbc397a93d1509d4b48'
+          assert subprocess.check_output(['git', 'write-tree'], text=True).strip() == expected_tree
+          allowlist = {'.github/workflows/ci.yml', '.github/workflows/release.yml', 'CHANGELOG.md', 'Cargo.lock', 'Cargo.toml', 'README.md', 'README.tr.md', 'crates/agz-rust-coder/README.md', 'docs/tools.md', 'docs/tools.tr.md', 'install.sh', 'server.json'}
+          changed = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines()
+          assert set(changed) == allowlist
+          # Store only content-addressed blobs. No branch, tree, tag or release is changed.
+          entries = []
+          for name in changed:
+              mode, sha, _ = subprocess.check_output(['git', 'ls-files', '--stage', name], text=True).split(maxsplit=2)
+              body = json.dumps({'encoding': 'base64', 'content': base64.b64encode((r / name).read_bytes()).decode()}).encode()
+              request = urllib.request.Request('https://api.github.com/repos/ugur-murat-alt/agz-rust-coder/git/blobs', data=body, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json', 'User-Agent': 'agz-release-version-preparation'})
+              with urllib.request.urlopen(request, timeout=45) as response:
+                  result = json.load(response)
+              assert result['sha'] == sha
+              entries.append({'path': name, 'mode': mode, 'type': 'blob', 'sha': sha})
+          print('VERIFIED_RELEASE_TREE=' + expected_tree)
+          print(json.dumps(entries, indent=2))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('Prepared 0.2.0 release tree: `' + expected_tree + '`\n\n12 allowlisted files; dependency records unchanged; 10 installer scenarios passed. No refs, tags or releases changed.\n')
+          PY
