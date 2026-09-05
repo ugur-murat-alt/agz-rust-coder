@@ -572,7 +572,7 @@ fn concrete_factory_uses_the_root_descriptor_protocol_alias() {
 async fn protocol_root_is_shared_by_initialize_and_workspace_folder_callback() {
     let root = TestRoot::new("protocol-root-alias");
     let binary = binary(root.path());
-    let protocol_root = PathBuf::from("/agz-stable-lsp-root");
+    let protocol_root = root.path().with_extension("protocol-alias");
     let factory =
         MockFactory::new(Duration::ZERO, Duration::ZERO).with_protocol_root(protocol_root.clone());
     let observer = factory.clone();
@@ -593,24 +593,37 @@ async fn protocol_root_is_shared_by_initialize_and_workspace_folder_callback() {
     let client = observer.clients().pop().expect("started mock client");
 
     let original = root.path().with_extension("original");
-    fs::rename(root.path(), &original).expect("move lexical root after initialization");
-    fs::create_dir(root.path()).expect("create lexical replacement");
+    #[cfg(unix)]
+    {
+        fs::rename(root.path(), &original).expect("move lexical root after initialization");
+        fs::create_dir(root.path()).expect("create lexical replacement");
+    }
+    #[cfg(windows)]
+    {
+        assert!(
+            fs::rename(root.path(), &original).is_err(),
+            "authorized root must remain pinned"
+        );
+        assert!(root.path().is_dir());
+        assert!(!original.exists());
+    }
     let initialize = client
         .initialize_params()
         .pop()
         .expect("captured initialize parameters");
     let workspace_folders = client.workspace_folders().await;
-    let expected_uri = "file:///agz-stable-lsp-root";
+    let expected_uri = lsp::path_to_file_uri(&protocol_root).expect("absolute protocol URI");
     assert_eq!(initialize["rootUri"], expected_uri);
     assert_eq!(initialize["workspaceFolders"][0]["uri"], expected_uri);
     assert_eq!(workspace_folders[0]["uri"], expected_uri);
     assert_ne!(
         initialize["rootUri"],
-        format!("file://{}", root.path().display()),
+        lsp::path_to_file_uri(root.path()).expect("absolute lexical URI"),
         "the replacement lexical root must never be sent to the client"
     );
 
     let _ = manager.close_all().await;
+    #[cfg(unix)]
     fs::remove_dir_all(&original).expect("remove original root");
 }
 

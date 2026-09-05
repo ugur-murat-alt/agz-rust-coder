@@ -115,6 +115,7 @@ fn response_value(
     reciprocal: bool,
 ) -> String {
     let uri = json_string(uri);
+    let outside_uri = if cfg!(windows) { "file:///C:/agz-outside/other.rs" } else { "file:///mock/other.rs" };
     match method {
         "initialize" => {
             r#"{"capabilities":{"hoverProvider":true,"textDocumentSync":2}}"#.to_owned()
@@ -131,7 +132,7 @@ fn response_value(
             r#"{"contents":{"kind":"markdown","value":"```rust\nmock_fn: fn() -> i32\n```\nMock hover docs."}}"#.to_owned()
         }
         "textDocument/references" => format!(
-            r#"[{{"uri":{uri},"range":{{"start":{{"line":0,"character":0}},"end":{{"line":0,"character":4}}}}}},{{"uri":"file:///mock/other.rs","range":{{"start":{{"line":3,"character":2}},"end":{{"line":3,"character":6}}}}}}]"#
+            r#"[{{"uri":{uri},"range":{{"start":{{"line":0,"character":0}},"end":{{"line":0,"character":4}}}}}},{{"uri":"{outside_uri}","range":{{"start":{{"line":3,"character":2}},"end":{{"line":3,"character":6}}}}}}]"#
         ),
         "textDocument/definition" => format!(
             r#"[{{"targetUri":{uri},"targetRange":{{"start":{{"line":0,"character":4}},"end":{{"line":0,"character":12}}}},"targetSelectionRange":{{"start":{{"line":0,"character":4}},"end":{{"line":0,"character":12}}}}}}]"#

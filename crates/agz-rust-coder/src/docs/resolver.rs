@@ -312,6 +312,12 @@ impl CargoDocGenerator {
         if target.starts_with(&package_root) {
             return Err("local rustdoc target must remain outside the package source".to_owned());
         }
+        // Retain the canonical path for authorization and output reads. Only
+        // the Cargo command argument uses a verified equivalent Win32 spelling.
+        #[cfg(windows)]
+        let target_argument = windows_cargo_target_argument(&target)?;
+        #[cfg(not(windows))]
+        let target_argument = target.clone();
         let cargo = crate::tools::check::resolve_cargo(None);
         let environment = std::env::vars_os().collect::<Vec<(OsString, OsString)>>();
         let options = crate::process::ProcessRunOptions::new(&package_root)
@@ -329,7 +335,7 @@ impl CargoDocGenerator {
             OsString::from("--no-deps"),
             OsString::from("--locked"),
             OsString::from("--target-dir"),
-            target.as_os_str().to_owned(),
+            target_argument.as_os_str().to_owned(),
         ];
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -370,6 +376,36 @@ impl CargoDocGenerator {
             .ok_or_else(|| "local cargo doc did not produce the package pages".to_owned())?;
         collect_generated_pages(&package_root, request.deadline)
     }
+}
+
+#[cfg(windows)]
+fn windows_cargo_target_argument(target: &Path) -> Result<PathBuf, String> {
+    use std::path::{Component, Prefix};
+
+    let mut components = target.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return Err("canonical Cargo output path has no Windows prefix".to_owned());
+    };
+    let Prefix::VerbatimDisk(drive) = prefix.kind() else {
+        return Ok(target.to_owned());
+    };
+    if components.next() != Some(Component::RootDir) {
+        return Err("canonical Cargo output path is not absolute".to_owned());
+    }
+    let mut argument = PathBuf::from(format!("{}:\\", char::from(drive)));
+    for component in components {
+        let Component::Normal(name) = component else {
+            return Err("canonical Cargo output path contains traversal".to_owned());
+        };
+        argument.push(name);
+    }
+    // Stripping a verbatim prefix is not generally semantics-preserving (for
+    // example, trailing dots or reserved names). Require identical resolution.
+    let resolved = fs::canonicalize(&argument).map_err(|error| error.to_string())?;
+    if resolved != target {
+        return Err("Cargo output path has no identity-preserving Win32 spelling".to_owned());
+    }
+    Ok(argument)
 }
 
 fn collect_generated_pages(root: &Path, deadline: Instant) -> Result<Vec<GeneratedPage>, String> {

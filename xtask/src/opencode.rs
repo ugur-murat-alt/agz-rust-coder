@@ -503,7 +503,7 @@ impl IsolatedOpenCodeTrial {
 
     fn configure_command(&self, command: &mut TokioCommand) -> Result<()> {
         let current_path = std::env::var_os("PATH");
-        let home = std::env::var_os("HOME");
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
         let path = cargo_path(current_path.as_deref(), home.as_deref())?;
         command
             .env_clear()
@@ -514,6 +514,8 @@ impl IsolatedOpenCodeTrial {
             .env("XDG_CACHE_HOME", &self.cache_home)
             .env("XDG_STATE_HOME", &self.state_home)
             .env("TMPDIR", &self.tmp_home)
+            .env("TMP", &self.tmp_home)
+            .env("TEMP", &self.tmp_home)
             .env("CARGO_HOME", self.root.join("cargo-home"))
             .env("CARGO_NET_OFFLINE", "true")
             .env("CARGO_TERM_COLOR", "never")
@@ -523,9 +525,36 @@ impl IsolatedOpenCodeTrial {
             .env("HTTP_PROXY", "http://127.0.0.1:9")
             .env("HTTPS_PROXY", "http://127.0.0.1:9")
             .env("ALL_PROXY", "http://127.0.0.1:9");
+        // Retain the selected toolchain, not user credentials or configuration.
+        if let Some(toolchain) = std::env::var_os("RUSTUP_TOOLCHAIN") {
+            command.env("RUSTUP_TOOLCHAIN", toolchain);
+        }
+        #[cfg(windows)]
+        {
+            for name in [
+                "SystemRoot",
+                "WINDIR",
+                "ComSpec",
+                "PATHEXT",
+                "LIB",
+                "LIBPATH",
+                "INCLUDE",
+                "VCToolsInstallDir",
+                "WindowsSdkDir",
+                "WindowsSDKVersion",
+            ] {
+                if let Some(value) = std::env::var_os(name) {
+                    command.env(name, value);
+                }
+            }
+            command
+                .env("USERPROFILE", &self.root)
+                .env("APPDATA", &self.config_home)
+                .env("LOCALAPPDATA", &self.data_home);
+        }
         if let Some(rustup_home) = std::env::var_os("RUSTUP_HOME") {
             command.env("RUSTUP_HOME", rustup_home);
-        } else if let Some(home) = std::env::var_os("HOME") {
+        } else if let Some(home) = home {
             command.env("RUSTUP_HOME", PathBuf::from(home).join(".rustup"));
         }
         Ok(())
@@ -744,6 +773,9 @@ struct HttpRequest {
 }
 
 fn read_http_request(stream: &mut TcpStream) -> std::io::Result<HttpRequest> {
+    // accept() may inherit the listener's nonblocking flag on BSD/macOS.
+    // Explicit blocking mode keeps fragmented requests under the read timeout.
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut bytes = Vec::new();
     let header_end = loop {
@@ -1157,8 +1189,14 @@ fn server_command(root: &Path) -> Vec<Value> {
 fn mcp_binary(root: &Path) -> Option<PathBuf> {
     let configured = std::env::var_os("AGZ_RUST_CODER_BIN").map(PathBuf::from);
     let mut candidates = configured.into_iter().chain([
-        root.join("target/debug/agz-rust-coder"),
-        root.join("target/release/agz-rust-coder"),
+        root.join(format!(
+            "target/debug/agz-rust-coder{}",
+            std::env::consts::EXE_SUFFIX
+        )),
+        root.join(format!(
+            "target/release/agz-rust-coder{}",
+            std::env::consts::EXE_SUFFIX
+        )),
     ]);
     candidates.find(|path| {
         fs::symlink_metadata(path)
@@ -1167,7 +1205,15 @@ fn mcp_binary(root: &Path) -> Option<PathBuf> {
 }
 
 fn opencode_binary() -> String {
-    std::env::var("OPENCODE2_BIN").unwrap_or_else(|_| "opencode2".to_owned())
+    std::env::var("OPENCODE2_BIN").unwrap_or_else(|_| {
+        // npm installs a .cmd shim on Windows; Rust only infers .exe.
+        if cfg!(windows) {
+            "opencode2.cmd"
+        } else {
+            "opencode2"
+        }
+        .to_owned()
+    })
 }
 
 fn cargo_path(
@@ -1327,6 +1373,39 @@ fn probe_opencode_version() -> Result<VersionEvidence> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fake_provider_reads_fragmented_requests_from_nonblocking_accepted_sockets() {
+        use super::*;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
+        let mut client = TcpStream::connect(listener.local_addr().expect("fixture address"))
+            .expect("connect fixture");
+        let (mut accepted, _) = listener.accept().expect("accept fixture");
+        accepted
+            .set_nonblocking(true)
+            .expect("reproduce inherited socket mode");
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let reader = thread::spawn(move || {
+            ready_tx.send(()).expect("signal reader");
+            read_http_request(&mut accepted)
+        });
+        ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("reader started");
+        thread::sleep(Duration::from_millis(30));
+        client
+            .write_all(b"POST / HTTP/1.1\r\nContent-Length: 2\r\n")
+            .expect("partial headers");
+        thread::sleep(Duration::from_millis(30));
+        client.write_all(b"\r\n{").expect("partial body");
+        thread::sleep(Duration::from_millis(30));
+        client.write_all(b"}").expect("body end");
+        let request = reader
+            .join()
+            .expect("reader joined")
+            .expect("bounded request read");
+        assert_eq!(request.body, b"{}");
+    }
+
     use super::*;
 
     #[test]

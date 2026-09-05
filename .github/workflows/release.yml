@@ -33,6 +33,9 @@ jobs:
     name: Verify release artifact
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_INCREMENTAL: 0
     permissions:
       contents: read
     steps:

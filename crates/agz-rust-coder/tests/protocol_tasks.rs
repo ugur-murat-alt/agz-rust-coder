@@ -85,7 +85,7 @@ fn spawn_local_docs_server(
         let _state = state;
         config.docs.fallback = agz_rust_coder::config::DocsFallback::Local;
         config.docs.cache_dir = cache;
-        config.docs.timeout_ms = 30_000;
+        config.docs.timeout_ms = 60_000;
         let service = RustCoderServer::new(config)?
             .serve(server_transport)
             .await?;
@@ -346,6 +346,8 @@ async fn cancelling_a_docs_task_stops_the_real_local_cargo_process() -> Result<(
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
     let temp = std::fs::canonicalize(std::env::temp_dir())?;
+    // Preserve the deep canonical cache path: this also regresses MSVC
+    // rejection of a verbatim Cargo --target-dir argument.
     let root = temp.join(format!(
         "agz-rust-coder-docs-task-{}-{stamp}",
         std::process::id()
@@ -368,7 +370,7 @@ async fn cancelling_a_docs_task_stops_the_real_local_cargo_process() -> Result<(
     std::fs::write(
         root.join("build.rs"),
         format!(
-            "fn main() {{ std::fs::write({pid_file:?}, std::process::id().to_string()).unwrap(); std::thread::sleep(std::time::Duration::from_secs(10)); }}\n"
+            "fn main() {{ std::fs::write({pid_file:?}, std::process::id().to_string()).unwrap(); std::thread::sleep(std::time::Duration::from_secs(60)); }}\n"
         ),
     )?;
     let (transport, server) = spawn_local_docs_server(root.clone(), cache.clone());
@@ -391,7 +393,8 @@ async fn cancelling_a_docs_task_stops_the_real_local_cargo_process() -> Result<(
         other => anyhow::bail!("expected docs task response, got {other:?}"),
     };
     let mut build_pid = None;
-    for _ in 0..500 {
+    let startup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < startup_deadline {
         if let Ok(text) = std::fs::read_to_string(&pid_file) {
             build_pid = text.trim().parse::<u32>().ok();
             if build_pid.is_some() {
@@ -400,7 +403,17 @@ async fn cancelling_a_docs_task_stops_the_real_local_cargo_process() -> Result<(
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    let build_pid = build_pid.context("local cargo doc did not start its build script")?;
+    let current = client
+        .peer()
+        .get_task(GetTaskParams::new(task.task.task_id.clone()))
+        .await?;
+    let Some(build_pid) = build_pid else {
+        client.cancel().await?;
+        server.await??;
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&cache);
+        anyhow::bail!("local cargo doc did not reach its build barrier; task={current:?}");
+    };
     #[cfg(not(target_os = "linux"))]
     let _ = build_pid;
     let cancelled_at = std::time::Instant::now();

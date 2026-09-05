@@ -123,8 +123,19 @@ fn rejects_relative_selection_and_parent_escape() {
         root_snapshot.select(Some(Path::new("package"))),
         Err(RootError::RelativePath)
     ));
+    let mut raw = root.path().as_os_str().to_owned();
+    raw.push(std::path::MAIN_SEPARATOR_STR);
+    raw.push("..");
+    raw.push(std::path::MAIN_SEPARATOR_STR);
+    raw.push("outside");
+    let parent_escape = PathBuf::from(raw);
+    assert!(
+        parent_escape
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+    );
     assert!(matches!(
-        root_snapshot.select(Some(&root.path().join("../outside"))),
+        root_snapshot.select(Some(&parent_escape)),
         Err(RootError::ParentComponent)
     ));
 }

@@ -1016,7 +1016,19 @@ fn normalize_path(path: &Path) -> Result<PathBuf, RootError> {
             Component::ParentDir => return Err(RootError::ParentComponent),
             Component::Normal(name) => normalized.push(name),
             Component::RootDir => normalized.push(Path::new(std::path::MAIN_SEPARATOR_STR)),
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::Prefix(prefix) => {
+                // Cargo reports ordinary drive paths while canonical roots use
+                // verbatim drive prefixes. Normalize syntax only: never resolve
+                // symlinks or remove parent components before authorization.
+                #[cfg(windows)]
+                if path.is_absolute()
+                    && let Prefix::Disk(drive) = prefix.kind()
+                {
+                    normalized.push(format!(r"\\?\{}:", char::from(drive)));
+                    continue;
+                }
+                normalized.push(prefix.as_os_str());
+            }
         }
     }
     if path.is_absolute() && !normalized.is_absolute() {

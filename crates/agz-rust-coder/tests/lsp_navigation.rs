@@ -128,15 +128,35 @@ fn replace_root(root: &TestRoot, label: &str) -> PathBuf {
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&old);
-    fs::rename(root.path(), &old).expect("rename original root");
-    fs::create_dir_all(root.path().join("src")).expect("create replacement root");
-    fs::write(
-        root.path().join("src/lib.rs"),
-        "pub fn replacement_only() { panic!(\"replacement content\") }\n",
-    )
-    .expect("write replacement source");
-    fs::write(old.join(".semantic-ra-continue"), "continue\n").expect("release semantic fixture");
-    old
+    #[cfg(unix)]
+    {
+        fs::rename(root.path(), &old).expect("rename original root");
+        fs::create_dir_all(root.path().join("src")).expect("create replacement root");
+        fs::write(
+            root.path().join("src/lib.rs"),
+            "pub fn replacement_only() { panic!(\"replacement content\") }\n",
+        )
+        .expect("write replacement source");
+        fs::write(old.join(".semantic-ra-continue"), "continue\n")
+            .expect("release semantic fixture");
+        old
+    }
+    #[cfg(windows)]
+    {
+        assert!(
+            fs::rename(root.path(), &old).is_err(),
+            "Windows must reject replacement while authority is retained"
+        );
+        assert!(!old.exists());
+        assert!(
+            fs::read_to_string(root.path().join("src/lib.rs"))
+                .expect("pinned source")
+                .contains("pub fn mock_fn")
+        );
+        fs::write(root.path().join(".semantic-ra-continue"), "continue\n")
+            .expect("release pinned semantic fixture");
+        old
+    }
 }
 
 #[tokio::test]
@@ -251,7 +271,8 @@ async fn semantic_edits_are_write_free_and_return_commands_as_text() {
     assert!(rename.patches.iter().any(|patch| {
         patch.old_string.contains("mock_fn") && patch.new_string.contains("renamed")
     }));
-    assert!(rename.reason.contains("context src/lib.rs"));
+    let context_label = format!("context {}", Path::new("src").join("lib.rs").display());
+    assert!(rename.reason.contains(&context_label), "{}", rename.reason);
     assert_eq!(fs::read(&path).expect("read unchanged source"), original);
 
     let refactor = semantic_refactor(
@@ -347,6 +368,9 @@ async fn retained_authority_navigation_uses_original_root_after_replacement() {
 #[tokio::test]
 async fn retained_authority_edits_use_original_snapshot_after_replacement() {
     let root = TestRoot::new("retained-edits");
+    #[cfg(windows)]
+    let original_source =
+        fs::read(root.path().join("src/lib.rs")).expect("snapshot original source");
     let authority = requested_authority(&root);
     let manager = std::sync::Arc::new(manager_with_binary(&compile_semantic_binary(
         "semantic-ra-barrier-edits",
@@ -402,9 +426,16 @@ async fn retained_authority_edits_use_original_snapshot_after_replacement() {
         patch.old_string.contains("42") && !patch.old_string.contains("replacement content")
     }));
     assert!(!refactor.patches.is_empty(), "{refactor:#?}");
+    #[cfg(unix)]
     assert_eq!(
         fs::read_to_string(root.path().join("src/lib.rs")).expect("read replacement source"),
         "pub fn replacement_only() { panic!(\"replacement content\") }\n"
+    );
+    #[cfg(windows)]
+    assert_eq!(
+        fs::read(root.path().join("src/lib.rs")).expect("read pinned source"),
+        original_source,
+        "semantic operations must not modify the pinned source"
     );
     assert_eq!(manager.close_all().await.remaining, 0);
     let _ = fs::remove_dir_all(old);

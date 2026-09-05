@@ -1392,13 +1392,18 @@ mod tests {
         ) -> Result<MetadataRun, MetadataError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let lock = Mutex::new(());
-            let guard = lock.lock().expect("deadline lock");
-            let _ = Condvar::new()
-                .wait_timeout(
-                    guard,
-                    control.deadline.saturating_duration_since(Instant::now()),
-                )
-                .expect("deadline wait");
+            let mut guard = lock.lock().expect("deadline lock");
+            let ready = Condvar::new();
+            // The mock must return late, even after a spurious or rounded wake.
+            while Instant::now() < control.deadline {
+                let (next, _) = ready
+                    .wait_timeout(
+                        guard,
+                        control.deadline.saturating_duration_since(Instant::now()),
+                    )
+                    .expect("deadline wait");
+                guard = next;
+            }
             Ok(self.metadata.clone())
         }
     }
