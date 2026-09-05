@@ -1,0 +1,108 @@
+name: Verified source transfer
+
+on:
+  push:
+    branches: [feat/rust-evidence-and-efficiency]
+    paths: [.github/workflows/source-transfer.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  transfer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out immutable reviewed baseline without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feb7f1b5fe9022ea09870bc375cded075a27439e
+          persist-credentials: false
+      - name: Reconstruct checksum-verified source and publish only Git objects
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, concurrent.futures, hashlib, json, lzma, os, pathlib, subprocess, time, urllib.error, urllib.request
+
+          repo = 'ugur-murat-alt/agz-rust-coder'
+          expected_tree = 'a61e40c8a0e1a0cc9a1fcb2a3d75ad733014e36e'
+          chunks = [
+              'e068c8382a9701cebe3c8fb5b13ebbef4315a297',
+              'db64eef526a239fb9ac17e8a05d4fb056677944d',
+              'cef5070a3504e7738a129548fe0a74d55c7efb85',
+              'e07f489801deafeeedd40ae86908b0b0a964afd9',
+              'c908a3ead323ea29fa81b2ee0cefa075e1d71821',
+              'a6d30fde7676474a8eff79b0eb7ae06067c8a3e5',
+          ]
+          def api(path, payload=None):
+              url = f'https://api.github.com/repos/{repo}/git/{path}'
+              data = None if payload is None else json.dumps(payload).encode()
+              headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'agz-reviewed-source-transfer'}
+              if data is not None:
+                  headers['Content-Type'] = 'application/json'
+              for attempt in range(4):
+                  try:
+                      request = urllib.request.Request(url, data=data, headers=headers)
+                      with urllib.request.urlopen(request, timeout=45) as response:
+                          return json.load(response)
+                  except urllib.error.HTTPError as error:
+                      if error.code not in (429, 500, 502, 503, 504) or attempt == 3:
+                          raise RuntimeError(f'Git object API failed: HTTP {error.code}') from None
+                      time.sleep(2 ** attempt)
+              raise RuntimeError('Git object API retries exhausted')
+          def git(*args):
+              return subprocess.check_output(['git', *args])
+          def blob_sha(data):
+              return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+
+          compressed = bytearray()
+          for sha in chunks:
+              obj = api('blobs/' + sha)
+              assert obj['encoding'] == 'base64'
+              data = base64.b64decode(obj['content'])
+              assert len(data) == obj['size'] and blob_sha(data) == sha
+              compressed.extend(data)
+          assert len(compressed) == 51924
+          assert hashlib.sha256(compressed).hexdigest() == '72ae74eab7dbf1c9539939dfbf4fdcbbd3db2dc49f72204f0f98635650494505'
+          patch = lzma.decompress(compressed, memlimit=256 * 1024 * 1024)
+          assert len(patch) == 217364
+          assert hashlib.sha256(patch).hexdigest() == '8e77d332885da22fb2b2471787f5b54370ec832c8b21e057674043c5e6384d7c'
+          path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'reviewed-source.patch'
+          path.write_bytes(patch)
+          subprocess.run(['git', 'apply', '--unidiff-zero', '--index', str(path)], check=True)
+          assert git('write-tree').decode().strip() == expected_tree
+          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
+          changed = [p for p in git('diff', '--cached', '--name-only', '-z').split(b'\0') if p]
+          staged = {}
+          for entry in git('ls-files', '--stage', '-z').split(b'\0'):
+              if not entry:
+                  continue
+              meta, filename = entry.split(b'\t', 1)
+              mode, sha, stage = meta.decode().split()
+              assert stage == '0'
+              staged[filename] = (mode, sha)
+          def upload(filename):
+              name = filename.decode('utf-8')
+              assert not name.startswith('/') and '..' not in pathlib.PurePosixPath(name).parts
+              if filename not in staged:
+                  return {'path': name, 'mode': '100644', 'type': 'blob', 'sha': None}
+              mode, sha = staged[filename]
+              assert mode in ('100644', '100755')
+              data = git('cat-file', 'blob', sha)
+              assert blob_sha(data) == sha
+              result = api('blobs', {'encoding': 'base64', 'content': base64.b64encode(data).decode()})
+              assert result['sha'] == sha
+              return {'path': name, 'mode': mode, 'type': 'blob', 'sha': sha}
+          with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+              entries = list(pool.map(upload, changed))
+          base_tree = git('rev-parse', 'HEAD^{tree}').decode().strip()
+          tree = api('trees', {'base_tree': base_tree, 'tree': entries})
+          assert tree['sha'] == expected_tree
+          print(f'VERIFIED_SOURCE_TREE={tree["sha"]}')
+          print(f'VERIFIED_CHANGED_FILES={len(entries)}')
+          print('No commit, branch, tag, release, or publication was created or changed.')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(f'Verified reviewed source tree: `{tree["sha"]}`\n\nChanged files: {len(entries)}. All patch, blob, and tree hashes matched. No refs changed.\n')
+          PY
