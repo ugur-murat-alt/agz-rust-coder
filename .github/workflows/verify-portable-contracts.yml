@@ -1,0 +1,133 @@
+name: Verify final portable contracts
+on:
+  push:
+    branches: [chore/prepare-0.2.0]
+    paths: [.github/workflows/verify-portable-contracts.yml]
+permissions:
+  contents: read
+jobs:
+  cancel-obsolete:
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - name: Stop only the known failed release source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          test "$(gh api repos/$GH_REPO/actions/runs/33960967720 --jq .head_sha)" = "ffa5eb7956c4297ed73f4cb304449aba11ae7856"
+          STATUS="$(gh api repos/$GH_REPO/actions/runs/33960967720 --jq .status)"
+          if [ "$STATUS" != completed ]; then
+            gh api --method POST repos/$GH_REPO/actions/runs/33960967720/cancel
+          fi
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ffa5eb7956c4297ed73f4cb304449aba11ae7856
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Apply immutable source corrections
+        shell: bash
+        run: |
+          curl --fail --location --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/repair.py" https://raw.githubusercontent.com/ugur-murat-alt/agz-rust-coder/10cd693b18a18fff7259d6b75cea8f82f4f502af/maintenance/repair_portable_contracts.py
+          python3 "$RUNNER_TEMP/repair.py"
+          rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy
+          cargo +1.88.0 fmt --all
+          git diff --check
+      - name: Require strict Clippy
+        shell: bash
+        run: cargo +1.88.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Require complete workspace tests
+        shell: bash
+        timeout-minutes: 12
+        run: cargo +1.88.0 test --workspace --all-targets --all-features --locked --no-fail-fast
+      - name: Verify bounded parser negative control
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess
+          source = pathlib.Path('xtask/src/opencode.rs').read_text()
+          start = source.index('struct HttpRequest')
+          end = source.index('\nfn respond_json', start)
+          test_start = source.index('    fn fake_provider_reads_fragmented_requests')
+          test_end = source.index('\n    }', test_start) + 6
+          text = 'use std::{net::{TcpListener,TcpStream},io::{Read,Write},time::Duration,thread};\n' + source[start:end] + '\n#[test]\n' + source[test_start:test_end].replace('        use super::*;\n', '')
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          for mode in ['before', 'after']:
+              rust = root / ('socket-' + mode + '.rs')
+              binary = root / ('socket-' + mode)
+              rust.write_text(text.replace('    stream.set_nonblocking(false)?;\n', '') if mode == 'before' else text)
+              subprocess.run(['rustc', '+1.88.0', '--edition=2024', '--test', str(rust), '-o', str(binary)], check=True)
+              result = subprocess.run([str(binary), '--nocapture'], capture_output=True, text=True, timeout=20)
+              print(mode, result.stdout, result.stderr)
+              assert (result.returncode != 0) if mode == 'before' else (result.returncode == 0)
+          PY
+      - name: Verify installed protocol and client integration
+        shell: bash
+        run: |
+          npm install --global @opencode-ai/cli@0.0.0-beta-18743
+          test "$(opencode2 --version)" = "opencode2 v0.0.0-beta-18743"
+          cargo +1.88.0 build -p agz-rust-coder --locked
+          python3 - <<'PY'
+          import os, pathlib, shutil, subprocess, tempfile
+          suffix = '.exe' if os.name == 'nt' else ''
+          with tempfile.TemporaryDirectory(prefix='agz-smoke-', dir=os.environ['RUNNER_TEMP']) as temporary:
+              binary = pathlib.Path(temporary).resolve() / ('agz-rust-coder' + suffix)
+              shutil.copy2(pathlib.Path('target/debug') / binary.name, binary)
+              binary.chmod(0o755)
+              environment = dict(os.environ, AGZ_RUST_CODER_BIN=str(binary))
+              for smoke in ['protocol-smoke', 'opencode-smoke', 'benchmark-smoke']:
+                  subprocess.run(['cargo', '+1.88.0', 'run', '--locked', '-p', 'xtask', '--', smoke], env=environment, check=True)
+          PY
+  store:
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ffa5eb7956c4297ed73f4cb304449aba11ae7856
+          persist-credentials: false
+      - name: Reconstruct only the all-platform verified source
+        shell: bash
+        run: |
+          curl --fail --location --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/repair.py" https://raw.githubusercontent.com/ugur-murat-alt/agz-rust-coder/10cd693b18a18fff7259d6b75cea8f82f4f502af/maintenance/repair_portable_contracts.py
+          python3 "$RUNNER_TEMP/repair.py"
+          rustup toolchain install 1.88.0 --profile minimal --component rustfmt
+          cargo +1.88.0 fmt --all
+          git diff --check
+      - name: Store verified blobs without changing refs or release approvals
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, subprocess, urllib.request
+          expected = {'crates/agz-rust-coder/src/workspace/roots.rs', 'crates/agz-rust-coder/tests/lsp_manager.rs', 'crates/agz-rust-coder/tests/lsp_navigation.rs', 'crates/agz-rust-coder/tests/workspace_selection.rs', 'crates/agz-rust-coder/tests/protocol_tasks.rs', 'crates/agz-rust-coder/tests/windows_path_identity.rs', 'tests/fixtures/lsp/semantic_ra.rs', 'xtask/src/opencode.rs'}
+          subprocess.run(['git', 'add', '--', *sorted(expected)], check=True)
+          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
+          changed = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines()
+          assert set(changed) == expected, changed
+          assert subprocess.check_output(['git', 'diff', '--name-only']) == b'', 'unexpected unstaged changes'
+          entries = []
+          for name in changed:
+              mode, sha, _ = subprocess.check_output(['git', 'ls-files', '--stage', name], text=True).split(maxsplit=2)
+              data = subprocess.check_output(['git', 'cat-file', 'blob', sha])
+              request = urllib.request.Request('https://api.github.com/repos/ugur-murat-alt/agz-rust-coder/git/blobs', data=json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()}).encode(), headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Content-Type': 'application/json', 'User-Agent': 'agz-portable-contract-repair'})
+              with urllib.request.urlopen(request, timeout=45) as response:
+                  result = json.load(response)
+              assert result['sha'] == sha
+              entries.append({'path': name, 'mode': mode, 'type': 'blob', 'sha': sha})
+          print('VERIFIED_TREE=' + subprocess.check_output(['git', 'write-tree'], text=True).strip())
+          print(json.dumps(entries, indent=2))
+          PY
