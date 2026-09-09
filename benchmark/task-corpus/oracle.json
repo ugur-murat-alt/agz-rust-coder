@@ -9,13 +9,97 @@
     "skip_required_verification"
   ],
   "oracles": [
-    {"id":"oracle-01","task_id":"trait-impl","required_checks":["cargo_check"],"hidden_test_ids":["H001"],"requires_mutation_guard":true},
-    {"id":"oracle-02","task_id":"borrow-move","required_checks":["cargo_check"],"hidden_test_ids":["H002"],"requires_mutation_guard":true},
-    {"id":"oracle-03","task_id":"crate-api","required_checks":["cargo_check_locked"],"hidden_test_ids":["H003"],"requires_mutation_guard":true},
-    {"id":"oracle-04","task_id":"multi-crate-signature","required_checks":["workspace_check"],"hidden_test_ids":["H004"],"requires_mutation_guard":true},
-    {"id":"oracle-05","task_id":"feature-only","required_checks":["default_check","extra_feature_check"],"hidden_test_ids":["H005"],"requires_mutation_guard":true},
-    {"id":"oracle-06","task_id":"regression-test","required_checks":["cargo_test","regression_test_present"],"hidden_test_ids":["H006","H007"],"requires_mutation_guard":true},
-    {"id":"oracle-07","task_id":"dependency-upgrade","required_checks":["cargo_check_locked"],"hidden_test_ids":["H008"],"requires_mutation_guard":true},
-    {"id":"oracle-08","task_id":"performance-behavior","required_checks":["cargo_test","performance_threshold"],"hidden_test_ids":["H009"],"requires_mutation_guard":true}
+    {
+      "id": "oracle-01",
+      "task_id": "trait-impl",
+      "required_checks": [
+        "cargo_check"
+      ],
+      "hidden_test_ids": [
+        "H001"
+      ],
+      "requires_mutation_guard": true
+    },
+    {
+      "id": "oracle-02",
+      "task_id": "borrow-move",
+      "required_checks": [
+        "cargo_check"
+      ],
+      "hidden_test_ids": [
+        "H002"
+      ],
+      "requires_mutation_guard": true
+    },
+    {
+      "id": "oracle-03",
+      "task_id": "crate-api",
+      "required_checks": [
+        "cargo_check_locked"
+      ],
+      "hidden_test_ids": [
+        "H003"
+      ],
+      "requires_mutation_guard": true
+    },
+    {
+      "id": "oracle-04",
+      "task_id": "multi-crate-signature",
+      "required_checks": [
+        "workspace_check"
+      ],
+      "hidden_test_ids": [
+        "H004"
+      ],
+      "requires_mutation_guard": true
+    },
+    {
+      "id": "oracle-05",
+      "task_id": "feature-only",
+      "required_checks": [
+        "default_check",
+        "extra_feature_check"
+      ],
+      "hidden_test_ids": [
+        "H005"
+      ],
+      "requires_mutation_guard": true
+    },
+    {
+      "id": "oracle-06",
+      "task_id": "regression-test",
+      "required_checks": [
+        "cargo_test",
+        "regression_test_present"
+      ],
+      "hidden_test_ids": [
+        "H006",
+        "H007"
+      ],
+      "requires_mutation_guard": true
+    },
+    {
+      "id": "oracle-07",
+      "task_id": "dependency-upgrade",
+      "required_checks": [
+        "cargo_check_locked"
+      ],
+      "hidden_test_ids": [
+        "H008"
+      ],
+      "requires_mutation_guard": true
+    },
+    {
+      "id": "oracle-08",
+      "task_id": "performance-behavior",
+      "required_checks": [
+        "cargo_test",
+        "performance_threshold"
+      ],
+      "hidden_test_ids": [
+        "H009"
+      ],
+      "requires_mutation_guard": true
+    }
   ]
 }
