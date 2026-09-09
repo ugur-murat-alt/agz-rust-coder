@@ -45,7 +45,9 @@ regresyon testi ekleme, bağımlılık yükseltme ve davranışı koruyan perfor
 çalışmasını kapsar. Normal workspace CI test komutuna dahil olan
 `xtask/tests/task_benchmark.rs`; korpus hash'lerini, replay bütünlüğünü, bağımsız
 puanlamayı, unknown kullanım semantiğini, negatif kontrolleri ve dengeli sıralamayı
-doğrular.
+doğrular. CI ayrıca platform matrisi üzerinde `task-benchmark-smoke` komutunu
+doğrudan çalıştırarak transcript replay ve kanıt yayınlama yolunu ürün akışı
+olarak sınar.
 
 ## Önceden Belirlenmiş Görev Benchmark Kapıları
 
