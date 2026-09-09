@@ -45,7 +45,8 @@ regression-test addition, dependency upgrade, and behavior-preserving
 performance work. `xtask/tests/task_benchmark.rs`, which is part of the normal
 workspace CI test command, verifies corpus hashes, replay completeness,
 independent scoring, unknown usage semantics, negative controls, and balanced
-ordering.
+ordering. CI also invokes `task-benchmark-smoke` directly on the platform matrix
+so transcript replay and evidence publication are exercised as a product path.
 
 ## Predeclared Task Benchmark Gates
 
