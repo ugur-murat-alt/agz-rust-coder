@@ -389,16 +389,16 @@ impl TaskBenchmarkOracle for ReplayOracle<'_> {
 }
 
 pub async fn run(root: &Path) -> Result<()> {
-    let benchmark = evaluate_provider_free_replay(root).await?;
+    let evidence = evaluate_provider_free_replay(root).await?;
     let run = json!({
         "schema_version": 1,
-        "run_id": format!("task-benchmark-{}", &benchmark.replay_sha256[..16]),
+        "run_id": format!("task-benchmark-{}", &evidence.replay_sha256[..16]),
         "mode": "provider-free-replay",
-        "corpus_id": benchmark.corpus_id.clone(),
+        "corpus_id": evidence.corpus_id.clone(),
         "source_commit": command_text(root, "git", &["rev-parse", "HEAD"] )?,
         "source_dirty": !command_text(root, "git", &["status", "--porcelain"] )?.is_empty(),
-        "fixture_set_hash": benchmark.fixture_set_hash.clone(),
-        "replay_sha256": benchmark.replay_sha256.clone(),
+        "fixture_set_hash": evidence.fixture_set_hash.clone(),
+        "replay_sha256": evidence.replay_sha256.clone(),
         "provider": null,
         "model": null,
         "toolchain": command_text(root, "rustc", &["--version", "--verbose"] )?,
@@ -409,10 +409,10 @@ pub async fn run(root: &Path) -> Result<()> {
         "network": false,
         "paid": false
     });
-    let results = serde_json::to_value(&benchmark).context("serialize task benchmark results")?;
-    let report = report(&benchmark)?;
+    let results = serde_json::to_value(&evidence).context("serialize task benchmark results")?;
+    let report = report(&evidence)?;
     let output = evidence::publish("task-benchmark-smoke", &run, &results, &report)?;
-    if !benchmark.passed {
+    if !evidence.passed {
         bail!("task-benchmark-smoke failed; evidence published at {}", output.display());
     }
     println!("task-benchmark-smoke: PASS ({})", output.display());
@@ -443,9 +443,18 @@ pub async fn evaluate_provider_free_replay(root: &Path) -> Result<TaskBenchmarkE
     }
     let order = balanced_order(&manifest, &replay.sessions)?;
 
-    let shell = ReplayAdapter { arm: BenchmarkArm::ShellFiles, rows: &adapter_rows };
-    let mcp = ReplayAdapter { arm: BenchmarkArm::Mcp020, rows: &adapter_rows };
-    let change = ReplayAdapter { arm: BenchmarkArm::ChangeEngine, rows: &adapter_rows };
+    let shell = ReplayAdapter {
+        arm: BenchmarkArm::ShellFiles,
+        rows: &adapter_rows,
+    };
+    let mcp = ReplayAdapter {
+        arm: BenchmarkArm::Mcp020,
+        rows: &adapter_rows,
+    };
+    let change = ReplayAdapter {
+        arm: BenchmarkArm::ChangeEngine,
+        rows: &adapter_rows,
+    };
     let oracle = ReplayOracle { rows: &oracle_rows };
 
     let mut trials = Vec::with_capacity(expected.len());
@@ -478,7 +487,9 @@ pub async fn evaluate_provider_free_replay(root: &Path) -> Result<TaskBenchmarkE
                 let output = adapter.run_trial(&request, &workspace)?;
                 let oracle_observation =
                     oracle.evaluate(&request, &output.candidate, &output.observation)?;
-                let spec = oracle_specs.get(&task.id).context("validated oracle disappeared")?;
+                let spec = oracle_specs
+                    .get(&task.id)
+                    .context("validated oracle disappeared")?;
                 let success = oracle_success(spec, &oracle_observation);
                 let order_index = *order
                     .get(&(task.id.clone(), repetition, arm))
@@ -501,16 +512,25 @@ pub async fn evaluate_provider_free_replay(root: &Path) -> Result<TaskBenchmarkE
     let gate = gate(&manifest, &summaries)?;
     let failed = count_u32(trials.iter().filter(|trial| !trial.success).count())?;
     let timeouts = count_u32(
-        trials.iter().filter(|trial| trial.adapter.status == "timeout" || trial.oracle.status == "timeout").count(),
+        trials
+            .iter()
+            .filter(|trial| trial.adapter.status == "timeout" || trial.oracle.status == "timeout")
+            .count(),
     )?;
     let cancelled = count_u32(
-        trials.iter().filter(|trial| trial.adapter.status == "cancelled" || trial.oracle.status == "cancelled").count(),
+        trials
+            .iter()
+            .filter(|trial| {
+                trial.adapter.status == "cancelled" || trial.oracle.status == "cancelled"
+            })
+            .count(),
     )?;
     if failed == 0 || timeouts == 0 || cancelled == 0 {
         bail!("replay must retain failure, timeout and cancellation controls");
     }
 
-    let passed = gate.quality_pass && gate.host_turn_pass && gate.cargo_call_pass && gate.wall_time_pass;
+    let passed =
+        gate.quality_pass && gate.host_turn_pass && gate.cargo_call_pass && gate.wall_time_pass;
     Ok(TaskBenchmarkEvidence {
         schema_version: 1,
         corpus_id: manifest.corpus_id,
@@ -618,8 +638,17 @@ fn validate_oracle_contract<'a>(
     {
         bail!("oracle catalog is not bound to the frozen corpus");
     }
-    for shortcut in ["delete_tests", "weaken_assertions", "disable_required_lints", "skip_required_verification"] {
-        if !catalog.forbidden_success_shortcuts.iter().any(|value| value == shortcut) {
+    for shortcut in [
+        "delete_tests",
+        "weaken_assertions",
+        "disable_required_lints",
+        "skip_required_verification",
+    ] {
+        if !catalog
+            .forbidden_success_shortcuts
+            .iter()
+            .any(|value| value == shortcut)
+        {
             bail!("oracle shortcut guard missing: {shortcut}");
         }
     }
@@ -670,17 +699,35 @@ fn validate_replay_contract(
     }
     let session_columns = ["task_id", "repetition", "order_seed", "cache_state", "arm_order"];
     let adapter_columns = [
-        "task_id", "repetition", "arm", "status", "claimed_pass", "wall_time_ms",
-        "cpu_time_ms", "snapshot_prep_ms", "cargo_calls", "recompile_count", "host_turns",
-        "cache_state", "reported_validation",
+        "task_id",
+        "repetition",
+        "arm",
+        "status",
+        "claimed_pass",
+        "wall_time_ms",
+        "cpu_time_ms",
+        "snapshot_prep_ms",
+        "cargo_calls",
+        "recompile_count",
+        "host_turns",
+        "cache_state",
+        "reported_validation",
     ];
     let oracle_columns = [
-        "task_id", "repetition", "arm", "status", "hidden_tests_passed",
-        "mutation_guard_intact", "checks_passed",
+        "task_id",
+        "repetition",
+        "arm",
+        "status",
+        "hidden_tests_passed",
+        "mutation_guard_intact",
+        "checks_passed",
     ];
-    if replay.session_columns.iter().map(String::as_str).collect::<Vec<_>>() != session_columns.to_vec()
-        || replay.adapter_columns.iter().map(String::as_str).collect::<Vec<_>>() != adapter_columns.to_vec()
-        || replay.oracle_columns.iter().map(String::as_str).collect::<Vec<_>>() != oracle_columns.to_vec()
+    if replay.session_columns.iter().map(String::as_str).collect::<Vec<_>>()
+        != session_columns.to_vec()
+        || replay.adapter_columns.iter().map(String::as_str).collect::<Vec<_>>()
+            != adapter_columns.to_vec()
+        || replay.oracle_columns.iter().map(String::as_str).collect::<Vec<_>>()
+            != oracle_columns.to_vec()
     {
         bail!("provider-free replay column schema drift");
     }
@@ -701,23 +748,47 @@ fn validate_replay_contract(
 fn adapter_map(replay: &Replay) -> Result<BTreeMap<TrialKey, AdapterObservation>> {
     let mut map = BTreeMap::new();
     for row in &replay.adapter_rows {
-        let (task_id, repetition, arm, status, claimed_pass, wall, cpu, snapshot, cargo,
-            recompile, turns, cache_state, validation) = row;
+        let (
+            task_id,
+            repetition,
+            arm,
+            status,
+            claimed_pass,
+            wall,
+            cpu,
+            snapshot,
+            cargo,
+            recompile,
+            turns,
+            cache_state,
+            validation,
+        ) = row;
         if !matches!(status.as_str(), "completed" | "failed" | "timeout" | "cancelled")
             || !matches!(cache_state.as_str(), "cold" | "warm")
         {
             bail!("invalid adapter replay state");
         }
         let observation = AdapterObservation {
-            task_id: task_id.clone(), repetition: *repetition, arm: *arm, status: status.clone(),
-            claimed_pass: *claimed_pass, wall_time_ms: *wall, cpu_time_ms: *cpu,
-            snapshot_prep_ms: *snapshot, cargo_calls: *cargo, recompile_count: *recompile,
-            host_turns: *turns, cache_state: cache_state.clone(),
+            task_id: task_id.clone(),
+            repetition: *repetition,
+            arm: *arm,
+            status: status.clone(),
+            claimed_pass: *claimed_pass,
+            wall_time_ms: *wall,
+            cpu_time_ms: *cpu,
+            snapshot_prep_ms: *snapshot,
+            cargo_calls: *cargo,
+            recompile_count: *recompile,
+            host_turns: *turns,
+            cache_state: cache_state.clone(),
             tokens: TokenMetrics {
-                input: replay.usage.input_tokens.clone(), output: replay.usage.output_tokens.clone(),
-                cache: replay.usage.cache_tokens.clone(), schema: replay.usage.schema_tokens.clone(),
+                input: replay.usage.input_tokens.clone(),
+                output: replay.usage.output_tokens.clone(),
+                cache: replay.usage.cache_tokens.clone(),
+                schema: replay.usage.schema_tokens.clone(),
             },
-            cost_usd: replay.usage.cost_usd.clone(), reported_validation: validation.clone(),
+            cost_usd: replay.usage.cost_usd.clone(),
+            reported_validation: validation.clone(),
         };
         let key = (task_id.clone(), *repetition, *arm);
         if map.insert(key, observation).is_some() {
@@ -731,14 +802,25 @@ fn oracle_map(replay: &Replay) -> Result<BTreeMap<TrialKey, OracleObservation>> 
     let mut map = BTreeMap::new();
     for row in &replay.oracle_rows {
         let (task_id, repetition, arm, status, hidden, mutation, checks) = row;
-        if !matches!(status.as_str(), "pass" | "fail" | "timeout" | "cancelled" | "infrastructure_error") {
+        if !matches!(
+            status.as_str(),
+            "pass" | "fail" | "timeout" | "cancelled" | "infrastructure_error"
+        ) {
             bail!("invalid oracle replay state");
         }
         let observation = OracleObservation {
-            task_id: task_id.clone(), repetition: *repetition, arm: *arm, status: status.clone(),
-            hidden_tests_passed: *hidden, mutation_guard_intact: *mutation, checks_passed: checks.clone(),
+            task_id: task_id.clone(),
+            repetition: *repetition,
+            arm: *arm,
+            status: status.clone(),
+            hidden_tests_passed: *hidden,
+            mutation_guard_intact: *mutation,
+            checks_passed: checks.clone(),
         };
-        if map.insert((task_id.clone(), *repetition, *arm), observation).is_some() {
+        if map
+            .insert((task_id.clone(), *repetition, *arm), observation)
+            .is_some()
+        {
             bail!("duplicate oracle replay row");
         }
     }
@@ -746,11 +828,16 @@ fn oracle_map(replay: &Replay) -> Result<BTreeMap<TrialKey, OracleObservation>> 
 }
 
 fn balanced_order(manifest: &Manifest, sessions: &[ReplaySession]) -> Result<BTreeMap<TrialKey, u32>> {
-    let repetition_count = usize::try_from(manifest.repetitions).context("repetition count does not fit usize")?;
+    let repetition_count =
+        usize::try_from(manifest.repetitions).context("repetition count does not fit usize")?;
     if sessions.len() != manifest.tasks.len() * repetition_count {
         bail!("replay session count drift");
     }
-    let task_ids = manifest.tasks.iter().map(|task| task.id.as_str()).collect::<BTreeSet<_>>();
+    let task_ids = manifest
+        .tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<BTreeSet<_>>();
     let expected_per_position = manifest.repetitions / 3;
     let mut seen = BTreeSet::new();
     let mut positions: BTreeMap<(String, BenchmarkArm, u32), u32> = BTreeMap::new();
@@ -771,20 +858,26 @@ fn balanced_order(manifest: &Manifest, sessions: &[ReplaySession]) -> Result<BTr
             bail!("replay order seed or session identity drift");
         }
         if arms.len() != 3
-            || arms.iter().copied().collect::<BTreeSet<_>>() != BenchmarkArm::all().into_iter().collect()
+            || arms.iter().copied().collect::<BTreeSet<_>>()
+                != BenchmarkArm::all().into_iter().collect()
         {
             bail!("each replay session must contain one A/B/C permutation");
         }
         for (position, arm) in arms.iter().copied().enumerate() {
             let position = u32::try_from(position).context("order position overflow")?;
-            *positions.entry((task_id.clone(), arm, position)).or_default() += 1;
+            *positions
+                .entry((task_id.clone(), arm, position))
+                .or_default() += 1;
             order.insert((task_id.clone(), *repetition, arm), position);
         }
     }
     for task in &manifest.tasks {
         for arm in BenchmarkArm::all() {
             for position in 0..3 {
-                if positions.get(&(task.id.clone(), arm, position)).copied().unwrap_or_default()
+                if positions
+                    .get(&(task.id.clone(), arm, position))
+                    .copied()
+                    .unwrap_or_default()
                     != expected_per_position
                 {
                     bail!("A/B/C replay is not position-balanced for {}", task.id);
@@ -812,12 +905,18 @@ fn oracle_success(spec: &OracleSpec, observation: &OracleObservation) -> bool {
         && observation.hidden_tests_passed
         && (!spec.requires_mutation_guard || observation.mutation_guard_intact)
         && spec.required_checks.iter().all(|required| {
-            observation.checks_passed.iter().any(|actual| actual == required)
+            observation
+                .checks_passed
+                .iter()
+                .any(|actual| actual == required)
         })
 }
 
 fn summarize(arm: BenchmarkArm, trials: &[TaskTrialEvidence]) -> Result<ArmSummary> {
-    let rows = trials.iter().filter(|trial| trial.request.arm == arm).collect::<Vec<_>>();
+    let rows = trials
+        .iter()
+        .filter(|trial| trial.request.arm == arm)
+        .collect::<Vec<_>>();
     if rows.is_empty() {
         bail!("empty benchmark arm");
     }
@@ -827,10 +926,14 @@ fn summarize(arm: BenchmarkArm, trials: &[TaskTrialEvidence]) -> Result<ArmSumma
         rows.iter().map(|trial| project(trial)).sum::<f64>() / f64::from(total)
     };
     let average_wall = average(|trial| f64::from(trial.adapter.wall_time_ms));
-    let variance = rows.iter().map(|trial| {
-        let delta = f64::from(trial.adapter.wall_time_ms) - average_wall;
-        delta * delta
-    }).sum::<f64>() / f64::from(total);
+    let variance = rows
+        .iter()
+        .map(|trial| {
+            let delta = f64::from(trial.adapter.wall_time_ms) - average_wall;
+            delta * delta
+        })
+        .sum::<f64>()
+        / f64::from(total);
     let (wilson_low, wilson_high) = wilson_95(successes, total);
 
     Ok(ArmSummary {
@@ -838,8 +941,20 @@ fn summarize(arm: BenchmarkArm, trials: &[TaskTrialEvidence]) -> Result<ArmSumma
         total,
         successes,
         failures: total - successes,
-        timeouts: count_u32(rows.iter().filter(|trial| trial.adapter.status == "timeout" || trial.oracle.status == "timeout").count())?,
-        cancelled: count_u32(rows.iter().filter(|trial| trial.adapter.status == "cancelled" || trial.oracle.status == "cancelled").count())?,
+        timeouts: count_u32(
+            rows.iter()
+                .filter(|trial| {
+                    trial.adapter.status == "timeout" || trial.oracle.status == "timeout"
+                })
+                .count(),
+        )?,
+        cancelled: count_u32(
+            rows.iter()
+                .filter(|trial| {
+                    trial.adapter.status == "cancelled" || trial.oracle.status == "cancelled"
+                })
+                .count(),
+        )?,
         success_rate_percent: f64::from(successes) * 100.0 / f64::from(total),
         success_rate_wilson_95_low_percent: wilson_low,
         success_rate_wilson_95_high_percent: wilson_high,
@@ -850,8 +965,16 @@ fn summarize(arm: BenchmarkArm, trials: &[TaskTrialEvidence]) -> Result<ArmSumma
         average_cargo_calls: average(|trial| f64::from(trial.adapter.cargo_calls)),
         average_recompile_count: average(|trial| f64::from(trial.adapter.recompile_count)),
         average_host_turns: average(|trial| f64::from(trial.adapter.host_turns)),
-        cold_trials: count_u32(rows.iter().filter(|trial| trial.adapter.cache_state == "cold").count())?,
-        warm_trials: count_u32(rows.iter().filter(|trial| trial.adapter.cache_state == "warm").count())?,
+        cold_trials: count_u32(
+            rows.iter()
+                .filter(|trial| trial.adapter.cache_state == "cold")
+                .count(),
+        )?,
+        warm_trials: count_u32(
+            rows.iter()
+                .filter(|trial| trial.adapter.cache_state == "warm")
+                .count(),
+        )?,
         unknown_input_tokens: unknown_count(&rows, |trial| &trial.adapter.tokens.input)?,
         unknown_output_tokens: unknown_count(&rows, |trial| &trial.adapter.tokens.output)?,
         unknown_cache_tokens: unknown_count(&rows, |trial| &trial.adapter.tokens.cache)?,
@@ -864,7 +987,11 @@ fn unknown_count(
     rows: &[&TaskTrialEvidence],
     project: fn(&TaskTrialEvidence) -> &Value,
 ) -> Result<u32> {
-    count_u32(rows.iter().filter(|trial| project(trial).as_str() == Some("unknown")).count())
+    count_u32(
+        rows.iter()
+            .filter(|trial| project(trial).as_str() == Some("unknown"))
+            .count(),
+    )
 }
 
 fn wilson_95(successes: u32, total: u32) -> (f64, f64) {
@@ -873,61 +1000,109 @@ fn wilson_95(successes: u32, total: u32) -> (f64, f64) {
     let z = 1.959_963_984_540_054_f64;
     let denominator = 1.0 + z * z / n;
     let center = (p + z * z / (2.0 * n)) / denominator;
-    let half = z * (p * (1.0 - p) / n + z * z / (4.0 * n * n)).sqrt() / denominator;
-    ((center - half).max(0.0) * 100.0, (center + half).min(1.0) * 100.0)
+    let half =
+        z * (p * (1.0 - p) / n + z * z / (4.0 * n * n)).sqrt() / denominator;
+    (
+        (center - half).max(0.0) * 100.0,
+        (center + half).min(1.0) * 100.0,
+    )
 }
 
 fn gate(manifest: &Manifest, summaries: &[ArmSummary]) -> Result<GateEvidence> {
-    let baseline = summaries.iter().find(|summary| summary.arm == BenchmarkArm::Mcp020).context("missing B summary")?;
-    let candidate = summaries.iter().find(|summary| summary.arm == BenchmarkArm::ChangeEngine).context("missing C summary")?;
-    let margin = manifest.quality_gate.non_inferiority_margin_percentage_points;
+    let baseline = summaries
+        .iter()
+        .find(|summary| summary.arm == BenchmarkArm::Mcp020)
+        .context("missing B summary")?;
+    let candidate = summaries
+        .iter()
+        .find(|summary| summary.arm == BenchmarkArm::ChangeEngine)
+        .context("missing C summary")?;
+    let margin = manifest
+        .quality_gate
+        .non_inferiority_margin_percentage_points;
     let host_target = manifest.performance_targets.host_turn_reduction_percent;
     let cargo_target = manifest.performance_targets.cargo_call_reduction_percent;
-    let wall_limit = manifest.performance_targets.wall_time_regression_limit_percent;
+    let wall_limit = manifest
+        .performance_targets
+        .wall_time_regression_limit_percent;
 
     Ok(GateEvidence {
         quality_pass: candidate.success_rate_percent + margin >= baseline.success_rate_percent,
-        host_turn_pass: candidate.average_host_turns <= baseline.average_host_turns * (1.0 - host_target / 100.0),
-        cargo_call_pass: candidate.average_cargo_calls <= baseline.average_cargo_calls * (1.0 - cargo_target / 100.0),
-        wall_time_pass: candidate.average_wall_time_ms <= baseline.average_wall_time_ms * (1.0 + wall_limit / 100.0),
+        host_turn_pass: candidate.average_host_turns
+            <= baseline.average_host_turns * (1.0 - host_target / 100.0),
+        cargo_call_pass: candidate.average_cargo_calls
+            <= baseline.average_cargo_calls * (1.0 - cargo_target / 100.0),
+        wall_time_pass: candidate.average_wall_time_ms
+            <= baseline.average_wall_time_ms * (1.0 + wall_limit / 100.0),
         non_inferiority_margin_percentage_points: margin,
         host_turn_reduction_target_percent: host_target,
         cargo_call_reduction_target_percent: cargo_target,
         wall_time_regression_limit_percent: wall_limit,
         default_on_eligible: false,
-        default_on_reason: "provider-free transcript replay validates the harness only; comparable opt-in live runs are required".to_owned(),
+        default_on_reason:
+            "provider-free transcript replay validates the harness only; comparable opt-in live runs are required"
+                .to_owned(),
     })
 }
 
-fn report(benchmark: &TaskBenchmarkEvidence) -> Result<String> {
+fn report(evidence: &TaskBenchmarkEvidence) -> Result<String> {
     let mut report = String::new();
     writeln!(&mut report, "# Rust task benchmark provider-free replay")?;
     writeln!(&mut report)?;
-    writeln!(&mut report, "{}: frozen A/B/C corpus replayed without provider, model, network or paid requests.", benchmark.status)?;
-    writeln!(&mut report, "Replay timings and turn counts are fixtures for harness validation, not measured Change Engine performance.")?;
+    writeln!(
+        &mut report,
+        "{}: frozen A/B/C corpus replayed without provider, model, network or paid requests.",
+        evidence.status
+    )?;
+    writeln!(
+        &mut report,
+        "Replay timings and turn counts are fixtures for harness validation, not measured Change Engine performance."
+    )?;
     writeln!(&mut report)?;
-    writeln!(&mut report, "| arm | success | Wilson 95% | wall ms ± sd | cargo | host turns |")?;
+    writeln!(
+        &mut report,
+        "| arm | success | Wilson 95% | wall ms ± sd | cargo | host turns |"
+    )?;
     writeln!(&mut report, "| --- | ---: | ---: | ---: | ---: | ---: |")?;
-    for summary in &benchmark.summaries {
-        writeln!(&mut report, "| {} | {}/{} | {:.1}–{:.1}% | {:.1} ± {:.1} | {:.2} | {:.2} |",
-            summary.arm.label(), summary.successes, summary.total,
-            summary.success_rate_wilson_95_low_percent, summary.success_rate_wilson_95_high_percent,
-            summary.average_wall_time_ms, summary.wall_time_stddev_ms,
-            summary.average_cargo_calls, summary.average_host_turns)?;
+    for summary in &evidence.summaries {
+        writeln!(
+            &mut report,
+            "| {} | {}/{} | {:.1}–{:.1}% | {:.1} ± {:.1} | {:.2} | {:.2} |",
+            summary.arm.label(),
+            summary.successes,
+            summary.total,
+            summary.success_rate_wilson_95_low_percent,
+            summary.success_rate_wilson_95_high_percent,
+            summary.average_wall_time_ms,
+            summary.wall_time_stddev_ms,
+            summary.average_cargo_calls,
+            summary.average_host_turns
+        )?;
     }
     writeln!(&mut report)?;
-    writeln!(&mut report, "Retained failures={}, timeouts={}, cancellations={}; unavailable token and cost values remain `unknown`.",
-        benchmark.retained_failed_trials, benchmark.retained_timeout_trials, benchmark.retained_cancelled_trials)?;
-    writeln!(&mut report, "Gates: quality={}, host-turn={}, cargo-call={}, wall-time={}. Default-on=false.",
-        benchmark.gate.quality_pass, benchmark.gate.host_turn_pass,
-        benchmark.gate.cargo_call_pass, benchmark.gate.wall_time_pass)?;
+    writeln!(
+        &mut report,
+        "Retained failures={}, timeouts={}, cancellations={}; unavailable token and cost values remain `unknown`.",
+        evidence.retained_failed_trials,
+        evidence.retained_timeout_trials,
+        evidence.retained_cancelled_trials
+    )?;
+    writeln!(
+        &mut report,
+        "Gates: quality={}, host-turn={}, cargo-call={}, wall-time={}. Default-on=false.",
+        evidence.gate.quality_pass,
+        evidence.gate.host_turn_pass,
+        evidence.gate.cargo_call_pass,
+        evidence.gate.wall_time_pass
+    )?;
     Ok(report)
 }
 
 fn read_json<T: DeserializeOwned>(root: &Path, relative: &str) -> Result<(T, Vec<u8>)> {
     validate_relative_path(relative)?;
     let path = root.join(relative);
-    let metadata = fs::symlink_metadata(&path).with_context(|| format!("inspect benchmark input {relative}"))?;
+    let metadata = fs::symlink_metadata(&path)
+        .with_context(|| format!("inspect benchmark input {relative}"))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         bail!("benchmark input must be a regular file: {relative}");
     }
@@ -949,7 +1124,11 @@ fn fixture_hash(files: &BTreeMap<String, String>) -> String {
 
 fn validate_relative_path(value: &str) -> Result<()> {
     let path = Path::new(value);
-    if value.is_empty() || path.components().any(|component| !matches!(component, Component::Normal(_))) {
+    if value.is_empty()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
         bail!("unsafe benchmark relative path: {value}");
     }
     Ok(())
