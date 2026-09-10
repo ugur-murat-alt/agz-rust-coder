@@ -40,6 +40,7 @@ impl TestProject {
         Self::build(label, None, extra_manifest, source, Some(build_script))
     }
 
+    #[cfg(unix)]
     fn with_rust_version_and_build_script(
         label: &str,
         version: &str,
@@ -144,6 +145,7 @@ fn git(root: &Path, arguments: &[&str]) {
 }
 
 /// Build script that records the compiler Cargo actually asks it to use.
+#[cfg(unix)]
 const COMPILER_PROBE: &str = r#"
 fn main() {
     let rustc = std::env::var_os("RUSTC").expect("cargo sets RUSTC for build scripts");
@@ -158,6 +160,7 @@ fn main() {
 }
 "#;
 
+#[cfg(unix)]
 fn rustup_home() -> PathBuf {
     std::env::var_os("RUSTUP_HOME")
         .map(PathBuf::from)
@@ -166,6 +169,7 @@ fn rustup_home() -> PathBuf {
         })
 }
 
+#[cfg(unix)]
 fn installed_toolchain(prefix: &str) -> Option<String> {
     let mut names = fs::read_dir(rustup_home().join("toolchains"))
         .ok()?
@@ -179,6 +183,7 @@ fn installed_toolchain(prefix: &str) -> Option<String> {
 
 /// Pick an installed toolchain with a different version than `prefix`, so an
 /// ambient compiler that ignores the requested toolchain is observable.
+#[cfg(unix)]
 fn ambient_toolchain_excluding(prefix: &str) -> Option<String> {
     let home = rustup_home();
     let default = fs::read_to_string(home.join("settings.toml"))
@@ -203,6 +208,7 @@ fn ambient_toolchain_excluding(prefix: &str) -> Option<String> {
     names.into_iter().next()
 }
 
+#[cfg(unix)]
 fn find_file(root: &Path, name: &str) -> Option<PathBuf> {
     let mut pending = vec![(root.to_owned(), 0_usize)];
     while let Some((directory, depth)) = pending.pop() {

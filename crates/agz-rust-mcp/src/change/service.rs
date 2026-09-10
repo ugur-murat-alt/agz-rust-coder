@@ -3183,11 +3183,13 @@ mod tests {
 
     #[test]
     fn pinned_record_reload_detects_a_cross_process_revision_bump() {
-        let base = std::env::temp_dir().join(format!(
-            "agz-change-reload-{}-{}",
-            std::process::id(),
-            CHANGE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
+        let base = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!(
+                "agz-change-reload-{}-{}",
+                std::process::id(),
+                CHANGE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ));
         fs::create_dir_all(&base).expect("create reload base");
         let mut config = Config::defaults_at(&base);
         config.change.scratch_dir = base.join("scratch");

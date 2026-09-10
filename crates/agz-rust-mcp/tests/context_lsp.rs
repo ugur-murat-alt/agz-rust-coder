@@ -51,10 +51,12 @@ struct TestRoot(PathBuf);
 
 impl TestRoot {
     fn new(label: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "agz-rust-mcp-context-lsp-{label}-{}",
-            std::process::id()
-        ));
+        let path = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!(
+                "agz-rust-mcp-context-lsp-{label}-{}",
+                std::process::id()
+            ));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(path.join("src")).expect("create src dir");
         fs::create_dir_all(path.join("tests")).expect("create tests dir");

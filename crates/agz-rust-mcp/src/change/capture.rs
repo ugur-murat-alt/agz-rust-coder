@@ -320,13 +320,15 @@ mod tests {
     use std::sync::Arc;
 
     fn scratch(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "agz-change-capture-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |duration| duration.as_nanos())
-        ))
+        fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!(
+                "agz-change-capture-{label}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |duration| duration.as_nanos())
+            ))
     }
 
     fn open_root(path: &Path) -> Arc<AuthorizedRoot> {

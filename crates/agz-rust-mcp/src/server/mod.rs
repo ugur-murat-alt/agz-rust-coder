@@ -445,10 +445,12 @@ mod tests {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
-        let base = std::env::temp_dir().join(format!(
-            "agz-change-disabled-{}-{stamp}",
-            std::process::id()
-        ));
+        let base = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!(
+                "agz-change-disabled-{}-{stamp}",
+                std::process::id()
+            ));
         fs::create_dir_all(&base).expect("create base");
         // A regular file can never become the scratch directory.
         let blocker = base.join("scratch-file");
