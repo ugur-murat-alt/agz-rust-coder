@@ -20,6 +20,7 @@ Failed compilations are revalidated before offering edit/context evidence. Trunc
 | `crate_lookup` | crates.io | Bounded HTTPS request | `FOUND`, `NOT_FOUND`, `VERSION_MISMATCH`, or `UNAVAILABLE`. |
 | `docs` | rustdoc/docs.rs | May use cache, network, or local `cargo doc` | Exact-version excerpt and provenance or typed unavailability. |
 | `context` | Rust Analyzer, workspace source, cargo metadata | Never writes source | Revision-bound capsule of definitions, consumers, tests, signatures, dependency/feature evidence, and bounded excerpts with per-item reasons. |
+| `api` | Rust Analyzer + workspace source; isolated Cargo candidate for `probe` | Never writes the workspace; `probe` stages a temporary harness into a discarded candidate copy | Signature/import/trait/feature resolution or a compile-only `COMPILES_IN_CONFIGURATION` verdict with the exact harness, assertion, configuration, and input hash. |
 | `explain` | rustc/Cargo plus advisory Rust Analyzer | Runs a bounded Cargo check for `macro`/`trait`; metadata-only for `cfg` | Provenance-labelled fragments; missing expansion mapping is `unknown`, never guessed. |
 | `verify` | Cargo/rustc | May build bounded matrix cells | Cell plan or bounded matrix run with per-cell typed status, evidence, and coverage limits. |
 | `symbol` | Rust Analyzer | Depends on workspace-code policy | Hover text and selected location. |
@@ -147,6 +148,38 @@ evidence. Capsules are not exposed as MCP resources in this version; `expand`
 pagination is the documented fallback. Sizes are exact UTF-8 byte and character
 counts only; no tokenizer exists, and no token counts are reported.
 
+## API Resolution And Probes
+
+`api` has two actions and no free-form semantic engine:
+
+- `resolve` composes existing Rust Analyzer hover, definition, completion, and
+  reference evidence with cargo-metadata feature state for one
+  `{path,symbol?,line?,character?}` anchor. It returns the bounded signature,
+  import hints, textual trait-bound fragments, enabled features, and local
+  usage examples; unavailable analyzer evidence produces explicit omissions, and
+  `changeId` is recorded only as a binding label.
+- `probe` stages the host's candidate snippet into a temporary module inside a
+  server-owned change candidate, type-checks it with the same captured
+  dependency graph, `Cargo.lock` (compiled with `--locked`), toolchain file, and
+  typed feature selection, and then discards the change. A harness patch is
+  applied only to the candidate copy; the original workspace is never written
+  and its anchor, `Cargo.toml`, and `Cargo.lock` hashes are re-verified
+  afterwards. The anchor file must be a declared module of a library or binary
+  target that default `cargo check` selects, otherwise the result is
+  `UNSUPPORTED_CONTEXT` instead of a vacuous pass.
+
+A successful probe reports only `COMPILES_IN_CONFIGURATION`; runtime correctness
+is never claimed and the snippet is never executed. When `expectedSignature` is
+given, the snippet is returned as that type so the compiler must unify it; when
+the snippet contains `todo!`, `unimplemented!`, or another detected diverging
+construct, a type-check pass is reported as `INCOMPLETE_IMPLEMENTATION`, not a
+completed implementation. Missing dependencies or features are returned only as
+advisory `proposals` with `requiresExplicitHostChange=true`; the probe never
+edits a manifest, dependency, or lockfile. Snippet, harness, signature,
+configuration, and input hash are reported together, and snippet/harness bytes
+stay bounded by `api.max_snippet_bytes`, `api.max_snippets`, and
+`api.compile_timeout_ms` with cancellation honored throughout.
+
 ## Result Semantics
 
 Expected domain outcomes are successful MCP calls with typed status:
@@ -192,6 +225,7 @@ use the platform path-list separator.
 | `tools.crate_lookup` | `true` | Register `crate_lookup`. |
 | `tools.docs` | `true` | Register `docs`. |
 | `tools.context` | `true` | Register `context`. |
+| `tools.api` | `true` | Register `api`. |
 | `tools.explain` | `true` | Register `explain`. |
 | `tools.verify` | `true` | Register `verify`. |
 | `tools.lsp` | `true` | Register semantic navigation tools. |
@@ -231,6 +265,9 @@ use the platform path-list separator.
 | `context.max_capsules` | `32` | In-memory capsule ring capacity. |
 | `context.capsule_ttl_ms` | `900000` | Capsule TTL; root-epoch changes also invalidate. |
 | `context.max_items` | `64` | Items selected into one capsule. |
+| `api.max_snippets` | `4` | Candidate snippets accepted by one `probe`. |
+| `api.max_snippet_bytes` | `32768` | Combined snippet byte budget for one `probe`. |
+| `api.compile_timeout_ms` | `120000` | Wall-clock ceiling for one `probe` including cleanup. |
 | `limits.max_rename_edits` | `200` | Rename edit cap. |
 | `limits.max_refactor_edits` | `200` | Refactor edit cap. |
 | `limits.process_output_bytes` | `8388608` | Combined child-output cap. |

@@ -1,4 +1,13 @@
 {
+  "api": {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "inputSchemaHash": "fnv1a64:5bb44d4bf0f6ad09",
+    "outputSchemaHash": "fnv1a64:e1bdcffdbdd817c4"
+  },
   "audit": {
     "annotations": {
       "idempotentHint": true,

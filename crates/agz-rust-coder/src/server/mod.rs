@@ -6,16 +6,17 @@ mod response;
 mod tasks;
 
 pub use crate::context::ContextData;
+pub use crate::tools::ApiData;
 pub use handler::{
-    AuditData, AuditInput, AuditOutput, ChangeData, ChangeInput, ChangeOutput, CheckData,
-    CheckDetail, CheckInput, CheckOutput, CheckTarget, ContextInput, ContextOutput,
-    CrateLookupData, CrateLookupInput, CrateLookupOutput, DocsData, DocsInput, DocsOutput,
-    EditData, EditOutput, ExplainAction, ExplainAnchorInput, ExplainConfigurationData, ExplainData,
-    ExplainInput, ExplainOutput, ExplainSourceBindingData, HierarchyDirection, HierarchyInput,
-    ImplementationsInput, ProfileAction, ProfileBudgetInput, ProfileConfigurationInput,
-    ProfileData, ProfileInput, ProfileOutput, RefactorInput, RenameInput, RustCoderServer,
-    SemanticData, SemanticInput, SemanticOutput, SymbolInput, SymbolsInput, VerifyInput,
-    VerifyOutput, tool_definitions,
+    ApiAnchorInput, ApiConfigurationInput, ApiInput, ApiOutput, AuditData, AuditInput, AuditOutput,
+    ChangeData, ChangeInput, ChangeOutput, CheckData, CheckDetail, CheckInput, CheckOutput,
+    CheckTarget, ContextInput, ContextOutput, CrateLookupData, CrateLookupInput, CrateLookupOutput,
+    DocsData, DocsInput, DocsOutput, EditData, EditOutput, ExplainAction, ExplainAnchorInput,
+    ExplainConfigurationData, ExplainData, ExplainInput, ExplainOutput, ExplainSourceBindingData,
+    HierarchyDirection, HierarchyInput, ImplementationsInput, ProfileAction, ProfileBudgetInput,
+    ProfileConfigurationInput, ProfileData, ProfileInput, ProfileOutput, RefactorInput,
+    RenameInput, RustCoderServer, SemanticData, SemanticInput, SemanticOutput, SymbolInput,
+    SymbolsInput, VerifyInput, VerifyOutput, tool_definitions,
 };
 pub use progress::ProgressReporter;
 pub use response::{ToolData, ToolOutput, WorkspaceInfo};

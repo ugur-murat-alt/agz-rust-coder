@@ -108,6 +108,7 @@ async fn initialize_lists_the_static_surface_and_guidance() -> Result<()> {
             "crate_lookup",
             "docs",
             "context",
+            "api",
             "explain",
             "verify",
             "symbol",

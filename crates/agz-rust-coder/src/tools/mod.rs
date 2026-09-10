@@ -1,6 +1,7 @@
 //! Domain-level semantic tools. The MCP server adapter remains outside this
 //! module; these functions return bounded, source-write-free results.
 
+pub mod api;
 pub mod audit;
 pub mod check;
 pub mod context;
@@ -12,6 +13,10 @@ pub mod profile;
 pub mod symbol;
 pub mod verify;
 
+pub use api::{
+    ApiAction, ApiAnchor, ApiAnchorData, ApiConfiguration, ApiData, ApiEnvironment, ApiProbeData,
+    ApiRequest, ApiResolveData, execute_api,
+};
 pub use audit::{
     AuditCancellation, AuditCancellationReason, AuditError, AuditFinding, AuditLimits,
     AuditRequest, AuditService, AuditSkip, AuditSkipReason, AuditSummary,

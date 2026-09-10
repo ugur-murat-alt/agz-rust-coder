@@ -77,6 +77,7 @@ OpenCode gruplanmış MCP araçlarını çoğunlukla `rust_*` adıyla gösterir.
 | `crate_lookup` | `rust_crate_lookup` | `enabled` | Crate adını ve isteğe bağlı tam sürümü crates.io üzerinde doğrular. |
 | `docs` | `rust_docs` | `enabled` | Tam sürüm belgesini cache, yerel kaynak veya docs.rs üzerinden çözer. |
 | `context` | `rust_context` | `enabled` | Öğe başına nedeniyle revizyona bağlı anlamsal bağlam kapsülü hazırlar, genişletir veya farkını üretir. |
+| `api` | `rust_api` | `enabled` | Sınırlı analiz kanıtıyla API imzasını çözer veya aday kod parçasını workspace yapılandırmasının yalıtılmış kopyasında tip kontrolünden geçirir. |
 | `explain` | `rust_explain` | `enabled` | Makro açılım kaynağını, trait yükümlülüklerini veya cfg etkinliğini açıklar. |
 | `verify` | `rust_verify` | `enabled` | Sınırlı feature, hedef, toolchain ve aşama matrisini planlar veya çalıştırır. |
 | `symbol` | `rust_symbol` | `enabled` | Bir sembol için Rust Analyzer hover verisini okur. |

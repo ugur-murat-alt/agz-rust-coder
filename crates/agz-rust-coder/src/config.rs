@@ -51,6 +51,7 @@ pub struct Config {
     pub rust_analyzer: RustAnalyzerConfig,
     pub docs: DocsConfig,
     pub context: ContextConfig,
+    pub api: ApiConfig,
     pub limits: LimitsConfig,
     pub profile: ProfileConfig,
     pub telemetry: TelemetryConfig,
@@ -71,6 +72,7 @@ pub struct ToolConfig {
     pub crate_lookup: bool,
     pub docs: bool,
     pub context: bool,
+    pub api: bool,
     pub verify: bool,
     pub lsp: bool,
     pub explain: bool,
@@ -170,6 +172,14 @@ pub struct ContextConfig {
     pub max_items: u64,
 }
 
+/// Bounds for `api` resolution evidence and compile-only probes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiConfig {
+    pub max_snippets: u64,
+    pub max_snippet_bytes: u64,
+    pub compile_timeout_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LimitsConfig {
     pub max_rename_edits: u64,
@@ -226,6 +236,7 @@ impl Config {
                 crate_lookup: true,
                 docs: true,
                 context: true,
+                api: true,
                 verify: true,
                 lsp: true,
                 explain: true,
@@ -274,6 +285,11 @@ impl Config {
                 max_capsules: 32,
                 capsule_ttl_ms: 900_000,
                 max_items: 64,
+            },
+            api: ApiConfig {
+                max_snippets: 4,
+                max_snippet_bytes: 32_768,
+                compile_timeout_ms: 120_000,
             },
             limits: LimitsConfig {
                 max_rename_edits: 200,
@@ -428,6 +444,19 @@ impl Config {
             86_400_000,
         )?;
         check_range("context.max_items", self.context.max_items, 1, 256)?;
+        check_range("api.max_snippets", self.api.max_snippets, 1, 16)?;
+        check_range(
+            "api.max_snippet_bytes",
+            self.api.max_snippet_bytes,
+            256,
+            1_048_576,
+        )?;
+        check_range(
+            "api.compile_timeout_ms",
+            self.api.compile_timeout_ms,
+            1_000,
+            3_600_000,
+        )?;
         check_range(
             "profile.max_report_bytes",
             self.profile.max_report_bytes,
@@ -558,6 +587,9 @@ impl Config {
         if self.tools.context {
             names.push("context");
         }
+        if self.tools.api {
+            names.push("api");
+        }
         if self.tools.explain {
             names.push("explain");
         }
@@ -619,6 +651,8 @@ pub struct CliOptions {
     pub tools_docs: Option<bool>,
     #[arg(long = "tools-context")]
     pub tools_context: Option<bool>,
+    #[arg(long = "tools-api")]
+    pub tools_api: Option<bool>,
     #[arg(long = "tools-verify")]
     pub tools_verify: Option<bool>,
     #[arg(long = "tools-lsp")]
@@ -691,6 +725,12 @@ pub struct CliOptions {
     pub context_capsule_ttl_ms: Option<u64>,
     #[arg(long = "context-max-items")]
     pub context_max_items: Option<u64>,
+    #[arg(long = "api-max-snippets")]
+    pub api_max_snippets: Option<u64>,
+    #[arg(long = "api-max-snippet-bytes")]
+    pub api_max_snippet_bytes: Option<u64>,
+    #[arg(long = "api-compile-timeout-ms")]
+    pub api_compile_timeout_ms: Option<u64>,
     #[arg(long = "profile-max-report-bytes")]
     pub profile_max_report_bytes: Option<u64>,
     #[arg(long = "profile-max-runs")]
@@ -755,6 +795,7 @@ struct FileConfig {
     rust_analyzer: Option<FileRustAnalyzerConfig>,
     docs: Option<FileDocsConfig>,
     context: Option<FileContextConfig>,
+    api: Option<FileApiConfig>,
     limits: Option<FileLimitsConfig>,
     profile: Option<FileProfileConfig>,
     telemetry: Option<FileTelemetryConfig>,
@@ -776,6 +817,7 @@ struct FileToolConfig {
     crate_lookup: Option<bool>,
     docs: Option<bool>,
     context: Option<bool>,
+    api: Option<bool>,
     verify: Option<bool>,
     lsp: Option<bool>,
     explain: Option<bool>,
@@ -883,6 +925,14 @@ struct FileContextConfig {
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
+struct FileApiConfig {
+    max_snippets: Option<u64>,
+    max_snippet_bytes: Option<u64>,
+    compile_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct FileLimitsConfig {
     max_rename_edits: Option<u64>,
     max_refactor_edits: Option<u64>,
@@ -948,6 +998,7 @@ fn apply_file(config: &mut Config, file: FileConfig) {
         apply_opt(&mut config.tools.crate_lookup, tools.crate_lookup);
         apply_opt(&mut config.tools.docs, tools.docs);
         apply_opt(&mut config.tools.context, tools.context);
+        apply_opt(&mut config.tools.api, tools.api);
         apply_opt(&mut config.tools.verify, tools.verify);
         apply_opt(&mut config.tools.lsp, tools.lsp);
         apply_opt(&mut config.tools.explain, tools.explain);
@@ -1013,6 +1064,11 @@ fn apply_file(config: &mut Config, file: FileConfig) {
         apply_opt(&mut config.context.max_capsules, context.max_capsules);
         apply_opt(&mut config.context.capsule_ttl_ms, context.capsule_ttl_ms);
         apply_opt(&mut config.context.max_items, context.max_items);
+    }
+    if let Some(api) = file.api {
+        apply_opt(&mut config.api.max_snippets, api.max_snippets);
+        apply_opt(&mut config.api.max_snippet_bytes, api.max_snippet_bytes);
+        apply_opt(&mut config.api.compile_timeout_ms, api.compile_timeout_ms);
     }
     if let Some(limits) = file.limits {
         apply_opt(&mut config.limits.max_rename_edits, limits.max_rename_edits);
@@ -1100,6 +1156,7 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
         "TOOLS__CRATE_LOOKUP" => config.tools.crate_lookup = parse_bool(value).map_err(invalid)?,
         "TOOLS__DOCS" => config.tools.docs = parse_bool(value).map_err(invalid)?,
         "TOOLS__CONTEXT" => config.tools.context = parse_bool(value).map_err(invalid)?,
+        "TOOLS__API" => config.tools.api = parse_bool(value).map_err(invalid)?,
         "TOOLS__VERIFY" => config.tools.verify = parse_bool(value).map_err(invalid)?,
         "TOOLS__LSP" => config.tools.lsp = parse_bool(value).map_err(invalid)?,
         "TOOLS__EXPLAIN" => config.tools.explain = parse_bool(value).map_err(invalid)?,
@@ -1173,6 +1230,15 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
         }
         "CONTEXT__MAX_ITEMS" => {
             config.context.max_items = parse_u64(value).map_err(invalid)?;
+        }
+        "API__MAX_SNIPPETS" => {
+            config.api.max_snippets = parse_u64(value).map_err(invalid)?;
+        }
+        "API__MAX_SNIPPET_BYTES" => {
+            config.api.max_snippet_bytes = parse_u64(value).map_err(invalid)?;
+        }
+        "API__COMPILE_TIMEOUT_MS" => {
+            config.api.compile_timeout_ms = parse_u64(value).map_err(invalid)?;
         }
         "PROFILE__MAX_REPORT_BYTES" => {
             config.profile.max_report_bytes = parse_u64(value).map_err(invalid)?;
@@ -1262,6 +1328,7 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
     apply_opt(&mut config.tools.crate_lookup, cli.tools_crate_lookup);
     apply_opt(&mut config.tools.docs, cli.tools_docs);
     apply_opt(&mut config.tools.context, cli.tools_context);
+    apply_opt(&mut config.tools.api, cli.tools_api);
     apply_opt(&mut config.tools.verify, cli.tools_verify);
     apply_opt(&mut config.tools.lsp, cli.tools_lsp);
     apply_opt(&mut config.tools.explain, cli.tools_explain);
@@ -1330,6 +1397,12 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
         cli.context_capsule_ttl_ms,
     );
     apply_opt(&mut config.context.max_items, cli.context_max_items);
+    apply_opt(&mut config.api.max_snippets, cli.api_max_snippets);
+    apply_opt(&mut config.api.max_snippet_bytes, cli.api_max_snippet_bytes);
+    apply_opt(
+        &mut config.api.compile_timeout_ms,
+        cli.api_compile_timeout_ms,
+    );
     apply_opt(
         &mut config.profile.max_report_bytes,
         cli.profile_max_report_bytes,
@@ -2045,6 +2118,44 @@ mod tests {
         cli.context_capsule_ttl_ms = None;
         cli.context_max_items = None;
         cli
+    }
+
+    #[test]
+    fn api_configuration_wires_toml_environment_and_cli() {
+        let mut cli = cli();
+        cli.tools_api = Some(false);
+        cli.api_max_snippets = Some(2);
+        cli.api_max_snippet_bytes = Some(4_096);
+        let config = Config::from_sources(
+            "/workspace",
+            Some("[api]\nmax_snippets = 3\nmax_snippet_bytes = 8192\ncompile_timeout_ms = 9000\n"),
+            [
+                ("AGZ_RUST_CODER_API__MAX_SNIPPETS", "1"),
+                ("AGZ_RUST_CODER_API__COMPILE_TIMEOUT_MS", "7000"),
+            ],
+            &cli,
+        )
+        .expect("api configuration layers resolve");
+        assert!(!config.tools.api);
+        assert_eq!(config.api.max_snippets, 2);
+        assert_eq!(config.api.max_snippet_bytes, 4_096);
+        assert_eq!(config.api.compile_timeout_ms, 7_000);
+        assert!(
+            !config.enabled_tool_names().contains(&"api"),
+            "tools.api=false must remove the tool from the catalog"
+        );
+
+        let mut invalid_snippets = Config::defaults_at(test_path("api-snippets"));
+        invalid_snippets.api.max_snippets = 0;
+        assert_invalid_field(invalid_snippets.validate(), "api.max_snippets");
+
+        let mut invalid_bytes = Config::defaults_at(test_path("api-bytes"));
+        invalid_bytes.api.max_snippet_bytes = 4;
+        assert_invalid_field(invalid_bytes.validate(), "api.max_snippet_bytes");
+
+        let mut invalid_timeout = Config::defaults_at(test_path("api-timeout"));
+        invalid_timeout.api.compile_timeout_ms = 10;
+        assert_invalid_field(invalid_timeout.validate(), "api.compile_timeout_ms");
     }
 
     #[cfg(unix)]

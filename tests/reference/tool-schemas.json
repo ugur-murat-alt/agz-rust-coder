@@ -153,6 +153,140 @@
     "required": ["action"],
     "additionalProperties": false
   },
+
+    "api": {
+      "$defs": {
+        "ApiAction": {
+          "description": "Supported `api` actions.",
+          "enum": [
+            "resolve",
+            "probe"
+          ],
+          "type": "string"
+        },
+        "ApiAnchorInput": {
+          "additionalProperties": false,
+          "properties": {
+            "character": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "line": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "path": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            "symbol": {
+              "default": null,
+              "maxLength": 512,
+              "minLength": 1,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        "ApiConfigurationInput": {
+          "additionalProperties": false,
+          "description": "Typed Cargo feature selection, never free-form flags.",
+          "properties": {
+            "allFeatures": {
+              "default": false,
+              "type": "boolean"
+            },
+            "features": {
+              "default": [],
+              "items": {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 64,
+              "type": "array"
+            },
+            "noDefaultFeatures": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/ApiAction",
+          "default": "resolve"
+        },
+        "anchor": {
+          "$ref": "#/$defs/ApiAnchorInput"
+        },
+        "changeId": {
+          "default": null,
+          "description": "Opaque caller-supplied binding label; never read as a change candidate.",
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "configuration": {
+          "$ref": "#/$defs/ApiConfigurationInput"
+        },
+        "dir": {
+          "default": null,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedSignature": {
+          "default": null,
+          "description": "Optional explicit compile assertion: the snippet must evaluate to this\nRust type for `action=probe`.",
+          "maxLength": 512,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "snippets": {
+          "default": [],
+          "items": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 4,
+          "type": "array"
+        }
+      },
+      "required": [
+        "anchor"
+      ],
+      "type": "object"
+    },
   "crate_lookup": {
     "type": "object",
     "properties": {

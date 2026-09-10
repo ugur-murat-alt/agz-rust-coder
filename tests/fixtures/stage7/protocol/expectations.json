@@ -10,6 +10,7 @@
     "crate_lookup",
     "docs",
     "context",
+    "api",
     "explain",
     "verify",
     "symbol",
@@ -22,7 +23,9 @@
     "refactor",
     "change"
   ],
-  "prompts": ["workflow"],
+  "prompts": [
+    "workflow"
+  ],
   "resource_count": 4,
   "provider_requests": 0
 }
