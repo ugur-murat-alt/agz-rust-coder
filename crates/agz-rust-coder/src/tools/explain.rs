@@ -12,6 +12,7 @@ use std::{
     time::Duration,
 };
 
+use cargo_metadata::Metadata;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -19,11 +20,12 @@ use serde_json::Value;
 use crate::{
     diagnostics::sanitize_text,
     gate::{DiagnosticChild, DiagnosticSpan, GateDiagnostic},
-    lsp::{LspError, Position, RustAnalyzerManager},
+    lsp::{LspError, ManagerError, Position, RustAnalyzerManager},
 };
 
 use super::symbol::{
-    ToolError, bounded_chars, find_symbol_column, request_until, with_rust_document,
+    ToolError, bounded_chars, current_lsp_cancellation, find_symbol_column, request_until,
+    with_rust_document,
 };
 
 pub const MAX_MACRO_DEPTH: usize = 8;
@@ -242,16 +244,26 @@ fn primary_span(diagnostic: &GateDiagnostic) -> Option<&DiagnosticSpan> {
         .or_else(|| diagnostic.spans.first())
 }
 
+fn location_text(source: &ExplainSourceRef) -> String {
+    match source.line {
+        Some(line) => format!("{}:{line}", source.path),
+        None => source.path.clone(),
+    }
+}
+
+/// Records the bounded macro expansion chain for one span. Returns true only
+/// when the chain continued past `MAX_MACRO_DEPTH` and was truncated.
 fn expansion_fragments(
     span: &DiagnosticSpan,
     fragments: &mut Vec<ExplainFragment>,
     depth: &mut usize,
-) {
+) -> bool {
     let Some(mut expansion) = span.expansion.as_ref() else {
-        return;
+        return false;
     };
     let mut chain = 0usize;
-    while chain < MAX_MACRO_DEPTH {
+    let mut truncated = false;
+    loop {
         let name = expansion
             .macro_decl_name
             .clone()
@@ -262,19 +274,14 @@ fn expansion_fragments(
             .as_deref()
             .map(span_ref)
             .map_or_else(String::new, |definition| {
-                format!(
-                    "; definition at {}:{}",
-                    definition.path,
-                    definition.line.unwrap_or_default()
-                )
+                format!("; definition at {}", location_text(&definition))
             });
         let mut fragment = ExplainFragment::new(
             ExplainProvenance::ObservedCompiler,
             "macroExpansion",
             format!(
-                "rustc attributes this span to macro `{name}`; invocation site {}:{}{definition}",
-                invocation.path,
-                invocation.line.unwrap_or_default(),
+                "rustc attributes this span to macro `{name}`; invocation site {}{definition}",
+                location_text(&invocation),
             ),
         );
         fragment = fragment.with_source(invocation);
@@ -284,15 +291,22 @@ fn expansion_fragments(
         let Some(next) = expansion.span.expansion.as_ref() else {
             break;
         };
+        if chain >= MAX_MACRO_DEPTH {
+            truncated = true;
+            break;
+        }
         expansion = next;
     }
-    if chain == MAX_MACRO_DEPTH {
+    if truncated {
         fragments.push(ExplainFragment::new(
             ExplainProvenance::Unknown,
             "macroExpansion",
-            format!("macro expansion chain was truncated at depth {MAX_MACRO_DEPTH}; nested provenance is not claimed"),
+            format!(
+                "macro expansion chain continued past depth {MAX_MACRO_DEPTH}; nested provenance is not claimed"
+            ),
         ));
     }
+    truncated
 }
 
 fn walk_child_spans(
@@ -301,10 +315,11 @@ fn walk_child_spans(
     depth: &mut usize,
     budget: &mut usize,
     output_bytes: &mut usize,
-) {
+) -> bool {
+    let mut truncated = false;
     for span in &child.spans {
         let _ = output_bytes;
-        expansion_fragments(span, fragments, depth);
+        truncated |= expansion_fragments(span, fragments, depth);
     }
     if !child.message.trim().is_empty() && *budget < MAX_DIAGNOSTICS {
         fragments.push(ExplainFragment::new(
@@ -315,8 +330,9 @@ fn walk_child_spans(
     }
     *budget += 1;
     for nested in &child.children {
-        walk_child_spans(nested, fragments, depth, budget, output_bytes);
+        truncated |= walk_child_spans(nested, fragments, depth, budget, output_bytes);
     }
+    truncated
 }
 
 /// Builds macro explanations from retained rustc expansion provenance.
@@ -340,16 +356,15 @@ pub fn macro_compiler_view(diagnostics: &[&GateDiagnostic]) -> CompilerView {
         }
         view.fragments.push(fragment);
 
-        let mut expansions = 0usize;
+        let mut expansion_found = false;
         for span in &diagnostic.spans {
-            let before = view.fragments.len();
-            expansion_fragments(span, &mut view.fragments, &mut view.macro_depth);
-            expansions += view.fragments.len().saturating_sub(before);
+            expansion_found |= span.expansion.is_some();
+            view.truncated |= expansion_fragments(span, &mut view.fragments, &mut view.macro_depth);
         }
         let mut child_budget = 0usize;
         let mut byte_budget = 0usize;
         for child in &diagnostic.children {
-            walk_child_spans(
+            view.truncated |= walk_child_spans(
                 child,
                 &mut view.fragments,
                 &mut view.macro_depth,
@@ -357,7 +372,7 @@ pub fn macro_compiler_view(diagnostics: &[&GateDiagnostic]) -> CompilerView {
                 &mut byte_budget,
             );
         }
-        if expansions == 0 {
+        if !expansion_found {
             view.fragments.push(ExplainFragment::new(
                 ExplainProvenance::Unknown,
                 "macroExpansion",
@@ -365,7 +380,7 @@ pub fn macro_compiler_view(diagnostics: &[&GateDiagnostic]) -> CompilerView {
             ));
         }
     }
-    view.truncated = diagnostics.len() > MAX_DIAGNOSTICS;
+    view.truncated |= diagnostics.len() > MAX_DIAGNOSTICS;
     view
 }
 
@@ -511,10 +526,13 @@ pub fn trait_compiler_view(
                 diagnostic.message.clone(),
             ));
         }
+        for span in &diagnostic.spans {
+            view.truncated |= expansion_fragments(span, &mut view.fragments, &mut view.macro_depth);
+        }
         for child in &diagnostic.children {
             let mut child_budget = 0usize;
             let mut byte_budget = 0usize;
-            walk_child_spans(
+            view.truncated |= walk_child_spans(
                 child,
                 &mut view.fragments,
                 &mut view.macro_depth,
@@ -531,7 +549,7 @@ pub fn trait_compiler_view(
             trait_name,
         ));
     }
-    view.truncated = diagnostics.len() > MAX_DIAGNOSTICS;
+    view.truncated |= diagnostics.len() > MAX_DIAGNOSTICS;
     view
 }
 
@@ -659,6 +677,90 @@ impl FeatureSelection {
     }
 }
 
+/// Feature evidence attributed to the single workspace member that owns the
+/// anchor. `cfg(feature = ...)` is evaluated per crate, so dependency-only
+/// features must never be presented as enabled for the anchor package.
+#[derive(Debug, Clone)]
+pub struct AnchorFeatures {
+    /// Workspace member that owns the anchor, when it could be attributed.
+    pub package: Option<String>,
+    /// Features declared by that package only.
+    pub declared: BTreeMap<String, Vec<String>>,
+    /// Features Cargo resolved as active for that package only.
+    pub recorded: BTreeSet<String>,
+    /// Why no package could be attributed; empty when attribution succeeded.
+    pub note: String,
+}
+
+impl AnchorFeatures {
+    pub fn unknown(note: impl Into<String>) -> Self {
+        Self {
+            package: None,
+            declared: BTreeMap::new(),
+            recorded: BTreeSet::new(),
+            note: note.into(),
+        }
+    }
+}
+
+/// Attributes feature evidence to the workspace member that owns the anchor.
+///
+/// Only Cargo workspace members are considered, and only the manifest nearest
+/// to `anchor_relative` wins. Declared and resolved features therefore describe
+/// the anchor crate itself, not its dependency graph.
+pub fn anchor_feature_maps(
+    metadata: &Metadata,
+    workspace_root: &Path,
+    anchor_relative: &Path,
+) -> AnchorFeatures {
+    let mut best: Option<(&cargo_metadata::Package, usize)> = None;
+    for package in &metadata.packages {
+        if !metadata.workspace_members.contains(&package.id) {
+            continue;
+        }
+        let Some(package_root) = package.manifest_path.as_std_path().parent() else {
+            continue;
+        };
+        let Ok(relative_root) = package_root.strip_prefix(workspace_root) else {
+            continue;
+        };
+        if !relative_root.as_os_str().is_empty() && !anchor_relative.starts_with(relative_root) {
+            continue;
+        }
+        let depth = relative_root.components().count();
+        if best
+            .as_ref()
+            .is_none_or(|(_, best_depth)| depth > *best_depth)
+        {
+            best = Some((package, depth));
+        }
+    }
+    match best {
+        Some((package, _)) => {
+            let recorded = metadata
+                .resolve
+                .as_ref()
+                .and_then(|resolve| resolve.nodes.iter().find(|node| node.id == package.id))
+                .map(|node| {
+                    node.features
+                        .iter()
+                        .map(|feature| feature.as_ref().to_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            AnchorFeatures {
+                package: Some(package.name.as_ref().to_owned()),
+                declared: package.features.clone(),
+                recorded,
+                note: String::new(),
+            }
+        }
+        None => AnchorFeatures::unknown(
+            "the anchor path could not be attributed to a workspace member package; feature enablement is not derived from dependency-only packages",
+        ),
+    }
+}
+
 /// Builds the effective feature set for the recorded selection plus the
 /// requested configuration. Enablement propagation is a bounded closure over
 /// Cargo's declared feature map, so it is an inference and never compiler
@@ -703,7 +805,7 @@ pub fn feature_selection(
     if all_features {
         effective.extend(declared_names.iter().cloned());
         selection.note =
-            "allFeatures requested: every declared feature of the workspace packages is treated as enabled"
+            "allFeatures requested: every feature declared by the anchor package is treated as enabled"
                 .to_owned();
     } else if requested.is_empty() && !no_default_features {
         effective.extend(selection.recorded.iter().cloned());
@@ -1036,8 +1138,11 @@ pub fn find_cfg_attributes(source: &str, anchor_line: u32) -> Vec<CfgAttribute> 
 }
 
 fn extract_cfg_condition(line: &str) -> Option<String> {
-    let marker = line.find("#[cfg(").map(|at| (at, "#[cfg("))?;
-    let after = &line[marker.0 + marker.1.len()..];
+    let (at, marker) = line
+        .find("#![cfg(")
+        .map(|at| (at, "#![cfg("))
+        .or_else(|| line.find("#[cfg(").map(|at| (at, "#[cfg(")))?;
+    let after = &line[at + marker.len()..];
     let end = balanced_end(after)?;
     Some(after[..end].trim().to_owned())
 }
@@ -1171,9 +1276,22 @@ pub fn cfg_view(
         ));
     }
     feature_detail.push('\n');
-    feature_detail.push_str(&features.note);
+    if features.effective.is_none() {
+        if features.note.is_empty() {
+            feature_detail
+                .push_str("Cargo feature metadata is unavailable; feature enablement is unknown");
+        } else {
+            feature_detail.push_str(&features.note);
+        }
+    } else {
+        feature_detail.push_str(&features.note);
+    }
     view.fragments.push(ExplainFragment::new(
-        ExplainProvenance::ObservedCompiler,
+        if features.effective.is_none() {
+            ExplainProvenance::Unknown
+        } else {
+            ExplainProvenance::ObservedCompiler
+        },
         "featureState",
         feature_detail,
     ));
@@ -1286,6 +1404,23 @@ fn request_position(text: &str, symbol: Option<&str>, line: u32) -> Position {
     Position { line, character }
 }
 
+/// Probes one negotiated extension through the cancellation-aware manager path
+/// when the caller scoped a token with `with_lsp_cancellation`.
+async fn supports_capability(
+    manager: &RustAnalyzerManager,
+    root: &Path,
+    capability: &str,
+) -> Result<bool, ManagerError> {
+    match current_lsp_cancellation() {
+        Some(cancellation) => {
+            manager
+                .supports_internal_with_cancellation(root, capability, cancellation)
+                .await
+        }
+        None => manager.supports_internal(root, capability).await,
+    }
+}
+
 /// Requests one bounded Rust Analyzer macro expansion at the anchor.
 pub async fn expand_macro(
     manager: &RustAnalyzerManager,
@@ -1295,21 +1430,16 @@ pub async fn expand_macro(
     line: u32,
     timeout: Duration,
 ) -> RaStatus<RaMacroExpansion> {
-    match manager
-        .supports_internal(root, "rust-analyzer/expandMacro")
-        .await
-    {
+    const CAPABILITY: &str = "rust-analyzer/expandMacro";
+    match supports_capability(manager, root, CAPABILITY).await {
         Ok(true) => {}
         Ok(false) => {
-            return RaStatus::Unsupported(
-                "rust-analyzer/expandMacro is not negotiated by the running rust-analyzer instance"
-                    .to_owned(),
-            );
+            return RaStatus::Unsupported(format!(
+                "{CAPABILITY} is not negotiated by the running rust-analyzer instance"
+            ));
         }
         Err(error) => {
-            return RaStatus::Unavailable(format!(
-                "rust-analyzer/expandMacro capability check failed: {error}"
-            ));
+            return RaStatus::Unavailable(format!("{CAPABILITY} capability check failed: {error}"));
         }
     }
     let result = with_rust_document(manager, root, relative_path, move |client, uri, text| {
@@ -1347,21 +1477,16 @@ pub async fn failed_obligations(
     line: u32,
     timeout: Duration,
 ) -> RaStatus<RaObligations> {
-    match manager
-        .supports_internal(root, "rust-analyzer/getFailedObligations")
-        .await
-    {
+    const CAPABILITY: &str = "rust-analyzer/getFailedObligations";
+    match supports_capability(manager, root, CAPABILITY).await {
         Ok(true) => {}
         Ok(false) => {
-            return RaStatus::Unsupported(
-                "rust-analyzer/getFailedObligations is not negotiated by the running rust-analyzer instance"
-                    .to_owned(),
-            );
+            return RaStatus::Unsupported(format!(
+                "{CAPABILITY} is not negotiated by the running rust-analyzer instance"
+            ));
         }
         Err(error) => {
-            return RaStatus::Unavailable(format!(
-                "rust-analyzer/getFailedObligations capability check failed: {error}"
-            ));
+            return RaStatus::Unavailable(format!("{CAPABILITY} capability check failed: {error}"));
         }
     }
     let result = with_rust_document(manager, root, relative_path, move |client, uri, text| {
@@ -1649,5 +1774,124 @@ mod tests {
         assert_eq!(resolve_anchor_line(source, Some("second"), None), Some(2));
         assert_eq!(resolve_anchor_line(source, Some("missing"), None), None);
         assert_eq!(resolve_anchor_line(source, None, Some(9)), Some(9));
+    }
+
+    fn expansion_chain(depth: usize) -> MacroExpansion {
+        assert!(depth >= 1, "chain depth must be positive");
+        let mut expansion = MacroExpansion {
+            macro_decl_name: Some(format!("m{depth}")),
+            span: Box::new(span("src/lib.rs", 0, None)),
+            definition_span: Some(Box::new(span("src/lib.rs", 0, None))),
+        };
+        for level in (1..depth).rev() {
+            expansion = MacroExpansion {
+                macro_decl_name: Some(format!("m{level}")),
+                span: Box::new(span("src/lib.rs", 0, Some(expansion))),
+                definition_span: Some(Box::new(span("src/lib.rs", 0, None))),
+            };
+        }
+        expansion
+    }
+
+    fn chain_view(depth: usize) -> CompilerView {
+        let diagnostic = diagnostic(
+            "E0308",
+            "mismatched types",
+            vec![span("src/lib.rs", 2, Some(expansion_chain(depth)))],
+        );
+        macro_compiler_view(&[&diagnostic])
+    }
+
+    #[test]
+    fn macro_chain_at_the_depth_limit_is_not_truncated() {
+        let view = chain_view(MAX_MACRO_DEPTH);
+        assert_eq!(view.macro_depth, MAX_MACRO_DEPTH);
+        assert!(!view.truncated, "{view:#?}");
+        assert!(!view.fragments.iter().any(|fragment| {
+            fragment.kind == "macroExpansion" && fragment.provenance == ExplainProvenance::Unknown
+        }));
+    }
+
+    #[test]
+    fn macro_chain_past_the_depth_limit_is_truncated() {
+        let view = chain_view(MAX_MACRO_DEPTH + 1);
+        assert!(view.truncated, "{view:#?}");
+        assert!(view.fragments.iter().any(|fragment| {
+            fragment.kind == "macroExpansion"
+                && fragment.provenance == ExplainProvenance::Unknown
+                && fragment.detail.contains("continued past depth")
+        }));
+    }
+
+    #[test]
+    fn missing_expansion_lines_do_not_render_zero_positions() {
+        let view = chain_view(1);
+        let fragment = view
+            .fragments
+            .iter()
+            .find(|fragment| {
+                fragment.kind == "macroExpansion"
+                    && fragment.provenance == ExplainProvenance::ObservedCompiler
+            })
+            .expect("observed expansion fragment");
+        assert!(!fragment.detail.contains(":0"), "{}", fragment.detail);
+        assert!(
+            fragment.detail.contains("src/lib.rs"),
+            "{}",
+            fragment.detail
+        );
+    }
+
+    #[test]
+    fn trait_view_counts_top_level_macro_expansion_depth() {
+        let diagnostic = diagnostic(
+            "E0277",
+            "the trait bound `Wrapper: Clone` is not satisfied",
+            vec![span("src/lib.rs", 2, Some(expansion_chain(3)))],
+        );
+        let view = trait_compiler_view(&[&diagnostic], "src/lib.rs", 2, None, Some("Clone"));
+        assert_eq!(view.macro_depth, 3, "{view:#?}");
+        assert!(view.fragments.iter().any(|fragment| {
+            fragment.kind == "macroExpansion"
+                && fragment.provenance == ExplainProvenance::ObservedCompiler
+        }));
+    }
+
+    #[test]
+    fn inner_cfg_attribute_is_parsed_on_a_single_line() {
+        let source = "#![cfg(feature = \"extra\")]\npub fn gated() {}\n";
+        let attributes = find_cfg_attributes(source, 2);
+        assert_eq!(attributes.len(), 1, "{attributes:#?}");
+        assert_eq!(attributes[0].condition, "feature = \"extra\"");
+        assert!(attributes[0].parsed.is_ok(), "{attributes:#?}");
+
+        let view = cfg_view(
+            "src/lib.rs",
+            2,
+            source,
+            &feature_selection(BTreeSet::new(), &BTreeMap::new(), &[], false, false),
+            None,
+        );
+        assert!(!view.fragments.iter().any(|fragment| {
+            fragment.kind == "cfgCondition" && fragment.detail.contains("multi-line")
+        }));
+    }
+
+    #[test]
+    fn cfg_view_labels_feature_state_unknown_without_metadata() {
+        let view = cfg_view(
+            "src/lib.rs",
+            2,
+            "#[cfg(feature = \"extra\")]\npub fn gated() {}\n",
+            &FeatureSelection::default(),
+            None,
+        );
+        let fragment = view
+            .fragments
+            .iter()
+            .find(|fragment| fragment.kind == "featureState")
+            .expect("feature state fragment");
+        assert_eq!(fragment.provenance, ExplainProvenance::Unknown);
+        assert!(fragment.detail.contains("unknown"), "{}", fragment.detail);
     }
 }

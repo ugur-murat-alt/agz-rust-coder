@@ -617,11 +617,7 @@ pub fn tool_definitions(config: &Config) -> Vec<Tool> {
         tools.push(tool::<ExplainInput, ExplainData>(
             "explain",
             "Explain macro expansion provenance, failed trait obligations, and cfg enablement from bounded compiler and source evidence.",
-            ToolAnnotations::new()
-                .read_only(false)
-                .destructive(false)
-                .idempotent(false)
-                .open_world(true),
+            ToolAnnotations::new().destructive(true).open_world(true),
         ));
     }
     if config.tools.lsp {
@@ -826,9 +822,9 @@ impl RustCoderServer {
         &self,
         input: ExplainInput,
         workspace: WorkspaceRequest,
-        request_cancellation: tokio_util::sync::CancellationToken,
+        cancellation: CancellationBridge,
     ) -> CallToolResult {
-        explain_result(&self.state, input, workspace, request_cancellation).await
+        Box::pin(explain_result(&self.state, input, workspace, cancellation)).await
     }
 
     async fn semantic(
@@ -1316,8 +1312,14 @@ impl ServerHandler for RustCoderServer {
                         )));
                     }
                 };
+                let cancellation =
+                    workspace.cancellation(context.ct.clone(), self.state.shutdown_token());
                 Ok(CallToolResponse::Complete(
-                    self.explain(input, workspace, context.ct.clone()).await,
+                    with_lsp_cancellation(
+                        cancellation.token(),
+                        Box::pin(self.explain(input, workspace, cancellation)),
+                    )
+                    .await,
                 ))
             }
             "symbol" | "references" | "definition" => {
@@ -2603,7 +2605,7 @@ struct AnalyzerEvidence {
     fragments: Vec<explain::ExplainFragment>,
     unsupported: Vec<String>,
     available: bool,
-    bytes: usize,
+    expansion_bytes: usize,
     obligations: Option<explain::RaObligations>,
 }
 
@@ -2624,6 +2626,9 @@ struct SourceBinding {
     source: Option<String>,
     sha256: String,
     revision: Option<String>,
+    /// Workspace-relative path resolved through the authorized root, or `None`
+    /// when the anchor bytes could not be read at all.
+    relative_path: Option<PathBuf>,
 }
 
 fn configuration_data(
@@ -2704,15 +2709,17 @@ fn read_source_binding(authority: &crate::workspace::AuthorizedRoot, path: &str)
         crate::diagnostics::MAX_SOURCE_SNAPSHOT_BYTES,
         || {},
     ) {
-        Ok((_, _, bytes)) => SourceBinding {
+        Ok((_, relative_path, bytes)) => SourceBinding {
             sha256: sha256_hex(&bytes),
             source: String::from_utf8(bytes).ok(),
             revision,
+            relative_path: Some(relative_path),
         },
         Err(_) => SourceBinding {
             source: None,
             sha256: String::new(),
             revision,
+            relative_path: None,
         },
     }
 }
@@ -2804,7 +2811,7 @@ async fn ra_macro_evidence(
                     )
                     .mark_truncated(expansion.truncated),
                 ],
-                bytes: expansion.expansion.len(),
+                expansion_bytes: expansion.expansion.len(),
                 available: true,
                 ..AnalyzerEvidence::default()
             }
@@ -2858,7 +2865,6 @@ async fn ra_obligation_evidence(
                 .collect::<Vec<_>>();
             AnalyzerEvidence {
                 fragments,
-                bytes: obligations.items.iter().map(String::len).sum(),
                 available: true,
                 obligations: Some(obligations),
                 ..AnalyzerEvidence::default()
@@ -2878,32 +2884,6 @@ async fn ra_obligation_evidence(
             ..AnalyzerEvidence::default()
         },
     }
-}
-
-fn metadata_feature_maps(
-    metadata: &cargo_metadata::Metadata,
-) -> (
-    std::collections::BTreeMap<String, Vec<String>>,
-    std::collections::BTreeSet<String>,
-) {
-    let mut declared = std::collections::BTreeMap::new();
-    for package in &metadata.packages {
-        for (name, enables) in &package.features {
-            declared
-                .entry(name.clone())
-                .or_insert_with(Vec::new)
-                .extend(enables.iter().cloned());
-        }
-    }
-    let mut recorded = std::collections::BTreeSet::new();
-    if let Some(resolve) = &metadata.resolve {
-        for node in &resolve.nodes {
-            for feature in &node.features {
-                recorded.insert(feature.as_ref().to_owned());
-            }
-        }
-    }
-    (declared, recorded)
 }
 
 fn render_explain(
@@ -2956,12 +2936,11 @@ async fn explain_result(
     state: &AppState,
     input: ExplainInput,
     workspace: WorkspaceRequest,
-    request_cancellation: tokio_util::sync::CancellationToken,
+    cancellation: CancellationBridge,
 ) -> CallToolResult {
     let path = input.anchor.path.clone();
     let root_epoch = workspace.root.epoch();
     let client_roots = workspace.client_roots.clone();
-    let cancellation = workspace.cancellation(request_cancellation, state.shutdown_token());
     let selection = match select_in_root(&workspace.root) {
         Ok(selection) => selection,
         Err(error) => {
@@ -2985,6 +2964,30 @@ async fn explain_result(
     let mut bounds = explain::ExplainBounds::default();
     let timeout = Duration::from_millis(state.config().rust_analyzer.timeout_ms);
 
+    if binding.relative_path.is_none() {
+        return render_explain(
+            state,
+            &input,
+            anchor_line,
+            &binding,
+            root_epoch,
+            ExplainOutcome {
+                status: "UNAVAILABLE",
+                fragments: Vec::new(),
+                conflicts: Vec::new(),
+                unsupported: Vec::new(),
+                diagnostics_considered: 0,
+                diagnostics_matched: 0,
+                executed: false,
+                configuration_note: String::new(),
+                bounds,
+                reason: format!(
+                    "the anchor source `{path}` could not be read inside the authorized workspace"
+                ),
+            },
+        );
+    }
+
     match input.action {
         ExplainAction::Cfg => {
             let Some(source) = binding.source.as_deref() else {
@@ -3005,7 +3008,7 @@ async fn explain_result(
                         configuration_note: String::new(),
                         bounds,
                         reason: format!(
-                            "the anchor source `{path}` could not be read inside the authorized workspace"
+                            "the anchor source `{path}` is not valid UTF-8 and cannot be evaluated as a cfg anchor"
                         ),
                     },
                 );
@@ -3046,34 +3049,69 @@ async fn explain_result(
             let mut unsupported = Vec::new();
             let (features, configuration_note) = match metadata {
                 Ok(Ok(load)) => {
-                    let (declared, recorded) = metadata_feature_maps(&load.snapshot.metadata);
-                    let features = explain::feature_selection(
-                        recorded,
-                        &declared,
-                        &input.configuration.features,
-                        input.configuration.all_features,
-                        input.configuration.no_default_features,
+                    let anchor_features = binding.relative_path.as_deref().map_or_else(
+                        || {
+                            explain::AnchorFeatures::unknown(
+                                "the anchor path could not be attributed to the read source file",
+                            )
+                        },
+                        |relative| {
+                            explain::anchor_feature_maps(
+                                &load.snapshot.metadata,
+                                authority.path(),
+                                relative,
+                            )
+                        },
                     );
-                    let note = features.note.clone();
-                    (features, note)
+                    match anchor_features.package.clone() {
+                        Some(package) => {
+                            let mut features = explain::feature_selection(
+                                anchor_features.recorded,
+                                &anchor_features.declared,
+                                &input.configuration.features,
+                                input.configuration.all_features,
+                                input.configuration.no_default_features,
+                            );
+                            features.note.push_str(&format!(
+                                "; feature resolution is scoped to workspace package `{package}` and excludes dependency-only features"
+                            ));
+                            let note = features.note.clone();
+                            (features, note)
+                        }
+                        None => {
+                            let features = explain::FeatureSelection {
+                                note: format!(
+                                    "feature enablement is unknown for this anchor: {}",
+                                    anchor_features.note
+                                ),
+                                ..Default::default()
+                            };
+                            let note = features.note.clone();
+                            (features, note)
+                        }
+                    }
                 }
                 Ok(Err(error)) => {
                     unsupported.push(format!("cargo metadata failed: {error}"));
-                    (
-                        explain::FeatureSelection::default(),
-                        format!(
+                    let features = explain::FeatureSelection {
+                        note: format!(
                             "Cargo metadata for this workspace could not be resolved ({error}); feature enablement is unknown"
                         ),
-                    )
+                        ..Default::default()
+                    };
+                    let note = features.note.clone();
+                    (features, note)
                 }
                 Err(error) => {
                     unsupported.push(format!("cargo metadata worker failed: {error}"));
-                    (
-                        explain::FeatureSelection::default(),
-                        format!(
+                    let features = explain::FeatureSelection {
+                        note: format!(
                             "the Cargo metadata worker did not complete ({error}); feature enablement is unknown"
                         ),
-                    )
+                        ..Default::default()
+                    };
+                    let note = features.note.clone();
+                    (features, note)
                 }
             };
             let view = explain::cfg_view(&path, anchor_line, source, &features, None);
@@ -3164,32 +3202,38 @@ async fn explain_result(
             let analyzer_line = anchor_line.unwrap_or(1);
             let analyzer = match state.lsp_manager() {
                 Some(manager) => {
+                    let manager = Arc::clone(manager);
                     let root = authority.path().to_owned();
                     let symbol = input.anchor.symbol.clone();
-                    match input.action {
-                        ExplainAction::Macro => {
-                            ra_macro_evidence(
-                                manager,
-                                root,
-                                path.clone(),
-                                symbol,
-                                analyzer_line,
-                                timeout,
-                            )
-                            .await
+                    let action = input.action;
+                    let anchor_path = path.clone();
+                    with_lsp_authority(Arc::clone(&authority), async move {
+                        match action {
+                            ExplainAction::Macro => {
+                                ra_macro_evidence(
+                                    &manager,
+                                    root,
+                                    anchor_path,
+                                    symbol,
+                                    analyzer_line,
+                                    timeout,
+                                )
+                                .await
+                            }
+                            _ => {
+                                ra_obligation_evidence(
+                                    &manager,
+                                    root,
+                                    anchor_path,
+                                    symbol,
+                                    analyzer_line,
+                                    timeout,
+                                )
+                                .await
+                            }
                         }
-                        _ => {
-                            ra_obligation_evidence(
-                                manager,
-                                root,
-                                path.clone(),
-                                symbol,
-                                analyzer_line,
-                                timeout,
-                            )
-                            .await
-                        }
-                    }
+                    })
+                    .await
                 }
                 None => AnalyzerEvidence {
                     unsupported: vec!["rust-analyzer manager is unavailable".to_owned()],
@@ -3197,7 +3241,6 @@ async fn explain_result(
                 },
             };
             unsupported.extend(analyzer.unsupported.iter().cloned());
-            bounds.expansion_bytes = analyzer.bytes.min(explain::MAX_EXPANSION_BYTES) as u64;
 
             match input.action {
                 ExplainAction::Macro => {
@@ -3205,6 +3248,8 @@ async fn explain_result(
                     bounds.diagnostics_shown = view.shown as u64;
                     bounds.macro_depth_reached = view.macro_depth as u64;
                     bounds.truncated |= view.truncated;
+                    bounds.expansion_bytes =
+                        analyzer.expansion_bytes.min(explain::MAX_EXPANSION_BYTES) as u64;
                     fragments.extend(view.fragments);
                     let observed_expansion = fragments.iter().any(|fragment| {
                         fragment.kind == "macroExpansion"
@@ -3254,6 +3299,7 @@ async fn explain_result(
                         hint.as_deref(),
                     );
                     bounds.diagnostics_shown = view.shown as u64;
+                    bounds.macro_depth_reached = view.macro_depth as u64;
                     bounds.truncated |= view.truncated;
                     fragments.extend(view.fragments);
                     let compiler_failed = fragments.iter().any(|fragment| {
@@ -3262,6 +3308,7 @@ async fn explain_result(
                     });
                     if analyzer.available {
                         let obligations = analyzer.obligations.clone().unwrap_or_default();
+                        bounds.truncated |= obligations.truncated;
                         conflicts =
                             explain::obligation_conflicts(compiler_failed, &obligations, None);
                     }

@@ -38,13 +38,17 @@ sonraki istek için yetki kanıtı olarak yeniden kullanılmaz; yalnız aynı an
 `observedCompiler`, `advisoryAnalyzer`, `inferred` veya `unknown` niteliği
 taşır. `macro`, tanılarda tutulan rustc açılım kaynağını, yetenek varsa
 uzlaşılmış `rust-analyzer/expandMacro` cevabıyla birleştirir; desteklenmeyen
-yetenek `UNSUPPORTED_CAPABILITY` döner. `trait`, compiler'ın bildirdiği
+yetenek `UNSUPPORTED_CAPABILITY` döner ve derinlik sınırına ulaşan açılım
+yürüyüşleri `truncated` olarak işaretlenir. `trait`, compiler'ın bildirdiği
 beklenen/mevcut metnini ve başarısız bound'ları sınırlı kaynak seçkisiyle
 raporlar; Rust Analyzer yükümlülükleri advisory kalır ve çelişkide compiler
-tarafı otoritedir. `cfg`, kaynak `#[cfg]` koşulunu kaydedilmiş seçim için Cargo
-metadata feature'larıyla değerlendirir; denenmemiş target koşulları `unknown`
-kalır. Çalıştırılmayan konfigürasyon doğrulanmış gibi sunulmaz ve
-proc-macro/build-script politikası yükseltilmez.
+tarafı otoritedir. `cfg`, kaynak `#[cfg]` koşulunu anchor'a sahip workspace
+üyesine kapsanmış Cargo metadata feature'larıyla değerlendirir; böylece yalnız
+bağımlılık crate'lerinde etkinleşen feature'lar anchor cfg'sini enabled
+göstermez ve denenmemiş target koşulları `unknown` kalır. Rust Analyzer
+istekleri workspace-code politikasına ve istek/epoch iptaline uyar; başarısızlık
+tipli erişilememe parçalarına düşer. Çalıştırılmayan konfigürasyon doğrulanmış
+gibi sunulmaz ve proc-macro/build-script politikası yükseltilmez.
 
 Tüm araçlar `limits.tool_output_bytes` içinde eşdeğer belirli yapıdaki veri ve
 metin döndürür. Uzak gövdeler ve alıntılar ayrıştırmadan önce sınırlandırılır.
