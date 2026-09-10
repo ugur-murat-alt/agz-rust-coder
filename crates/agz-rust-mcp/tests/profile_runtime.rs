@@ -20,6 +20,7 @@ use agz_rust_mcp::{
     tools::{ProfileBudget, RuntimeCompareRequest, RuntimeCompareService},
     workspace::{ClientRoots, RootGuard, WorkspaceRoot},
 };
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
@@ -240,6 +241,7 @@ fn patch(file: &str, old: &str, new: &str) -> PatchInput {
     }
 }
 
+#[cfg(unix)]
 fn digest(path: &Path) -> String {
     let bytes = fs::read(path).expect("read digest target");
     let mut hasher = Sha256::new();

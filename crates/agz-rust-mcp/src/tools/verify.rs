@@ -4335,13 +4335,15 @@ mod tests {
 
     #[test]
     fn ci_scan_reads_literal_suggestions_only() {
-        let root = std::env::temp_dir().join(format!(
-            "agz-verify-ci-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |value| value.as_nanos())
-        ));
+        let root = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!(
+                "agz-verify-ci-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |value| value.as_nanos())
+            ));
         let workflows = root.join(".github").join("workflows");
         fs::create_dir_all(&workflows).expect("create workflow directory");
         fs::write(
@@ -4367,13 +4369,15 @@ mod tests {
 
     #[test]
     fn ci_scan_is_bounded_and_never_follows_symlinks() {
-        let root = std::env::temp_dir().join(format!(
-            "agz-verify-ci-bounded-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |value| value.as_nanos())
-        ));
+        let root = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!(
+                "agz-verify-ci-bounded-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |value| value.as_nanos())
+            ));
         let workflows = root.join(".github").join("workflows");
         fs::create_dir_all(&workflows).expect("create workflow directory");
         fs::write(
@@ -4505,13 +4509,15 @@ mod tests {
 
     #[test]
     fn bounded_reads_reject_oversized_and_symlinked_manifests() {
-        let root = std::env::temp_dir().join(format!(
-            "agz-verify-manifest-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |value| value.as_nanos())
-        ));
+        let root = fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!(
+                "agz-verify-manifest-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |value| value.as_nanos())
+            ));
         fs::create_dir_all(&root).expect("create fixture root");
         let authority = test_authority(&root);
         let oversized = root.join("Cargo.toml");

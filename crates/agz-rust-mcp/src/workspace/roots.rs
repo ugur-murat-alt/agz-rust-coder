@@ -1047,11 +1047,22 @@ fn normalize_relative(path: &Path) -> PathBuf {
     normalized
 }
 
+/// Resolve an existing directory that is about to become an authorized root.
+///
+/// The path is canonicalized *before* the symlink-component check, then the
+/// resolved path is checked again. An existing root may be reached through a
+/// platform-owned symlink (macOS `/var` -> `/private/var`, which
+/// `std::env::temp_dir` inherits), and only the resolved directory is a stable
+/// authority. Resolution failure is terminal: the lexical path is never used
+/// as a fallback. Re-checking the canonical path keeps the check fail-closed
+/// when a component is replaced during or after resolution; symlinks below an
+/// already authorized root remain rejected by `check_no_symlink_components`
+/// on every relative entry path.
 fn canonical_directory(path: &Path) -> Result<PathBuf, RootError> {
     let absolute = absolute_path(path)?;
-    check_no_symlink_components(&absolute)?;
     let canonical =
         fs::canonicalize(&absolute).map_err(|error| map_path_error(&absolute, error))?;
+    check_no_symlink_components(&canonical)?;
     let metadata = fs::metadata(&canonical).map_err(|error| map_path_error(&canonical, error))?;
     if !metadata.is_dir() {
         return Err(RootError::NotDirectory(canonical));

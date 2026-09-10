@@ -1488,11 +1488,13 @@ mod tests {
 
     impl TestWorkspace {
         fn new(label: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "agz-rust-mcp-context-{label}-{}-{}",
-                std::process::id(),
-                NEXT_ID.fetch_add(1, Ordering::Relaxed)
-            ));
+            let path = std::fs::canonicalize(std::env::temp_dir())
+                .expect("canonical temp directory")
+                .join(format!(
+                    "agz-rust-mcp-context-{label}-{}-{}",
+                    std::process::id(),
+                    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+                ));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(path.join("src")).expect("create src dir");
             std::fs::create_dir_all(path.join("tests")).expect("create tests dir");
