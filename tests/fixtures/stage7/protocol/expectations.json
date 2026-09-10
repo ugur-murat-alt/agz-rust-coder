@@ -5,6 +5,7 @@
   "server": "agz-rust-coder",
   "tools": [
     "check",
+    "profile",
     "audit",
     "crate_lookup",
     "docs",

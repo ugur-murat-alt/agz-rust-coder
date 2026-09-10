@@ -51,6 +51,7 @@ pub struct Config {
     pub docs: DocsConfig,
     pub context: ContextConfig,
     pub limits: LimitsConfig,
+    pub profile: ProfileConfig,
     pub telemetry: TelemetryConfig,
 }
 
@@ -64,6 +65,7 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolConfig {
     pub check: bool,
+    pub profile: bool,
     pub audit: bool,
     pub crate_lookup: bool,
     pub docs: bool,
@@ -181,6 +183,13 @@ pub struct LimitsConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileConfig {
+    pub max_report_bytes: u64,
+    pub max_runs: u64,
+    pub compare_samples: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TelemetryConfig {
     pub enabled: bool,
     pub path: PathBuf,
@@ -203,6 +212,7 @@ impl Config {
             },
             tools: ToolConfig {
                 check: true,
+                profile: true,
                 audit: true,
                 crate_lookup: true,
                 docs: true,
@@ -268,6 +278,11 @@ impl Config {
                 audit_file_bytes: 2_097_152,
                 audit_total_bytes: 67_108_864,
                 audit_findings: 200,
+            },
+            profile: ProfileConfig {
+                max_report_bytes: 4 * 1024 * 1024,
+                max_runs: 4,
+                compare_samples: 3,
             },
             telemetry: TelemetryConfig {
                 enabled: true,
@@ -392,6 +407,19 @@ impl Config {
         )?;
         check_range("context.max_items", self.context.max_items, 1, 256)?;
         check_range(
+            "profile.max_report_bytes",
+            self.profile.max_report_bytes,
+            1_024,
+            67_108_864,
+        )?;
+        check_range("profile.max_runs", self.profile.max_runs, 1, 16)?;
+        check_range(
+            "profile.compare_samples",
+            self.profile.compare_samples,
+            1,
+            8,
+        )?;
+        check_range(
             "limits.tool_output_bytes",
             self.limits.tool_output_bytes,
             512,
@@ -493,6 +521,9 @@ impl Config {
         if self.tools.check {
             names.push("check");
         }
+        if self.tools.profile {
+            names.push("profile");
+        }
         if self.tools.audit {
             names.push("audit");
         }
@@ -550,6 +581,8 @@ pub struct CliOptions {
     pub allow_dependency_root: Option<Vec<PathBuf>>,
     #[arg(long = "tools-check")]
     pub tools_check: Option<bool>,
+    #[arg(long = "tools-profile")]
+    pub tools_profile: Option<bool>,
     #[arg(long = "tools-audit")]
     pub tools_audit: Option<bool>,
     #[arg(long = "tools-crate-lookup")]
@@ -622,6 +655,12 @@ pub struct CliOptions {
     pub context_capsule_ttl_ms: Option<u64>,
     #[arg(long = "context-max-items")]
     pub context_max_items: Option<u64>,
+    #[arg(long = "profile-max-report-bytes")]
+    pub profile_max_report_bytes: Option<u64>,
+    #[arg(long = "profile-max-runs")]
+    pub profile_max_runs: Option<u64>,
+    #[arg(long = "profile-compare-samples")]
+    pub profile_compare_samples: Option<u64>,
     #[arg(long = "max-rename-edits")]
     pub max_rename_edits: Option<u64>,
     #[arg(long = "max-refactor-edits")]
@@ -680,6 +719,7 @@ struct FileConfig {
     docs: Option<FileDocsConfig>,
     context: Option<FileContextConfig>,
     limits: Option<FileLimitsConfig>,
+    profile: Option<FileProfileConfig>,
     telemetry: Option<FileTelemetryConfig>,
 }
 
@@ -694,6 +734,7 @@ struct FileServerConfig {
 #[serde(deny_unknown_fields)]
 struct FileToolConfig {
     check: Option<bool>,
+    profile: Option<bool>,
     audit: Option<bool>,
     crate_lookup: Option<bool>,
     docs: Option<bool>,
@@ -818,6 +859,14 @@ struct FileLimitsConfig {
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
+struct FileProfileConfig {
+    max_report_bytes: Option<u64>,
+    max_runs: Option<u64>,
+    compare_samples: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct FileTelemetryConfig {
     enabled: Option<bool>,
     path: Option<PathBuf>,
@@ -848,6 +897,7 @@ fn apply_file(config: &mut Config, file: FileConfig) {
     }
     if let Some(tools) = file.tools {
         apply_opt(&mut config.tools.check, tools.check);
+        apply_opt(&mut config.tools.profile, tools.profile);
         apply_opt(&mut config.tools.audit, tools.audit);
         apply_opt(&mut config.tools.crate_lookup, tools.crate_lookup);
         apply_opt(&mut config.tools.docs, tools.docs);
@@ -955,6 +1005,14 @@ fn apply_file(config: &mut Config, file: FileConfig) {
         );
         apply_opt(&mut config.limits.audit_findings, limits.audit_findings);
     }
+    if let Some(profile) = file.profile {
+        apply_opt(
+            &mut config.profile.max_report_bytes,
+            profile.max_report_bytes,
+        );
+        apply_opt(&mut config.profile.max_runs, profile.max_runs);
+        apply_opt(&mut config.profile.compare_samples, profile.compare_samples);
+    }
     if let Some(telemetry) = file.telemetry {
         apply_opt(&mut config.telemetry.enabled, telemetry.enabled);
         apply_opt(&mut config.telemetry.path, telemetry.path);
@@ -985,6 +1043,7 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
             config.server.allow_dependency_roots = parse_path_list(value).map_err(invalid)?;
         }
         "TOOLS__CHECK" => config.tools.check = parse_bool(value).map_err(invalid)?,
+        "TOOLS__PROFILE" => config.tools.profile = parse_bool(value).map_err(invalid)?,
         "TOOLS__AUDIT" => config.tools.audit = parse_bool(value).map_err(invalid)?,
         "TOOLS__CRATE_LOOKUP" => config.tools.crate_lookup = parse_bool(value).map_err(invalid)?,
         "TOOLS__DOCS" => config.tools.docs = parse_bool(value).map_err(invalid)?,
@@ -1058,6 +1117,13 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
         }
         "CONTEXT__MAX_ITEMS" => {
             config.context.max_items = parse_u64(value).map_err(invalid)?;
+        }
+        "PROFILE__MAX_REPORT_BYTES" => {
+            config.profile.max_report_bytes = parse_u64(value).map_err(invalid)?;
+        }
+        "PROFILE__MAX_RUNS" => config.profile.max_runs = parse_u64(value).map_err(invalid)?,
+        "PROFILE__COMPARE_SAMPLES" => {
+            config.profile.compare_samples = parse_u64(value).map_err(invalid)?;
         }
         "LIMITS__MAX_RENAME_EDITS" => {
             config.limits.max_rename_edits = parse_u64(value).map_err(invalid)?;
@@ -1135,6 +1201,7 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
         value.clone_into(&mut config.server.allow_dependency_roots);
     }
     apply_opt(&mut config.tools.check, cli.tools_check);
+    apply_opt(&mut config.tools.profile, cli.tools_profile);
     apply_opt(&mut config.tools.audit, cli.tools_audit);
     apply_opt(&mut config.tools.crate_lookup, cli.tools_crate_lookup);
     apply_opt(&mut config.tools.docs, cli.tools_docs);
@@ -1203,6 +1270,15 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
         cli.context_capsule_ttl_ms,
     );
     apply_opt(&mut config.context.max_items, cli.context_max_items);
+    apply_opt(
+        &mut config.profile.max_report_bytes,
+        cli.profile_max_report_bytes,
+    );
+    apply_opt(&mut config.profile.max_runs, cli.profile_max_runs);
+    apply_opt(
+        &mut config.profile.compare_samples,
+        cli.profile_compare_samples,
+    );
     apply_opt(&mut config.limits.max_rename_edits, cli.max_rename_edits);
     apply_opt(
         &mut config.limits.max_refactor_edits,
@@ -1596,6 +1672,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.gate.hard_timeout_ms, 7_000);
+    }
+
+    #[test]
+    fn profile_config_accepts_toml_environment_and_cli_layers() {
+        let mut cli = cli();
+        cli.profile_max_runs = Some(3);
+        let config = Config::from_sources(
+            "/workspace",
+            Some(
+                "[tools]\nprofile = false\n[profile]\nmax_report_bytes = 8192\ncompare_samples = 2\n",
+            ),
+            [("AGZ_RUST_CODER_PROFILE__MAX_RUNS", "5")],
+            &cli,
+        )
+        .unwrap();
+        assert!(!config.tools.profile);
+        assert!(!config.enabled_tool_names().contains(&"profile"));
+        assert_eq!(config.profile.max_report_bytes, 8_192);
+        assert_eq!(config.profile.max_runs, 3);
+        assert_eq!(config.profile.compare_samples, 2);
+
+        let out_of_range = Config::from_sources(
+            "/workspace",
+            Some("[profile]\nmax_report_bytes = 1\n"),
+            std::iter::empty::<(String, String)>(),
+            &cli,
+        );
+        assert!(matches!(
+            out_of_range,
+            Err(ConfigError::InvalidField { .. })
+        ));
     }
 
     #[test]

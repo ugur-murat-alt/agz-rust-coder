@@ -10,9 +10,10 @@ pub use handler::{
     AuditData, AuditInput, AuditOutput, ChangeData, ChangeInput, ChangeOutput, CheckData,
     CheckDetail, CheckInput, CheckOutput, CheckTarget, ContextInput, ContextOutput,
     CrateLookupData, CrateLookupInput, CrateLookupOutput, DocsData, DocsInput, DocsOutput,
-    EditData, EditOutput, HierarchyDirection, HierarchyInput, ImplementationsInput, RefactorInput,
-    RenameInput, RustCoderServer, SemanticData, SemanticInput, SemanticOutput, SymbolInput,
-    SymbolsInput, tool_definitions,
+    EditData, EditOutput, HierarchyDirection, HierarchyInput, ImplementationsInput, ProfileAction,
+    ProfileBudgetInput, ProfileConfigurationInput, ProfileData, ProfileInput, ProfileOutput,
+    RefactorInput, RenameInput, RustCoderServer, SemanticData, SemanticInput, SemanticOutput,
+    SymbolInput, SymbolsInput, tool_definitions,
 };
 pub use progress::ProgressReporter;
 pub use response::{ToolData, ToolOutput, WorkspaceInfo};
@@ -40,7 +41,7 @@ use crate::{
     lsp::RustAnalyzerManager,
     process::{ProcessJournal, ProcessSupervisor},
     telemetry::ActivityLog,
-    tools::{AuditLimits, AuditService, CheckService},
+    tools::{AuditLimits, AuditService, CheckService, ProfileService},
     workspace::{AuthorizedRoot, MetadataService, RootGuard},
 };
 use admission::AdmissionController;
@@ -57,6 +58,7 @@ pub struct AppState {
     /// Present only when `tools.change` is enabled so a disabled tool never
     /// validates, creates, or touches the scratch directory at startup.
     change: Option<Arc<ChangeService>>,
+    profile: ProfileService,
     audit: AuditService,
     docs: Arc<DocsResolver>,
     metadata: Arc<MetadataService>,
@@ -156,6 +158,7 @@ impl AppState {
             usize::try_from(config.context.max_capsules).unwrap_or(usize::MAX),
             Duration::from_millis(config.context.capsule_ttl_ms),
         ));
+        let profile = ProfileService::new(config.clone(), Arc::clone(&check), processes.clone());
         let audit = AuditService::new(AuditLimits::from_u64(
             config.limits.audit_files,
             config.limits.audit_file_bytes,
@@ -178,6 +181,7 @@ impl AppState {
             processes: processes.clone(),
             check,
             change,
+            profile,
             audit,
             docs: Arc::new(DocsResolver::with_authorized_supervisor(processes)),
             metadata,
@@ -302,6 +306,10 @@ impl AppState {
 
     pub(crate) fn change_service(&self) -> Option<&Arc<ChangeService>> {
         self.change.as_ref()
+    }
+
+    pub(crate) fn profile_service(&self) -> &ProfileService {
+        &self.profile
     }
 
     pub(crate) fn audit_service(&self) -> &AuditService {

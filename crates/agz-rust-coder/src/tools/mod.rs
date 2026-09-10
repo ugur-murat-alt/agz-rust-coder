@@ -7,6 +7,7 @@ pub mod context;
 pub mod crate_lookup;
 pub mod edits;
 pub mod navigation;
+pub mod profile;
 pub mod symbol;
 
 pub use audit::{
@@ -29,6 +30,13 @@ pub use edits::{
 pub use navigation::{
     DocumentSymbolEntry, NavigationLocation, document_symbols, symbol_hierarchy,
     symbol_implementations,
+};
+pub use profile::{
+    BudgetSnapshot, ChangeBinding, CompareRequest, ComparisonSide, ConditionSnapshot,
+    ConditionValue, ConfigurationSnapshot, CriticalPath, CriticalPathUnit, PhaseDelta,
+    ProfileBudget, ProfileComparison, ProfileExplanation, ProfilePhase, ProfileRebuildReport,
+    ProfileRecord, ProfileRequest, ProfileService, TimingsReport, build_critical_path,
+    extract_timing_units,
 };
 pub use symbol::{
     DefinitionLocation, LspPosition, LspRange, SymbolEntry, ToolError, display_path,

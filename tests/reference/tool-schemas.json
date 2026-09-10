@@ -24,6 +24,33 @@
     "required": ["dir"],
     "additionalProperties": false
   },
+  "profile": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["build_analyze", "build_compare"]
+      },
+      "dir": {
+        "type": "string",
+        "description": "Absolute path to a Rust project/workspace, or to a parent containing one unambiguous nested Cargo project."
+      },
+      "configuration": {
+        "type": "object"
+      },
+      "changeId": {
+        "type": "string"
+      },
+      "baselineEvidence": {
+        "type": "array"
+      },
+      "budget": {
+        "type": "object"
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  },
   "audit": {
     "type": "object",
     "properties": {

@@ -119,6 +119,7 @@ impl CheckService {
                 accepted_at,
             );
         }
+        let admission_ms = accepted_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
         emit_progress(
             progress.as_ref(),
@@ -128,6 +129,7 @@ impl CheckService {
             false,
         );
         let deadline = accepted_at + Duration::from_millis(self.config.gate.hard_timeout_ms);
+        let preflight_started = Instant::now();
         let requested_cancellation = cancellation.unwrap_or_default();
         let cancellation = CancellationToken::new();
         if requested_cancellation.is_cancelled() || self.shutdown.is_cancelled() {
@@ -172,7 +174,14 @@ impl CheckService {
             heartbeat.abort();
         }
         let prepared = match prepared {
-            Ok(prepared) => prepared,
+            Ok(mut prepared) => {
+                prepared.admission_ms = admission_ms;
+                prepared.preflight_ms = preflight_started
+                    .elapsed()
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64;
+                prepared
+            }
             Err((status, message)) => {
                 cancellation_forwarder.abort();
                 return terminal_evidence(&request, status, message, accepted_at);
@@ -437,6 +446,8 @@ impl CheckService {
             identity,
             scope: scope.evidence,
             metadata_cache: format!("{:?}", load.cache).to_ascii_lowercase(),
+            admission_ms: 0,
+            preflight_ms: 0,
         })
     }
 
@@ -465,6 +476,8 @@ struct PreparedCheck {
     identity: InputIdentity,
     scope: GateScope,
     metadata_cache: String,
+    admission_ms: u64,
+    preflight_ms: u64,
 }
 
 struct CheckScope {
@@ -817,6 +830,9 @@ async fn execute_prepared(
                     build_scripts: build.build_scripts as u64,
                     linked_units: build.linked_units as u64,
                     partial: telemetry_partial,
+                    rebuilt_packages: build.rebuilt_packages,
+                    build_script_packages: build.build_script_packages,
+                    packages_truncated: build.packages_truncated,
                 }),
         };
         status = if step.cancelled {
@@ -949,6 +965,8 @@ async fn execute_prepared(
             .as_millis()
             .min(u128::from(u64::MAX)) as u64,
         queue_ms: context.timing.queue_ms,
+        admission_ms: prepared.admission_ms,
+        preflight_ms: prepared.preflight_ms,
         first_diagnostic_ms: request_first_diagnostic_ms,
         requested_dir: request
             .directory

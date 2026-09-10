@@ -377,6 +377,15 @@ pub struct CargoBuildTelemetry {
     pub build_scripts: u64,
     pub linked_units: u64,
     pub partial: bool,
+    /// Display names of observed non-fresh compilation units, bounded and deduplicated.
+    #[serde(default)]
+    pub rebuilt_packages: Vec<String>,
+    /// Display names of packages whose build script was executed, bounded.
+    #[serde(default)]
+    pub build_script_packages: Vec<String>,
+    /// True when at least one bounded package list dropped an entry.
+    #[serde(default)]
+    pub packages_truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -439,6 +448,14 @@ pub struct GateEvidence {
     pub finished_at: Option<String>,
     pub response_ms: u64,
     pub queue_ms: u64,
+    /// Time from request acceptance through validation and scheduler admission,
+    /// before the metadata/identity preflight starts.
+    #[serde(default)]
+    pub admission_ms: u64,
+    /// Metadata, identity, scope, and authorization preflight duration. This is
+    /// measured separately and is never merged into Cargo process time.
+    #[serde(default)]
+    pub preflight_ms: u64,
     pub first_diagnostic_ms: Option<u64>,
     pub requested_dir: PathBuf,
     pub workspace_root: Option<PathBuf>,
@@ -470,6 +487,8 @@ impl GateEvidence {
             finished_at: None,
             response_ms: 0,
             queue_ms: 0,
+            admission_ms: 0,
+            preflight_ms: 0,
             first_diagnostic_ms: None,
             requested_dir: request.directory.clone().unwrap_or_default(),
             workspace_root: None,
