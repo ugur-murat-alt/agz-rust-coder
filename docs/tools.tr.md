@@ -19,6 +19,7 @@ işaretini korur.
 | `audit` | Advisory scanner | Yetkili Rust dosyalarını okur | Sınırlı bulgular ve atlanan dosya nedenleri. |
 | `crate_lookup` | crates.io | Sınırlı HTTPS isteği | `FOUND`, `NOT_FOUND`, `VERSION_MISMATCH` veya `UNAVAILABLE`. |
 | `docs` | rustdoc/docs.rs | Cache, ağ veya yerel `cargo doc` kullanabilir | Tam sürüm alıntısı ve kaynak bilgisi ya da tipli erişilememe. |
+| `explain` | rustc/Cargo ve advisory Rust Analyzer | `macro`/`trait` için sınırlı Cargo check çalıştırır; `cfg` yalnız metadata kullanır | Kaynak nitelikli parçalar; eksik açılım eşlemesi `unknown` kalır, tahmin edilmez. |
 | `symbol` | Rust Analyzer | Workspace-code politikasına bağlı | Hover metni ve seçilen konum. |
 | `references` | Rust Analyzer | Workspace-code politikasına bağlı | Sınırlı referans konumları. |
 | `definition` | Rust Analyzer | Workspace-code politikasına bağlı | Seçilen tanım konumu. |
@@ -32,6 +33,18 @@ işaretini korur.
 Biçimlendirme yalnız kontrol kipinde çalışır. Tamamlanmış açık bir doğrulama daha
 sonraki istek için yetki kanıtı olarak yeniden kullanılmaz; yalnız aynı anda
 çalışan özdeş işe katılım mümkündür.
+
+`explain` eylemleri `macro`, `trait` ve `cfg` değerleridir. Her parça
+`observedCompiler`, `advisoryAnalyzer`, `inferred` veya `unknown` niteliği
+taşır. `macro`, tanılarda tutulan rustc açılım kaynağını, yetenek varsa
+uzlaşılmış `rust-analyzer/expandMacro` cevabıyla birleştirir; desteklenmeyen
+yetenek `UNSUPPORTED_CAPABILITY` döner. `trait`, compiler'ın bildirdiği
+beklenen/mevcut metnini ve başarısız bound'ları sınırlı kaynak seçkisiyle
+raporlar; Rust Analyzer yükümlülükleri advisory kalır ve çelişkide compiler
+tarafı otoritedir. `cfg`, kaynak `#[cfg]` koşulunu kaydedilmiş seçim için Cargo
+metadata feature'larıyla değerlendirir; denenmemiş target koşulları `unknown`
+kalır. Çalıştırılmayan konfigürasyon doğrulanmış gibi sunulmaz ve
+proc-macro/build-script politikası yükseltilmez.
 
 Tüm araçlar `limits.tool_output_bytes` içinde eşdeğer belirli yapıdaki veri ve
 metin döndürür. Uzak gövdeler ve alıntılar ayrıştırmadan önce sınırlandırılır.
@@ -77,6 +90,7 @@ platformun path-list ayırıcısını kullanır.
 | `tools.audit` | `true` | `audit` kaydı. |
 | `tools.crate_lookup` | `true` | `crate_lookup` kaydı. |
 | `tools.docs` | `true` | `docs` kaydı. |
+| `tools.explain` | `true` | `explain` kaydı. |
 | `tools.lsp` | `true` | Semantik gezinme araçları kaydı. |
 | `tools.rename` | `true` | LSP açıksa `rename` kaydı. |
 | `tools.refactor` | `true` | LSP açıksa `refactor` kaydı. |

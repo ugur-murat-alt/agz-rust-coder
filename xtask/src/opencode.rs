@@ -22,11 +22,12 @@ use crate::child_process;
 
 const EXPECTED_OPENCODE_VERSION: &str = "opencode2 v0.0.0-beta-18743";
 const FAKE_PROVIDER_MODEL: &str = "stage7-fake-model";
-const MCP_TOOL_NAMES: [&str; 12] = [
+const MCP_TOOL_NAMES: [&str; 13] = [
     "check",
     "audit",
     "crate_lookup",
     "docs",
+    "explain",
     "symbol",
     "references",
     "definition",

@@ -24,6 +24,7 @@ fn main() {
             .then_some("textDocument/hover")
     });
     let message_error = executable.contains("message-retry");
+    let expand_macro = has_mode("--expand-macro", "expand-macro");
     let barrier = executable.contains("barrier");
     let log_path = args
         .iter()
@@ -59,6 +60,27 @@ fn main() {
                 &id,
                 -32_602,
                 "No references found at position",
+            ));
+            continue;
+        }
+        if method == "initialize" && expand_macro {
+            send_raw(&response(
+                &id,
+                r#"{"capabilities":{"hoverProvider":true,"textDocumentSync":2,"experimental":{"expandMacro":true,"failedObligations":true}}}"#,
+            ));
+            continue;
+        }
+        if method == "rust-analyzer/expandMacro" {
+            send_raw(&response(
+                &id,
+                r#"{"name":"mock_macro","expansion":"pub fn mock_fn() -> i32 { 42 }\n"}"#,
+            ));
+            continue;
+        }
+        if method == "rust-analyzer/getFailedObligations" {
+            send_raw(&response(
+                &id,
+                r#"{"failedObligations":[{"obligation":"mock_fn: MockTrait"}]}"#,
             ));
             continue;
         }

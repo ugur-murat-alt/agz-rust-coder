@@ -18,6 +18,7 @@ Failed compilations are revalidated before offering edit/context evidence. Trunc
 | `audit` | Advisory scanner | Reads authorized Rust files | Bounded findings and skipped-file reasons. |
 | `crate_lookup` | crates.io | Bounded HTTPS request | `FOUND`, `NOT_FOUND`, `VERSION_MISMATCH`, or `UNAVAILABLE`. |
 | `docs` | rustdoc/docs.rs | May use cache, network, or local `cargo doc` | Exact-version excerpt and provenance or typed unavailability. |
+| `explain` | rustc/Cargo plus advisory Rust Analyzer | Runs a bounded Cargo check for `macro`/`trait`; metadata-only for `cfg` | Provenance-labelled fragments; missing expansion mapping is `unknown`, never guessed. |
 | `symbol` | Rust Analyzer | Depends on workspace-code policy | Hover text and selected location. |
 | `references` | Rust Analyzer | Depends on workspace-code policy | Bounded reference locations. |
 | `definition` | Rust Analyzer | Depends on workspace-code policy | Selected definition location. |
@@ -30,6 +31,19 @@ Failed compilations are revalidated before offering edit/context evidence. Trunc
 `check` targets are `check`, `clippy`, `test`, `doc`, `fmt`, and `all`. Formatting
 uses check-only behavior. A completed explicit validation is never reused as
 authority for a later request; only an active identical job may be joined.
+
+`explain` actions are `macro`, `trait`, and `cfg`. Every fragment carries
+`observedCompiler`, `advisoryAnalyzer`, `inferred`, or `unknown` provenance.
+`macro` combines rustc expansion provenance retained in diagnostics with a
+negotiated `rust-analyzer/expandMacro` response when the capability exists;
+unsupported capabilities return `UNSUPPORTED_CAPABILITY`. `trait` reports
+compiler expected/found text and failed bounds with a bounded source selection;
+Rust Analyzer failed obligations are advisory and disagreements keep the
+compiler side authoritative. `cfg` evaluates the source `#[cfg]` condition
+against Cargo metadata features for the recorded selection and answers `unknown`
+for target predicates that were not probed. Unsupported configurations are
+never presented as verified, and proc-macro/build-script policy is never
+elevated.
 
 All tools return equivalent structured and text representations within
 `limits.tool_output_bytes`. Remote bodies and excerpts are bounded before
@@ -77,6 +91,7 @@ use the platform path-list separator.
 | `tools.audit` | `true` | Register `audit`. |
 | `tools.crate_lookup` | `true` | Register `crate_lookup`. |
 | `tools.docs` | `true` | Register `docs`. |
+| `tools.explain` | `true` | Register `explain`. |
 | `tools.lsp` | `true` | Register semantic navigation tools. |
 | `tools.rename` | `true` | Register `rename` when LSP is enabled. |
 | `tools.refactor` | `true` | Register `refactor` when LSP is enabled. |

@@ -88,6 +88,16 @@ impl CheckService {
         self.scheduler.active_count()
     }
 
+    /// Cargo metadata service bound to the same authorization guard.
+    pub fn metadata_service(&self) -> &Arc<MetadataService> {
+        &self.metadata
+    }
+
+    /// Resolved Cargo executable used by this service.
+    pub fn cargo_path(&self) -> &Path {
+        &self.cargo
+    }
+
     pub async fn run(
         &self,
         request: GateRequest,
@@ -1175,6 +1185,20 @@ fn convert_span(span: &crate::diagnostics::DiagnosticSpan) -> crate::gate::Diagn
         label: span.label.clone(),
         suggested_replacement: span.suggested_replacement.clone(),
         suggestion_applicability: span.suggestion_applicability.map(convert_applicability),
+        expansion: span.expansion.as_ref().map(convert_expansion),
+    }
+}
+
+fn convert_expansion(
+    expansion: &crate::diagnostics::MacroExpansion,
+) -> crate::gate::MacroExpansion {
+    crate::gate::MacroExpansion {
+        macro_decl_name: expansion.macro_decl_name.clone(),
+        span: Box::new(convert_span(&expansion.span)),
+        definition_span: expansion
+            .definition_span
+            .as_deref()
+            .map(|span| Box::new(convert_span(span))),
     }
 }
 

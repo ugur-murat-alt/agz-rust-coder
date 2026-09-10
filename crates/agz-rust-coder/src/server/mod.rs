@@ -8,9 +8,10 @@ mod tasks;
 pub use handler::{
     AuditData, AuditInput, AuditOutput, CheckData, CheckDetail, CheckInput, CheckOutput,
     CheckTarget, CrateLookupData, CrateLookupInput, CrateLookupOutput, DocsData, DocsInput,
-    DocsOutput, EditData, EditOutput, HierarchyDirection, HierarchyInput, ImplementationsInput,
-    RefactorInput, RenameInput, RustCoderServer, SemanticData, SemanticInput, SemanticOutput,
-    SymbolInput, SymbolsInput, tool_definitions,
+    DocsOutput, EditData, EditOutput, ExplainAction, ExplainAnchorInput, ExplainConfigurationData,
+    ExplainData, ExplainInput, ExplainOutput, ExplainSourceBindingData, HierarchyDirection,
+    HierarchyInput, ImplementationsInput, RefactorInput, RenameInput, RustCoderServer,
+    SemanticData, SemanticInput, SemanticOutput, SymbolInput, SymbolsInput, tool_definitions,
 };
 pub use progress::ProgressReporter;
 pub use response::{ToolData, ToolOutput, WorkspaceInfo};

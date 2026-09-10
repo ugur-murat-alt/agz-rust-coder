@@ -155,5 +155,155 @@
     },
     "required": ["dir", "path", "symbol"],
     "additionalProperties": false
+  },
+  "explain": {
+    "$defs": {
+      "ExplainAction": {
+        "enum": [
+          "macro",
+          "trait",
+          "cfg"
+        ],
+        "type": "string"
+      },
+      "ExplainAnchorInput": {
+        "additionalProperties": false,
+        "properties": {
+          "line": {
+            "default": null,
+            "description": "Optional 1-based anchor line.",
+            "format": "uint32",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "Workspace-relative or absolute path of the anchor source file.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "symbol": {
+            "default": null,
+            "description": "Optional symbol on the anchor line; resolves the anchor column/line.",
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "TestRunner": {
+        "enum": [
+          "cargo",
+          "nextest"
+        ],
+        "type": "string"
+      },
+      "ValidationOptions": {
+        "additionalProperties": false,
+        "properties": {
+          "allFeatures": {
+            "default": false,
+            "type": "boolean"
+          },
+          "context": {
+            "default": false,
+            "description": "Add bounded source excerpts and resolved dependency versions to diagnostics.",
+            "type": "boolean"
+          },
+          "features": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "noDefaultFeatures": {
+            "default": false,
+            "type": "boolean"
+          },
+          "runner": {
+            "$ref": "#/$defs/TestRunner",
+            "default": "cargo"
+          },
+          "sccache": {
+            "default": false,
+            "description": "Use an already configured, trusted sccache wrapper. Never replaces a wrapper.",
+            "type": "boolean"
+          },
+          "targetTriple": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "testFilter": {
+            "default": null,
+            "description": "A test-name substring, never a flag or an arbitrary filter expression.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "action": {
+        "$ref": "#/$defs/ExplainAction",
+        "description": "What to explain: macro expansion provenance, trait obligations, or cfg."
+      },
+      "anchor": {
+        "$ref": "#/$defs/ExplainAnchorInput"
+      },
+      "configuration": {
+        "$ref": "#/$defs/ValidationOptions",
+        "default": {
+          "allFeatures": false,
+          "context": false,
+          "features": [],
+          "noDefaultFeatures": false,
+          "runner": "cargo",
+          "sccache": false,
+          "targetTriple": null,
+          "testFilter": null
+        },
+        "description": "Recorded Cargo feature/target selection for this explanation."
+      },
+      "diagnosticId": {
+        "default": null,
+        "description": "Optional rustc diagnostic code, for example E0308 or E0277.",
+        "minLength": 1,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "dir": {
+        "default": null,
+        "minLength": 1,
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "action",
+      "anchor"
+    ],
+    "type": "object"
   }
 }

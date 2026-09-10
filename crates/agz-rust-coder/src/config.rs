@@ -66,6 +66,7 @@ pub struct ToolConfig {
     pub crate_lookup: bool,
     pub docs: bool,
     pub lsp: bool,
+    pub explain: bool,
     pub rename: bool,
     pub refactor: bool,
 }
@@ -185,6 +186,7 @@ impl Config {
                 crate_lookup: true,
                 docs: true,
                 lsp: true,
+                explain: true,
                 rename: true,
                 refactor: true,
             },
@@ -447,6 +449,9 @@ impl Config {
         if self.tools.docs {
             names.push("docs");
         }
+        if self.tools.explain {
+            names.push("explain");
+        }
         if self.tools.lsp {
             names.extend([
                 "symbol",
@@ -497,6 +502,8 @@ pub struct CliOptions {
     pub tools_docs: Option<bool>,
     #[arg(long = "tools-lsp")]
     pub tools_lsp: Option<bool>,
+    #[arg(long = "tools-explain")]
+    pub tools_explain: Option<bool>,
     #[arg(long = "tools-rename")]
     pub tools_rename: Option<bool>,
     #[arg(long = "tools-refactor")]
@@ -613,6 +620,7 @@ struct FileToolConfig {
     crate_lookup: Option<bool>,
     docs: Option<bool>,
     lsp: Option<bool>,
+    explain: Option<bool>,
     rename: Option<bool>,
     refactor: Option<bool>,
 }
@@ -746,6 +754,7 @@ fn apply_file(config: &mut Config, file: FileConfig) {
         apply_opt(&mut config.tools.crate_lookup, tools.crate_lookup);
         apply_opt(&mut config.tools.docs, tools.docs);
         apply_opt(&mut config.tools.lsp, tools.lsp);
+        apply_opt(&mut config.tools.explain, tools.explain);
         apply_opt(&mut config.tools.rename, tools.rename);
         apply_opt(&mut config.tools.refactor, tools.refactor);
     }
@@ -868,6 +877,7 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
         "TOOLS__CRATE_LOOKUP" => config.tools.crate_lookup = parse_bool(value).map_err(invalid)?,
         "TOOLS__DOCS" => config.tools.docs = parse_bool(value).map_err(invalid)?,
         "TOOLS__LSP" => config.tools.lsp = parse_bool(value).map_err(invalid)?,
+        "TOOLS__EXPLAIN" => config.tools.explain = parse_bool(value).map_err(invalid)?,
         "TOOLS__RENAME" => config.tools.rename = parse_bool(value).map_err(invalid)?,
         "TOOLS__REFACTOR" => config.tools.refactor = parse_bool(value).map_err(invalid)?,
         "CARGO__PATH" => config.cargo.path = Some(nonempty_path(value).map_err(invalid)?),
@@ -989,6 +999,7 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
     apply_opt(&mut config.tools.crate_lookup, cli.tools_crate_lookup);
     apply_opt(&mut config.tools.docs, cli.tools_docs);
     apply_opt(&mut config.tools.lsp, cli.tools_lsp);
+    apply_opt(&mut config.tools.explain, cli.tools_explain);
     apply_opt(&mut config.tools.rename, cli.tools_rename);
     apply_opt(&mut config.tools.refactor, cli.tools_refactor);
     if let Some(path) = cli.cargo_path.clone() {
