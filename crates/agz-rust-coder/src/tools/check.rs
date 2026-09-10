@@ -1,7 +1,8 @@
 //! Authoritative Cargo validation service.
 
 use std::{
-    ffi::OsString,
+    collections::BTreeMap,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -26,8 +27,8 @@ use crate::{
     },
     process::{ProcessRunOptions, ProcessSupervisor},
     workspace::{
-        AuthorizedRoot, GitProbe, IdentityError, IdentityInput, IdentityLimits, InputIdentity,
-        MetadataService, RootGuard, WorkspaceRoot, select_workspace,
+        AuthorizedRoot, ClientRoots, GitProbe, IdentityError, IdentityInput, IdentityLimits,
+        InputIdentity, MetadataService, RootGuard, WorkspaceRoot, select_workspace,
     },
 };
 
@@ -88,6 +89,16 @@ impl CheckService {
         self.scheduler.active_count()
     }
 
+    /// Cargo metadata service bound to the same authorization guard.
+    pub fn metadata_service(&self) -> &Arc<MetadataService> {
+        &self.metadata
+    }
+
+    /// Resolved Cargo executable used by this service.
+    pub fn cargo_path(&self) -> &Path {
+        &self.cargo
+    }
+
     pub async fn run(
         &self,
         request: GateRequest,
@@ -95,6 +106,12 @@ impl CheckService {
         cancellation: Option<CancellationToken>,
     ) -> GateEvidence {
         let accepted_at = Instant::now();
+        let selection = match self.select_cargo(request.toolchain.as_deref()) {
+            Ok(selection) => selection,
+            Err(message) => {
+                return terminal_evidence(&request, GateStatus::Inconclusive, message, accepted_at);
+            }
+        };
         if let Err(message) = request.options.validate(request.target) {
             return terminal_evidence(&request, GateStatus::Inconclusive, message, accepted_at);
         }
@@ -119,6 +136,7 @@ impl CheckService {
                 accepted_at,
             );
         }
+        let admission_ms = accepted_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
         emit_progress(
             progress.as_ref(),
@@ -128,6 +146,7 @@ impl CheckService {
             false,
         );
         let deadline = accepted_at + Duration::from_millis(self.config.gate.hard_timeout_ms);
+        let preflight_started = Instant::now();
         let requested_cancellation = cancellation.unwrap_or_default();
         let cancellation = CancellationToken::new();
         if requested_cancellation.is_cancelled() || self.shutdown.is_cancelled() {
@@ -142,6 +161,13 @@ impl CheckService {
             spawn_preflight_heartbeat(progress.clone(), cancellation.clone(), accepted_at);
         let service = self.clone();
         let prepare_request = request.clone();
+        let prepare_cargo = selection.cargo.clone();
+        let prepare_selector = if selection.selector {
+            request.toolchain.clone()
+        } else {
+            None
+        };
+        let prepare_binding = selection.binding.clone();
         let metadata_control = crate::workspace::metadata::MetadataControl::new(
             deadline,
             cancellation.clone(),
@@ -156,7 +182,14 @@ impl CheckService {
             tokio::runtime::Handle::current(),
         );
         let preparing = tokio::task::spawn_blocking(move || {
-            service.prepare(&prepare_request, &metadata_control, &git)
+            service.prepare(
+                &prepare_request,
+                &metadata_control,
+                &git,
+                &prepare_cargo,
+                prepare_selector.as_deref(),
+                prepare_binding.as_ref(),
+            )
         });
         // The controlled preflight owns metadata and Git children through the supervisor.
         // Awaiting it here prevents detaching the blocking worker while still bounding
@@ -172,7 +205,14 @@ impl CheckService {
             heartbeat.abort();
         }
         let prepared = match prepared {
-            Ok(prepared) => prepared,
+            Ok(mut prepared) => {
+                prepared.admission_ms = admission_ms;
+                prepared.preflight_ms = preflight_started
+                    .elapsed()
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64;
+                prepared
+            }
             Err((status, message)) => {
                 cancellation_forwarder.abort();
                 return terminal_evidence(&request, status, message, accepted_at);
@@ -222,7 +262,7 @@ impl CheckService {
         let root = prepared.snapshot.workspace_root.clone();
         let supervisor = self.supervisor.clone();
         let config = self.config.clone();
-        let cargo = self.cargo.clone();
+        let cargo = selection.cargo.clone();
         let work_request = request.clone();
         let job =
             match self
@@ -272,11 +312,176 @@ impl CheckService {
         }
     }
 
+    /// Resolve workspace metadata without starting any Cargo build stage.
+    ///
+    /// Matrix planning uses the same authorization, cache, deadline, and
+    /// cancellation path as a gate request: no workspace source is written and
+    /// no compilation is started.
+    pub(crate) async fn plan_snapshot(
+        &self,
+        directory: Option<PathBuf>,
+        client_roots: ClientRoots,
+        cancellation: Option<CancellationToken>,
+    ) -> Result<PlanSnapshot, (GateStatus, String)> {
+        let accepted_at = Instant::now();
+        let roots = self.guard.snapshot(client_roots).map_err(|error| {
+            (
+                GateStatus::Inconclusive,
+                format!("verify workspace root snapshot failed: {error}"),
+            )
+        })?;
+        let selection = select_workspace(&roots, directory.as_deref()).map_err(|error| {
+            (
+                GateStatus::Inconclusive,
+                format!("verify workspace selection failed: {error}"),
+            )
+        })?;
+        let deadline = accepted_at + Duration::from_millis(self.config.gate.hard_timeout_ms);
+        let cancellation = cancellation.unwrap_or_default();
+        if cancellation.is_cancelled() {
+            return Err((
+                GateStatus::Cancelled,
+                "verify planning was cancelled".to_owned(),
+            ));
+        }
+        let control = crate::workspace::metadata::MetadataControl::new(
+            deadline,
+            cancellation,
+            self.supervisor.clone(),
+            tokio::runtime::Handle::current(),
+        );
+        let service = self.clone();
+        let selection_for_task = selection.clone();
+        let load = tokio::task::spawn_blocking(move || {
+            service.metadata.acquire_controlled(
+                &selection_for_task,
+                service.cargo.clone(),
+                &control,
+            )
+        })
+        .await
+        .map_err(|error| {
+            (
+                GateStatus::Unavailable,
+                format!("verify planning task failed: {error}"),
+            )
+        })?
+        .map_err(|error| {
+            let status = match &error {
+                crate::workspace::MetadataError::Cancelled => GateStatus::Cancelled,
+                crate::workspace::MetadataError::TimedOut => GateStatus::Timeout,
+                _ => GateStatus::Inconclusive,
+            };
+            (
+                status,
+                format!("Cargo metadata preflight failed for verify: {error}"),
+            )
+        })?;
+        let snapshot = Arc::clone(&load.snapshot);
+        let workspace_authority = if snapshot.workspace_root == selection.package_authority().path()
+        {
+            selection.package_authority().clone()
+        } else {
+            selection
+                .worktree_authority()
+                .authorize_dir(&snapshot.workspace_root)
+                .map_err(|error| {
+                    (
+                        GateStatus::Inconclusive,
+                        format!("verify workspace execution authorization failed: {error}"),
+                    )
+                })?
+        };
+        Ok(PlanSnapshot {
+            snapshot,
+            workspace_authority,
+        })
+    }
+
+    /// Run one bounded, fixed-literal discovery command through the shared
+    /// process supervisor. Used only for read-only toolchain inspection.
+    pub(crate) async fn auxiliary_output(
+        &self,
+        cwd: &Path,
+        executable: &Path,
+        args: &[OsString],
+        timeout: Duration,
+        cancellation: &CancellationToken,
+        authority: Arc<AuthorizedRoot>,
+    ) -> Result<String, String> {
+        let environment = std::env::vars_os().collect::<Vec<_>>();
+        let options = ProcessRunOptions::new(cwd)
+            .with_timeout(timeout)
+            .with_cancellation(cancellation.clone())
+            .with_max_output_bytes(1_048_576)
+            .with_environment(environment);
+        let result = self
+            .supervisor
+            .run_authorized(
+                executable.to_path_buf(),
+                args.iter().cloned(),
+                options,
+                authority,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if result.exit_code != 0 {
+            return Err(format!(
+                "{} exited with code {}",
+                executable.display(),
+                result.exit_code
+            ));
+        }
+        Ok(result.stdout)
+    }
+
+    /// Resolve the cargo executable for an optional rustup toolchain selector.
+    ///
+    /// A direct toolchain cargo is preferred so evidence binds the exact
+    /// compiler path. The rustup shim remains a fallback with an explicit
+    /// `+toolchain` argument; nothing is downloaded. Both modes carry a
+    /// [`ToolchainBinding`] so the child environment actually selects the
+    /// requested compiler instead of an ambient one.
+    fn select_cargo(&self, toolchain: Option<&str>) -> Result<CargoSelection, String> {
+        let Some(toolchain) = toolchain else {
+            return Ok(CargoSelection {
+                cargo: self.cargo.clone(),
+                selector: false,
+                binding: None,
+            });
+        };
+        crate::gate::validate_toolchain_name(toolchain)?;
+        if let Some(cargo) = resolve_toolchain_cargo(toolchain)
+            && let Some(binding) = direct_toolchain_binding(&cargo)
+        {
+            return Ok(CargoSelection {
+                cargo,
+                selector: false,
+                binding: Some(binding),
+            });
+        }
+        if rustup_shim_available(&self.cargo) {
+            return Ok(CargoSelection {
+                cargo: self.cargo.clone(),
+                selector: true,
+                binding: Some(ToolchainBinding::Shim {
+                    toolchain: toolchain.to_owned(),
+                }),
+            });
+        }
+        Err(format!(
+            "toolchain {toolchain} is not installed as a direct cargo and the configured cargo is not a rustup shim; no toolchain is downloaded"
+        ))
+    }
+
     fn prepare(
         &self,
         request: &GateRequest,
         control: &crate::workspace::metadata::MetadataControl,
         git: &dyn GitProbe,
+        cargo: &Path,
+        toolchain_selector: Option<&str>,
+        toolchain_binding: Option<&ToolchainBinding>,
     ) -> Result<PreparedCheck, (GateStatus, String)> {
         control.checkpoint().map_err(preflight_control_error)?;
         let roots = self
@@ -298,7 +503,7 @@ impl CheckService {
         let workspace_root = selection.requested_root();
         let load = self
             .metadata
-            .acquire_controlled(&selection, self.cargo.clone(), control)
+            .acquire_controlled(&selection, cargo.to_path_buf(), control)
             .map_err(preflight_metadata_error)?;
         control.checkpoint().map_err(preflight_control_error)?;
         let snapshot = Arc::clone(&load.snapshot);
@@ -317,13 +522,16 @@ impl CheckService {
                 })?
         };
         let git_authority = selection.worktree_authority().clone();
-        let cache =
+        let mut cache =
             select_gate_cache(&snapshot, &self.config.gate, request.mode()).map_err(|error| {
                 (
                     GateStatus::Inconclusive,
                     format!("gate cache selection failed: {error}"),
                 )
             })?;
+        if let Some(binding) = toolchain_binding {
+            apply_toolchain_environment(&mut cache.environment, binding);
+        }
         let initial_scope_args = if matches!(
             request.target,
             GateTargetId::Check | GateTargetId::Clippy | GateTargetId::Test | GateTargetId::Doc
@@ -348,6 +556,7 @@ impl CheckService {
         for target in &mut targets {
             request.options.apply(target);
         }
+        apply_toolchain(&mut targets, toolchain_selector);
         let mut command = targets
             .iter()
             .flat_map(|target| target.args.iter().cloned())
@@ -363,7 +572,7 @@ impl CheckService {
             &workspace_root,
             &git_authority,
             &snapshot.manifest_path,
-            &self.cargo,
+            cargo,
             &command,
             &cache,
             &external_roots,
@@ -398,6 +607,7 @@ impl CheckService {
             for target in &mut targets {
                 request.options.apply(target);
             }
+            apply_toolchain(&mut targets, toolchain_selector);
             command = targets
                 .iter()
                 .flat_map(|target| target.args.iter().cloned())
@@ -406,7 +616,7 @@ impl CheckService {
                 &workspace_root,
                 &git_authority,
                 &snapshot.manifest_path,
-                &self.cargo,
+                cargo,
                 &command,
                 &cache,
                 &external_roots,
@@ -437,6 +647,8 @@ impl CheckService {
             identity,
             scope: scope.evidence,
             metadata_cache: format!("{:?}", load.cache).to_ascii_lowercase(),
+            admission_ms: 0,
+            preflight_ms: 0,
         })
     }
 
@@ -449,6 +661,127 @@ impl CheckService {
             .map(|selection| selection.requested_root().path().to_owned())
             .map_err(|error| (GateStatus::Inconclusive, error.to_string()))
     }
+}
+
+/// Metadata-only workspace view used by matrix planning.
+#[derive(Debug, Clone)]
+pub(crate) struct PlanSnapshot {
+    pub snapshot: Arc<crate::workspace::WorkspaceSnapshot>,
+    pub workspace_authority: Arc<AuthorizedRoot>,
+}
+
+#[derive(Debug, Clone)]
+struct CargoSelection {
+    cargo: PathBuf,
+    /// Apply `+toolchain` to every stage (rustup shim fallback only).
+    selector: bool,
+    /// Compiler binding that must be applied to the child environment.
+    binding: Option<ToolchainBinding>,
+}
+
+/// How the selected toolchain compiler is bound for child processes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ToolchainBinding {
+    /// A direct toolchain cargo was resolved; its sibling `rustc` is pinned
+    /// through `RUSTC`, `RUSTUP_TOOLCHAIN`, and a prepended `PATH` entry so
+    /// Cargo and build scripts cannot fall back to an ambient compiler.
+    Direct { toolchain: String, bin_dir: PathBuf },
+    /// The rustup shim is invoked with `+toolchain`; `RUSTUP_TOOLCHAIN` is
+    /// pinned as well and an ambient `RUSTC` override is removed.
+    Shim { toolchain: String },
+}
+
+impl ToolchainBinding {
+    fn toolchain(&self) -> &str {
+        match self {
+            Self::Direct { toolchain, .. } | Self::Shim { toolchain } => toolchain,
+        }
+    }
+}
+
+/// Build a direct binding from a resolved `<rustup>/toolchains/<name>/bin/cargo`.
+/// Returns `None` when the sibling `rustc` or the toolchain directory name is
+/// unavailable, so `select_cargo` can fall back to the rustup shim.
+fn direct_toolchain_binding(cargo: &Path) -> Option<ToolchainBinding> {
+    let bin_dir = cargo.parent()?;
+    if !bin_dir.join(executable_name("rustc")).is_file() {
+        return None;
+    }
+    let toolchain = bin_dir
+        .parent()?
+        .file_name()
+        .and_then(OsStr::to_str)
+        .filter(|name| !name.is_empty())?
+        .to_owned();
+    Some(ToolchainBinding::Direct {
+        toolchain,
+        bin_dir: bin_dir.to_owned(),
+    })
+}
+
+/// Pin the selected compiler into a gate environment.
+///
+/// The runtime environment and the identity hashes share this map, so both the
+/// command hash and the environment hash reflect the binding.
+fn apply_toolchain_environment(
+    environment: &mut BTreeMap<OsString, OsString>,
+    binding: &ToolchainBinding,
+) {
+    environment.insert(
+        OsString::from("RUSTUP_TOOLCHAIN"),
+        OsString::from(binding.toolchain()),
+    );
+    match binding {
+        ToolchainBinding::Direct { bin_dir, .. } => {
+            environment.insert(
+                OsString::from("RUSTC"),
+                bin_dir.join(executable_name("rustc")).into_os_string(),
+            );
+            let existing = environment
+                .get(OsStr::new("PATH"))
+                .cloned()
+                .or_else(|| std::env::var_os("PATH"))
+                .unwrap_or_default();
+            let entries = std::iter::once(bin_dir.clone()).chain(std::env::split_paths(&existing));
+            match std::env::join_paths(entries) {
+                Ok(path) => {
+                    environment.insert(OsString::from("PATH"), path);
+                }
+                Err(_) => {
+                    // A malformed ambient PATH must never widen resolution; the
+                    // pinned toolchain directory remains authoritative.
+                    environment.insert(OsString::from("PATH"), bin_dir.clone().into_os_string());
+                }
+            }
+        }
+        ToolchainBinding::Shim { .. } => {
+            // The `+toolchain` selector only wins when no ambient `RUSTC`
+            // override reaches Cargo.
+            environment.remove(OsStr::new("RUSTC"));
+        }
+    }
+}
+
+/// Resolve a rustup toolchain's direct cargo binary without invoking rustup.
+pub(crate) fn resolve_toolchain_cargo(toolchain: &str) -> Option<PathBuf> {
+    let rustup_home = std::env::var_os("RUSTUP_HOME").map_or_else(
+        || std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".rustup")),
+        |home| Some(PathBuf::from(home)),
+    )?;
+    let cargo = rustup_home
+        .join("toolchains")
+        .join(toolchain)
+        .join("bin")
+        .join(executable_name("cargo"));
+    cargo.is_file().then_some(cargo)
+}
+
+/// True when the configured cargo sits next to a rustup proxy, so
+/// `+toolchain` selection is honored.
+pub(crate) fn rustup_shim_available(cargo: &Path) -> bool {
+    cargo
+        .parent()
+        .is_some_and(|parent| parent.join(executable_name("rustup")).is_file())
 }
 
 #[derive(Debug)]
@@ -465,6 +798,8 @@ struct PreparedCheck {
     identity: InputIdentity,
     scope: GateScope,
     metadata_cache: String,
+    admission_ms: u64,
+    preflight_ms: u64,
 }
 
 struct CheckScope {
@@ -817,6 +1152,9 @@ async fn execute_prepared(
                     build_scripts: build.build_scripts as u64,
                     linked_units: build.linked_units as u64,
                     partial: telemetry_partial,
+                    rebuilt_packages: build.rebuilt_packages,
+                    build_script_packages: build.build_script_packages,
+                    packages_truncated: build.packages_truncated,
                 }),
         };
         status = if step.cancelled {
@@ -949,6 +1287,8 @@ async fn execute_prepared(
             .as_millis()
             .min(u128::from(u64::MAX)) as u64,
         queue_ms: context.timing.queue_ms,
+        admission_ms: prepared.admission_ms,
+        preflight_ms: prepared.preflight_ms,
         first_diagnostic_ms: request_first_diagnostic_ms,
         requested_dir: request
             .directory
@@ -1006,6 +1346,17 @@ fn identity_for(
             .with_limits(limits),
         git_authority.clone(),
     )
+}
+
+fn apply_toolchain(targets: &mut [crate::gate::GateTarget], toolchain: Option<&str>) {
+    let Some(toolchain) = toolchain else {
+        return;
+    };
+    for target in targets {
+        target
+            .args
+            .insert(0, OsString::from(format!("+{toolchain}")));
+    }
 }
 
 fn authorize_external_roots(
@@ -1175,6 +1526,20 @@ fn convert_span(span: &crate::diagnostics::DiagnosticSpan) -> crate::gate::Diagn
         label: span.label.clone(),
         suggested_replacement: span.suggested_replacement.clone(),
         suggestion_applicability: span.suggestion_applicability.map(convert_applicability),
+        expansion: span.expansion.as_ref().map(convert_expansion),
+    }
+}
+
+fn convert_expansion(
+    expansion: &crate::diagnostics::MacroExpansion,
+) -> crate::gate::MacroExpansion {
+    crate::gate::MacroExpansion {
+        macro_decl_name: expansion.macro_decl_name.clone(),
+        span: Box::new(convert_span(&expansion.span)),
+        definition_span: expansion
+            .definition_span
+            .as_deref()
+            .map(|span| Box::new(convert_span(span))),
     }
 }
 
@@ -1371,5 +1736,119 @@ fn acceleration_error(context: &ScheduledJobContext, message: String) -> Schedul
         SchedulerError::TimedOut
     } else {
         SchedulerError::Internal(message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gate::{GateTarget, GateTargetId};
+
+    #[test]
+    fn toolchain_selector_precedes_the_cargo_subcommand_and_binds_the_command() {
+        let mut targets = vec![GateTarget {
+            id: GateTargetId::Check,
+            label: "cargo check",
+            args: vec![OsString::from("check"), OsString::from("--locked")],
+            timeout: Duration::from_secs(1),
+        }];
+        apply_toolchain(&mut targets, Some("1.88.0-x86_64-unknown-linux-gnu"));
+        assert_eq!(
+            targets[0].args[0],
+            OsString::from("+1.88.0-x86_64-unknown-linux-gnu")
+        );
+        assert_eq!(targets[0].args[1], OsString::from("check"));
+        apply_toolchain(&mut targets, None);
+        assert_eq!(targets[0].args.len(), 3);
+    }
+
+    #[test]
+    fn direct_toolchain_binding_pins_rustc_toolchain_and_path() {
+        let bin_dir = PathBuf::from("/rustup/toolchains/1.88.0-x86_64-unknown-linux-gnu/bin");
+        let mut environment = BTreeMap::from([
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+            (
+                OsString::from("RUSTC"),
+                OsString::from("/ambient/bin/rustc"),
+            ),
+        ]);
+        apply_toolchain_environment(
+            &mut environment,
+            &ToolchainBinding::Direct {
+                toolchain: "1.88.0-x86_64-unknown-linux-gnu".to_owned(),
+                bin_dir: bin_dir.clone(),
+            },
+        );
+        assert_eq!(
+            environment
+                .get(OsStr::new("RUSTC"))
+                .map(OsString::as_os_str),
+            Some(bin_dir.join(executable_name("rustc")).as_os_str())
+        );
+        assert_eq!(
+            environment
+                .get(OsStr::new("RUSTUP_TOOLCHAIN"))
+                .map(OsString::as_os_str),
+            Some(OsStr::new("1.88.0-x86_64-unknown-linux-gnu"))
+        );
+        let path = environment
+            .get(OsStr::new("PATH"))
+            .expect("pinned PATH")
+            .clone();
+        let entries = std::env::split_paths(&path).collect::<Vec<_>>();
+        assert_eq!(
+            entries.first().map(PathBuf::as_path),
+            Some(bin_dir.as_path())
+        );
+        assert!(entries.iter().any(|entry| entry == Path::new("/usr/bin")));
+    }
+
+    #[test]
+    fn shim_toolchain_binding_removes_an_ambient_rustc_override() {
+        let mut environment = BTreeMap::from([
+            (
+                OsString::from("RUSTC"),
+                OsString::from("/ambient/bin/rustc"),
+            ),
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        ]);
+        apply_toolchain_environment(
+            &mut environment,
+            &ToolchainBinding::Shim {
+                toolchain: "nightly-2026-01-01".to_owned(),
+            },
+        );
+        assert!(!environment.contains_key(OsStr::new("RUSTC")));
+        assert_eq!(
+            environment
+                .get(OsStr::new("RUSTUP_TOOLCHAIN"))
+                .map(OsString::as_os_str),
+            Some(OsStr::new("nightly-2026-01-01"))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("PATH")).map(OsString::as_os_str),
+            Some(OsStr::new("/usr/bin:/bin"))
+        );
+    }
+
+    #[test]
+    fn direct_toolchain_binding_requires_a_sibling_rustc() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let root = std::env::temp_dir().join(format!(
+            "agz-toolchain-binding-{}-{stamp}",
+            std::process::id()
+        ));
+        let bin = root.join("toolchains").join("1.88.0").join("bin");
+        std::fs::create_dir_all(&bin).expect("create binding fixture");
+        let cargo = bin.join(executable_name("cargo"));
+        std::fs::write(&cargo, b"").expect("write cargo placeholder");
+        assert!(direct_toolchain_binding(&cargo).is_none());
+        std::fs::write(bin.join(executable_name("rustc")), b"").expect("write rustc placeholder");
+        let binding = direct_toolchain_binding(&cargo).expect("direct binding");
+        assert_eq!(binding.toolchain(), "1.88.0");
+        assert!(matches!(binding, ToolchainBinding::Direct { .. }));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

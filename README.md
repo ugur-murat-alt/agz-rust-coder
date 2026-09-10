@@ -72,9 +72,14 @@ OpenCode commonly exposes grouped MCP tools as `rust_*`.
 | MCP tool | OpenCode direct name | Default | Purpose |
 | --- | --- | --- | --- |
 | `check` | `rust_check` | `enabled` | Run bounded Cargo check, Clippy, tests, docs, or the full gate. |
+| `profile` | `rust_profile` | `enabled` | Analyze observed Cargo rebuild behavior and compare bounded build evidence without claiming unmeasured speedups. |
 | `audit` | `rust_audit` | `enabled` | Scan Rust source for bounded static findings. |
 | `crate_lookup` | `rust_crate_lookup` | `enabled` | Verify a crate and optional exact version on crates.io. |
 | `docs` | `rust_docs` | `enabled` | Resolve exact-version docs from cache, local sources, or docs.rs. |
+| `context` | `rust_context` | `enabled` | Prepare, expand, or delta a revision-bound semantic context capsule with per-item reasons. |
+| `api` | `rust_api` | `enabled` | Resolve an API signature from bounded analyzer evidence or type-check a candidate snippet in an isolated copy of the workspace configuration. |
+| `explain` | `rust_explain` | `enabled` | Explain macro expansion provenance, trait obligations, or cfg enablement. |
+| `verify` | `rust_verify` | `enabled` | Plan or run a bounded feature, target, toolchain, and stage matrix. |
 | `symbol` | `rust_symbol` | `enabled` | Read Rust Analyzer hover data for one symbol. |
 | `references` | `rust_references` | `enabled` | Find bounded references. |
 | `definition` | `rust_definition` | `enabled` | Find the selected definition. |
@@ -83,6 +88,9 @@ OpenCode commonly exposes grouped MCP tools as `rust_*`.
 | `hierarchy` | `rust_hierarchy` | `enabled` | Trace a bounded call hierarchy. |
 | `rename` | `rust_rename` | `enabled` | Produce a verified rename edit package without applying it. |
 | `refactor` | `rust_refactor` | `enabled` | Produce a verified refactor edit package without applying it. |
+| `change` | `rust_change` | `enabled` | Create, stage, migrate, and validate a revision-bound changeset in server-owned scratch without writing the workspace. |
+| `repair` | `rust_repair` | `enabled` | Analyze, try, compare, and minimize compiler-driven repair candidates for a failing change revision without writing the workspace. |
+| `work` | `rust_work` | `enabled` | Drive a typed intent through change/validate with explicit gates and budgets, returning honest gate evidence or a bounded single-use handoff. |
 
 Every tool returns deterministic structured data plus an equivalent bounded text
 fallback. External data stays under `untrustedData`. Expected domain outcomes
@@ -105,8 +113,25 @@ sections, for example `AGZ_RUST_CODER_GATE__HARD_TIMEOUT_MS=600000`.
 | `gate.cache` | `auto` | Cache policy: `auto`, `project`, or `isolated`. |
 | `rust_analyzer.workspace_code` | `deny` | Reject RA startup unless workspace code is disabled. |
 | `docs.fallback` | `auto` | Documentation source policy. |
+| `profile.max_report_bytes` | `4194304` | Bounded read/store cap for one Cargo timing artifact. |
+| `profile.max_runs` | `4` | Fresh Cargo runs available to one `profile` call. |
+| `profile.compare_samples` | `3` | Required samples per side before any speed claim. |
 | `limits.tool_output_bytes` | `49152` | Maximum serialized tool result size. |
+| `change.max_bytes` | `268435456` | Maximum captured candidate bytes per changeset. |
+| `repair.max_candidates` | `4` | Candidates one `repair` action may try. |
+| `repair.max_compiles` | `4` | Cargo validations one `repair` action may run. |
+| `repair.wall_time_ms` | `120000` | Wall-clock budget for one `repair` action. |
+| `repair.minimize_max_candidates` | `32` | Compile-evaluated reduction attempts one `repair(action=minimize)` may try. |
+| `repair.minimize_max_compiles` | `16` | Cargo runs one `repair(action=minimize)` may execute, including reproduction and export verification. |
+| `work.max_candidates` | `4` | Host candidate revisions one work item may stage. |
+| `work.max_compiles` | `12` | Gate validations one work item may run. |
+| `work.wall_time_ms` | `600000` | Wall-time budget for one work item. |
 | `telemetry.enabled` | `true` | Bounded local activity records without prompts or source. |
+
+`profile` evidence is bounded: the latest 64 records stay in memory, and
+persisted timing artifacts under the server-owned `profile-evidence` directory
+are pruned after 24 hours or beyond 64 files. The `profile` result reports this
+retention policy, so expired evidence is visible instead of silently reused.
 
 Run `agz-rust-coder --help` for every CLI field. The complete behavior and
 default table is in [docs/tools.md](docs/tools.md).

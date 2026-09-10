@@ -171,6 +171,7 @@ pub struct ArmSummary {
     pub unknown_cost: u32,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Serialize)]
 pub struct GateEvidence {
     pub quality_pass: bool,
@@ -234,6 +235,7 @@ struct QualityGate {
     non_inferiority_margin_percentage_points: f64,
 }
 
+#[allow(clippy::struct_field_names)]
 #[derive(Clone, Debug, Deserialize)]
 struct PerformanceTargets {
     host_turn_reduction_percent: f64,
@@ -283,7 +285,7 @@ struct OracleSpec {
     requires_mutation_guard: bool,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Replay {
     schema_version: u32,
     corpus_id: String,
@@ -413,12 +415,16 @@ pub async fn run(root: &Path) -> Result<()> {
     let report = report(&evidence)?;
     let output = evidence::publish("task-benchmark-smoke", &run, &results, &report)?;
     if !evidence.passed {
-        bail!("task-benchmark-smoke failed; evidence published at {}", output.display());
+        bail!(
+            "task-benchmark-smoke failed; evidence published at {}",
+            output.display()
+        );
     }
     println!("task-benchmark-smoke: PASS ({})", output.display());
     Ok(())
 }
 
+#[allow(clippy::too_many_lines, clippy::unused_async)]
 pub async fn evaluate_provider_free_replay(root: &Path) -> Result<TaskBenchmarkEvidence> {
     let root = fs::canonicalize(root).context("canonicalize benchmark root")?;
     let (fixtures, fixture_bytes) = read_json::<FixtureCatalog>(&root, FIXTURES_PATH)?;
@@ -573,7 +579,14 @@ fn validate_fixture_contract<'a>(
     if manifest.repetitions < 3 || manifest.repetitions % 3 != 0 {
         bail!("benchmark needs paired repetitions in multiples of three");
     }
-    if manifest.order_seeds.iter().copied().collect::<BTreeSet<_>>().len() < 3 {
+    if manifest
+        .order_seeds
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .len()
+        < 3
+    {
         bail!("benchmark needs at least three distinct order seeds");
     }
     if manifest.arms.iter().map(String::as_str).collect::<Vec<_>>() != ARM_LABELS.to_vec() {
@@ -606,22 +619,28 @@ fn validate_fixture_contract<'a>(
         bail!("fixture catalog contains entries outside the frozen task list");
     }
     hashes.sort();
-    let mut hasher = Sha256::new();
+    let mut fixture_digest = Sha256::new();
     for (fixture_id, hash) in hashes {
-        hasher.update(fixture_id.as_bytes());
-        hasher.update([0]);
-        hasher.update(hash.as_bytes());
-        hasher.update([0]);
+        fixture_digest.update(fixture_id.as_bytes());
+        fixture_digest.update([0]);
+        fixture_digest.update(hash.as_bytes());
+        fixture_digest.update([0]);
     }
-    if format!("{:x}", hasher.finalize()) != manifest.fixture_set_hash {
+    if format!("{:x}", fixture_digest.finalize()) != manifest.fixture_set_hash {
         bail!("fixture set hash drift");
     }
     if manifest.quality_gate.baseline_arm != "mcp_0_2_0"
         || manifest.quality_gate.candidate_arm != "change_engine"
-        || manifest.quality_gate.non_inferiority_margin_percentage_points < 0.0
+        || manifest
+            .quality_gate
+            .non_inferiority_margin_percentage_points
+            < 0.0
         || !(0.0..=100.0).contains(&manifest.performance_targets.host_turn_reduction_percent)
         || !(0.0..=100.0).contains(&manifest.performance_targets.cargo_call_reduction_percent)
-        || manifest.performance_targets.wall_time_regression_limit_percent < 0.0
+        || manifest
+            .performance_targets
+            .wall_time_regression_limit_percent
+            < 0.0
     {
         bail!("predeclared benchmark gates are invalid");
     }
@@ -697,7 +716,13 @@ fn validate_replay_contract(
     {
         bail!("provider-free replay provenance drift");
     }
-    let session_columns = ["task_id", "repetition", "order_seed", "cache_state", "arm_order"];
+    let session_columns = [
+        "task_id",
+        "repetition",
+        "order_seed",
+        "cache_state",
+        "arm_order",
+    ];
     let adapter_columns = [
         "task_id",
         "repetition",
@@ -722,11 +747,23 @@ fn validate_replay_contract(
         "mutation_guard_intact",
         "checks_passed",
     ];
-    if replay.session_columns.iter().map(String::as_str).collect::<Vec<_>>()
+    if replay
+        .session_columns
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
         != session_columns.to_vec()
-        || replay.adapter_columns.iter().map(String::as_str).collect::<Vec<_>>()
+        || replay
+            .adapter_columns
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
             != adapter_columns.to_vec()
-        || replay.oracle_columns.iter().map(String::as_str).collect::<Vec<_>>()
+        || replay
+            .oracle_columns
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
             != oracle_columns.to_vec()
     {
         bail!("provider-free replay column schema drift");
@@ -763,8 +800,10 @@ fn adapter_map(replay: &Replay) -> Result<BTreeMap<TrialKey, AdapterObservation>
             cache_state,
             validation,
         ) = row;
-        if !matches!(status.as_str(), "completed" | "failed" | "timeout" | "cancelled")
-            || !matches!(cache_state.as_str(), "cold" | "warm")
+        if !matches!(
+            status.as_str(),
+            "completed" | "failed" | "timeout" | "cancelled"
+        ) || !matches!(cache_state.as_str(), "cold" | "warm")
         {
             bail!("invalid adapter replay state");
         }
@@ -827,7 +866,10 @@ fn oracle_map(replay: &Replay) -> Result<BTreeMap<TrialKey, OracleObservation>> 
     Ok(map)
 }
 
-fn balanced_order(manifest: &Manifest, sessions: &[ReplaySession]) -> Result<BTreeMap<TrialKey, u32>> {
+fn balanced_order(
+    manifest: &Manifest,
+    sessions: &[ReplaySession],
+) -> Result<BTreeMap<TrialKey, u32>> {
     let repetition_count =
         usize::try_from(manifest.repetitions).context("repetition count does not fit usize")?;
     if sessions.len() != manifest.tasks.len() * repetition_count {
@@ -1000,8 +1042,7 @@ fn wilson_95(successes: u32, total: u32) -> (f64, f64) {
     let z = 1.959_963_984_540_054_f64;
     let denominator = 1.0 + z * z / n;
     let center = (p + z * z / (2.0 * n)) / denominator;
-    let half =
-        z * (p * (1.0 - p) / n + z * z / (4.0 * n * n)).sqrt() / denominator;
+    let half = z * (p * (1.0 - p) / n + z * z / (4.0 * n * n)).sqrt() / denominator;
     (
         (center - half).max(0.0) * 100.0,
         (center + half).min(1.0) * 100.0,

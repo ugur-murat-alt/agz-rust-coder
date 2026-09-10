@@ -24,6 +24,48 @@
     "required": ["dir"],
     "additionalProperties": false
   },
+  "profile": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["build_analyze", "build_compare", "runtime_compare"]
+      },
+      "dir": {
+        "type": "string",
+        "description": "Absolute path to a Rust project/workspace, or to a parent containing one unambiguous nested Cargo project."
+      },
+      "configuration": {
+        "type": "object"
+      },
+      "changeId": {
+        "type": "string"
+      },
+      "baselineEvidence": {
+        "type": "array"
+      },
+      "baselineRevision": {
+        "type": "integer"
+      },
+      "candidateRevision": {
+        "type": "integer"
+      },
+      "benchmarkSpec": {
+        "type": "object"
+      },
+      "correctnessGate": {
+        "type": "object"
+      },
+      "hypothesis": {
+        "type": "string"
+      },
+      "budget": {
+        "type": "object"
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  },
   "audit": {
     "type": "object",
     "properties": {
@@ -70,6 +112,196 @@
     "required": ["dir", "crate"],
     "additionalProperties": false
   },
+  "context": {
+    "type": "object",
+    "properties": {
+      "dir": {
+        "type": "string",
+        "description": "Absolute path to the Rust project directory (workspace root or member)."
+      },
+      "action": {
+        "type": "string",
+        "enum": ["prepare", "expand", "delta"],
+        "description": "prepare: build a new capsule; expand: read stored items with pagination; delta: compare current anchors against a stored previous capsule."
+      },
+      "anchors": {
+        "type": "array",
+        "description": "Typed anchors. File and symbol anchors only; no free-text interpretation."
+      },
+      "purpose": {
+        "type": "string",
+        "description": "Optional label recorded in the capsule identity and echoed back; never treated as instructions."
+      },
+      "changeId": {
+        "type": "string",
+        "description": "Optional change label recorded in the capsule identity. No candidate service exists in this version; workspace hashes are used."
+      },
+      "byteBudget": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Requested payload byte budget, clamped by the tool-output limit."
+      },
+      "capsuleId": {
+        "type": "string",
+        "description": "Capsule identity required by action=expand."
+      },
+      "previousCapsuleId": {
+        "type": "string",
+        "description": "Stored capsule identity required by action=delta."
+      },
+      "itemIds": {
+        "type": "array",
+        "description": "Optional expand filter; unknown ids are reported as omissions."
+      },
+      "cursor": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Zero-based item offset for paginated expand."
+      },
+      "pageSize": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 32,
+        "description": "Expand page size; bounded fallback for hosts without MCP resource support."
+      }
+    },
+    "required": ["action"],
+    "additionalProperties": false
+  },
+
+    "api": {
+      "$defs": {
+        "ApiAction": {
+          "description": "Supported `api` actions.",
+          "enum": [
+            "resolve",
+            "probe"
+          ],
+          "type": "string"
+        },
+        "ApiAnchorInput": {
+          "additionalProperties": false,
+          "properties": {
+            "character": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "line": {
+              "default": null,
+              "format": "uint32",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "path": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            "symbol": {
+              "default": null,
+              "maxLength": 512,
+              "minLength": 1,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        "ApiConfigurationInput": {
+          "additionalProperties": false,
+          "description": "Typed Cargo feature selection, never free-form flags.",
+          "properties": {
+            "allFeatures": {
+              "default": false,
+              "type": "boolean"
+            },
+            "features": {
+              "default": [],
+              "items": {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 64,
+              "type": "array"
+            },
+            "noDefaultFeatures": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/ApiAction",
+          "default": "resolve"
+        },
+        "anchor": {
+          "$ref": "#/$defs/ApiAnchorInput"
+        },
+        "changeId": {
+          "default": null,
+          "description": "Opaque caller-supplied binding label; never read as a change candidate.",
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "configuration": {
+          "$ref": "#/$defs/ApiConfigurationInput"
+        },
+        "dir": {
+          "default": null,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedSignature": {
+          "default": null,
+          "description": "Optional explicit compile assertion: the snippet must evaluate to this\nRust type for `action=probe`.",
+          "maxLength": 512,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "snippets": {
+          "default": [],
+          "items": {
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 4,
+          "type": "array"
+        }
+      },
+      "required": [
+        "anchor"
+      ],
+      "type": "object"
+    },
   "crate_lookup": {
     "type": "object",
     "properties": {
@@ -155,5 +387,770 @@
     },
     "required": ["dir", "path", "symbol"],
     "additionalProperties": false
+  },
+  "change": {
+    "type": "object",
+    "properties": {
+      "action": { "type": "string", "enum": ["create", "stage", "migrate", "inspect", "validate", "export", "discard"] },
+      "dir": {
+        "type": "string",
+        "description": "Absolute path to the Rust project/workspace, or to a parent containing one unambiguous nested Cargo project."
+      },
+      "changeId": { "type": "string", "minLength": 1 },
+      "expectedRevision": { "type": "integer", "minimum": 0 },
+      "baseIdentity": { "type": "string", "minLength": 1 },
+      "patches": {
+        "type": "array",
+        "maxItems": 512,
+        "items": {
+          "type": "object",
+          "properties": {
+            "file": { "type": "string", "minLength": 1 },
+            "oldString": { "type": "string", "minLength": 1 },
+            "newString": { "type": "string" }
+          },
+          "required": ["file", "oldString", "newString"],
+          "additionalProperties": false
+        }
+      },
+      "newFiles": {
+        "type": "array",
+        "maxItems": 512,
+        "items": {
+          "type": "object",
+          "properties": {
+            "file": { "type": "string", "minLength": 1 },
+            "content": { "type": "string" }
+          },
+          "required": ["file", "content"],
+          "additionalProperties": false
+        }
+      },
+      "anchor": {
+        "type": ["object", "null"],
+        "properties": {
+          "file": { "type": "string", "minLength": 1 },
+          "symbol": { "type": "string", "minLength": 1 },
+          "line": { "type": ["integer", "null"], "minimum": 1 }
+        },
+        "required": ["file", "symbol"],
+        "additionalProperties": false
+      },
+      "transformation": {
+        "type": ["object", "null"],
+        "properties": {
+          "kind": { "type": "string", "enum": ["addParameter", "changeParameter"] },
+          "parameter": { "type": "string", "minLength": 1 },
+          "argument": { "type": "string", "minLength": 1 },
+          "position": { "type": ["integer", "null"], "minimum": 0 }
+        },
+        "required": ["kind", "parameter", "argument"],
+        "additionalProperties": false
+      },
+      "consumerScope": { "type": ["string", "null"], "maxLength": 64 },
+      "constraints": {
+        "type": ["object", "null"],
+        "properties": {
+          "maxReferences": { "type": ["integer", "null"], "minimum": 1 },
+          "maxEdits": { "type": ["integer", "null"], "minimum": 1 },
+          "maxIdentityChecks": { "type": ["integer", "null"], "minimum": 1 }
+        },
+        "additionalProperties": false
+      },
+      "options": {
+        "type": "object",
+        "description": "Typed Cargo validation options for action=validate and action=migrate."
+      },
+      "target": { "type": "string", "enum": ["check", "clippy", "test", "doc", "fmt", "all"] },
+      "timings": { "type": "boolean" },
+      "detail": { "type": "string", "enum": ["compact", "standard", "full"] }
+    },
+    "required": ["action"],
+    "additionalProperties": false
+  },
+  "explain": {
+    "$defs": {
+      "ExplainAction": {
+        "enum": [
+          "macro",
+          "trait",
+          "cfg"
+        ],
+        "type": "string"
+      },
+      "ExplainAnchorInput": {
+        "additionalProperties": false,
+        "properties": {
+          "line": {
+            "default": null,
+            "description": "Optional 1-based anchor line.",
+            "format": "uint32",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "Workspace-relative or absolute path of the anchor source file.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "symbol": {
+            "default": null,
+            "description": "Optional symbol on the anchor line; resolves the anchor column/line.",
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "TestRunner": {
+        "enum": [
+          "cargo",
+          "nextest"
+        ],
+        "type": "string"
+      },
+      "ValidationOptions": {
+        "additionalProperties": false,
+        "properties": {
+          "allFeatures": {
+            "default": false,
+            "type": "boolean"
+          },
+          "context": {
+            "default": false,
+            "description": "Add bounded source excerpts and resolved dependency versions to diagnostics.",
+            "type": "boolean"
+          },
+          "features": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "noDefaultFeatures": {
+            "default": false,
+            "type": "boolean"
+          },
+          "runner": {
+            "$ref": "#/$defs/TestRunner",
+            "default": "cargo"
+          },
+          "sccache": {
+            "default": false,
+            "description": "Use an already configured, trusted sccache wrapper. Never replaces a wrapper.",
+            "type": "boolean"
+          },
+          "targetTriple": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "testFilter": {
+            "default": null,
+            "description": "A test-name substring, never a flag or an arbitrary filter expression.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "action": {
+        "$ref": "#/$defs/ExplainAction",
+        "description": "What to explain: macro expansion provenance, trait obligations, or cfg."
+      },
+      "anchor": {
+        "$ref": "#/$defs/ExplainAnchorInput"
+      },
+      "configuration": {
+        "$ref": "#/$defs/ValidationOptions",
+        "default": {
+          "allFeatures": false,
+          "context": false,
+          "features": [],
+          "noDefaultFeatures": false,
+          "runner": "cargo",
+          "sccache": false,
+          "targetTriple": null,
+          "testFilter": null
+        },
+        "description": "Recorded Cargo feature/target selection for this explanation."
+      },
+      "diagnosticId": {
+        "default": null,
+        "description": "Optional rustc diagnostic code, for example E0308 or E0277.",
+        "minLength": 1,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "dir": {
+        "default": null,
+        "minLength": 1,
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "action",
+      "anchor"
+    ],
+    "type": "object"
+  },
+  "repair": {
+    "$defs": {
+      "PatchInput": {
+        "additionalProperties": false,
+        "description": "One `oldString`/`newString` patch applied to the candidate copy only.",
+        "properties": {
+          "file": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "newString": {
+            "type": "string"
+          },
+          "oldString": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "file",
+          "oldString",
+          "newString"
+        ],
+        "type": "object"
+      },
+      "RepairAction": {
+        "description": "Supported lifecycle actions for the `repair` tool.",
+        "enum": [
+          "analyze",
+          "try",
+          "compare",
+          "minimize"
+        ],
+        "type": "string"
+      },
+      "RepairBudgetInput": {
+        "additionalProperties": false,
+        "description": "Optional narrowing budget from the request. Omitted values inherit the\nconfigured `[repair]` limits; supplied values may only narrow, never widen.",
+        "properties": {
+          "maxCandidates": {
+            "default": null,
+            "format": "uint32",
+            "maximum": 32,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "maxCompiles": {
+            "default": null,
+            "format": "uint32",
+            "maximum": 64,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "wallTimeMs": {
+            "default": null,
+            "format": "uint64",
+            "maximum": 3600000,
+            "minimum": 1000,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "RepairCandidateInput": {
+        "additionalProperties": false,
+        "description": "One host-supplied or generated candidate. A candidate's patches are always\napplied as one atomic unit; a stale or overlapping part rejects the whole\ncandidate.",
+        "properties": {
+          "id": {
+            "default": null,
+            "maxLength": 64,
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "patches": {
+            "items": {
+              "$ref": "#/$defs/PatchInput"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "source": {
+            "default": null,
+            "maxLength": 64,
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "RepairConstraintsInput": {
+        "additionalProperties": false,
+        "description": "Explicit constraints for candidate generation and comparison.",
+        "properties": {
+          "testTarget": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RepairTarget"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional Cargo gate run for every tried candidate. Without it a\ncomparison is `compileVerified` only."
+          }
+        },
+        "type": "object"
+      },
+      "RepairTarget": {
+        "description": "Cargo gate requested by `constraints.testTarget`.",
+        "enum": [
+          "check",
+          "clippy",
+          "test",
+          "doc",
+          "fmt",
+          "all"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "action": {
+        "$ref": "#/$defs/RepairAction"
+      },
+      "budget": {
+        "$ref": "#/$defs/RepairBudgetInput"
+      },
+      "candidates": {
+        "items": {
+          "$ref": "#/$defs/RepairCandidateInput"
+        },
+        "maxItems": 16,
+        "type": "array"
+      },
+      "changeId": {
+        "maxLength": 128,
+        "minLength": 1,
+        "type": "string"
+      },
+      "constraints": {
+        "$ref": "#/$defs/RepairConstraintsInput"
+      },
+      "diagnosticIds": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 64,
+        "type": "array"
+      },
+      "dir": {
+        "default": null,
+        "minLength": 1,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "failurePredicate": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RepairFailurePredicateInput"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "reductionScope": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RepairReductionScope"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "action",
+      "changeId"
+    ],
+    "type": "object"
+  },
+  "verify": {
+    "type": "object",
+    "properties": {
+      "dir": { "type": "string" },
+      "action": { "type": "string", "enum": ["matrix_plan", "matrix_run", "test_plan", "test_run", "test_candidate"] },
+      "requiredConfigurations": { "type": "object" },
+      "budget": { "type": "object" },
+      "changeId": { "type": "string" },
+      "configuration": { "type": "object" },
+      "testMappings": { "type": "array" },
+      "changedPaths": { "type": "array" },
+      "semanticReferences": { "type": "array" },
+      "testPatch": { "type": "object" },
+      "behaviorContract": { "type": "object" }
+    },
+    "required": ["dir"],
+    "additionalProperties": false
+  },
+  "work": {
+    "$defs": {
+      "NewFileInput": {
+        "additionalProperties": false,
+        "description": "One new file created in the candidate copy.",
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "file": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "file",
+          "content"
+        ],
+        "type": "object"
+      },
+      "PatchInput": {
+        "additionalProperties": false,
+        "description": "One `oldString`/`newString` patch applied to the candidate copy only.",
+        "properties": {
+          "file": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "newString": {
+            "type": "string"
+          },
+          "oldString": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "file",
+          "oldString",
+          "newString"
+        ],
+        "type": "object"
+      },
+      "WorkAction": {
+        "description": "Supported lifecycle actions for the `work` tool.",
+        "enum": [
+          "start",
+          "resume",
+          "inspect",
+          "cancel"
+        ],
+        "type": "string"
+      },
+      "WorkBudgetInput": {
+        "additionalProperties": false,
+        "description": "Per-call work budget overrides. Every value is bounded by the configured\n`[work]` ceiling; omitted values use the configured default.",
+        "properties": {
+          "maxCandidates": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "maxCompiles": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "maxHandoffs": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "wallTimeMs": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WorkChangeBudget": {
+        "additionalProperties": false,
+        "description": "Per-candidate change budget. Both fields are explicit; the executor refuses\na candidate that exceeds them before any candidate byte is staged.",
+        "properties": {
+          "maxNewFiles": {
+            "format": "uint32",
+            "maximum": 512,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxPatches": {
+            "format": "uint32",
+            "maximum": 512,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "maxPatches",
+          "maxNewFiles"
+        ],
+        "type": "object"
+      },
+      "WorkConstraints": {
+        "additionalProperties": false,
+        "description": "Work policy constraints. Offline work cannot require network-backed tools.",
+        "properties": {
+          "offline": {
+            "default": false,
+            "type": "boolean"
+          },
+          "requiredTools": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/WorkTool"
+            },
+            "maxItems": 8,
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "WorkGate": {
+        "description": "Typed acceptance gate. Only existing validated Cargo targets are allowed;\narbitrary shell commands cannot become plan nodes.",
+        "enum": [
+          "check",
+          "clippy",
+          "test",
+          "doc",
+          "fmt",
+          "all"
+        ],
+        "type": "string"
+      },
+      "WorkIntent": {
+        "additionalProperties": false,
+        "description": "Typed work intent assembled by the protocol boundary.",
+        "properties": {
+          "acceptanceGates": {
+            "items": {
+              "$ref": "#/$defs/WorkGate"
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "type": "array"
+          },
+          "changeBudget": {
+            "$ref": "#/$defs/WorkChangeBudget"
+          },
+          "contract": {
+            "description": "Behavior contract the candidate must satisfy (bounded text, never a\ncommand).",
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "scopePaths": {
+            "description": "Explicit target scope: candidate patches must stay inside these\nworkspace-relative paths.",
+            "items": {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 64,
+            "minItems": 1,
+            "type": "array"
+          },
+          "stopCondition": {
+            "description": "Explicit stop condition for the bounded repair loop.",
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": "string"
+          },
+          "template": {
+            "$ref": "#/$defs/WorkTemplate"
+          }
+        },
+        "required": [
+          "template",
+          "scopePaths",
+          "contract",
+          "stopCondition",
+          "acceptanceGates",
+          "changeBudget"
+        ],
+        "type": "object"
+      },
+      "WorkTemplate": {
+        "description": "Typed intent templates. A template is a bounded plan: explicit scope,\nbehavior contract, stop condition, acceptance gates, and change budget.",
+        "oneOf": [
+          {
+            "const": "implement_with_contract",
+            "description": "The host supplies the implementation candidate for the contract.",
+            "type": "string"
+          },
+          {
+            "const": "repair_compile_failure",
+            "description": "The host repairs the current candidate after a compile failure.",
+            "type": "string"
+          },
+          {
+            "const": "refactor_and_verify",
+            "description": "The host refactors and the executor verifies the requested gates.",
+            "type": "string"
+          }
+        ]
+      },
+      "WorkTool": {
+        "description": "Tools a work item may declare as required. A disabled or offline-backed\nrequired tool blocks the work instead of silently changing the plan.",
+        "enum": [
+          "change",
+          "check",
+          "docs",
+          "lsp",
+          "audit",
+          "crate_lookup"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "action": {
+        "$ref": "#/$defs/WorkAction"
+      },
+      "budget": {
+        "$ref": "#/$defs/WorkBudgetInput"
+      },
+      "changeId": {
+        "default": null,
+        "minLength": 1,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "constraints": {
+        "$ref": "#/$defs/WorkConstraints",
+        "default": {
+          "offline": false,
+          "requiredTools": []
+        }
+      },
+      "continuationToken": {
+        "default": null,
+        "minLength": 1,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "dir": {
+        "default": null,
+        "minLength": 1,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "intent": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WorkIntent"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "newFiles": {
+        "items": {
+          "$ref": "#/$defs/NewFileInput"
+        },
+        "maxItems": 512,
+        "type": "array"
+      },
+      "patches": {
+        "description": "Host candidate patches. `resume` requires at least one.",
+        "items": {
+          "$ref": "#/$defs/PatchInput"
+        },
+        "maxItems": 512,
+        "type": "array"
+      },
+      "workId": {
+        "default": null,
+        "minLength": 1,
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "action"
+    ],
+    "type": "object"
   }
 }

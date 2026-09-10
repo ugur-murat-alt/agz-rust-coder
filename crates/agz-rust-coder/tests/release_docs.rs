@@ -8,6 +8,7 @@ const ARCHITECTURE_ENGLISH: &str = include_str!("../../../docs/architecture.md")
 const ARCHITECTURE_TURKISH: &str = include_str!("../../../docs/architecture.tr.md");
 const BENCHMARK_ENGLISH: &str = include_str!("../../../docs/benchmark.md");
 const BENCHMARK_TURKISH: &str = include_str!("../../../docs/benchmark.tr.md");
+const PACKAGE_README: &str = include_str!("../README.md");
 
 #[test]
 fn bilingual_public_contract_is_in_sync() {
@@ -37,6 +38,29 @@ fn bilingual_public_contract_is_in_sync() {
                 .is_file(),
             "missing public document {relative}"
         );
+    }
+}
+
+#[test]
+fn profile_config_rows_appear_once_in_both_readmes() {
+    for (name, document) in [("README.md", ENGLISH), ("README.tr.md", TURKISH)] {
+        for key in [
+            "profile.max_report_bytes",
+            "profile.max_runs",
+            "profile.compare_samples",
+        ] {
+            let occurrences = document
+                .lines()
+                .filter(|line| line.starts_with('|'))
+                .filter(|line| {
+                    line.trim_matches('|')
+                        .split('|')
+                        .next()
+                        .is_some_and(|column| column.trim().trim_matches('`') == key)
+                })
+                .count();
+            assert_eq!(occurrences, 1, "{name}: {key} must appear exactly once");
+        }
     }
 }
 
@@ -78,6 +102,10 @@ fn paired_public_docs_preserve_machine_readable_contracts() {
             "`hierarchy`",
             "`rename`",
             "`refactor`",
+            "`change`",
+            "`repair`",
+            "`repair.max_candidates`",
+            "`change.scratch_dir`",
             "`gate.scope`",
             "`rust_analyzer.workspace_code`",
             "`telemetry.enabled`",
@@ -102,6 +130,37 @@ fn paired_public_docs_preserve_machine_readable_contracts() {
             "`non_inferiority_margin`",
         ],
     );
+}
+
+#[test]
+fn public_docs_list_the_context_tool_and_configuration() {
+    for document in [ENGLISH, TURKISH, TOOLS_ENGLISH, TOOLS_TURKISH] {
+        assert!(
+            document.contains("`context`"),
+            "missing context tool listing"
+        );
+    }
+    for document in [ENGLISH, TURKISH] {
+        assert!(
+            document.contains("`rust_context`"),
+            "missing rust_context direct-name listing"
+        );
+    }
+    assert!(PACKAGE_README.contains("`context`"));
+    for document in [TOOLS_ENGLISH, TOOLS_TURKISH] {
+        assert!(
+            document.contains("`context.max_capsules`"),
+            "missing context.max_capsules configuration listing"
+        );
+        assert!(
+            document.contains("`context.capsule_ttl_ms`"),
+            "missing context.capsule_ttl_ms configuration listing"
+        );
+        assert!(
+            document.contains("`context.max_items`"),
+            "missing context.max_items configuration listing"
+        );
+    }
 }
 
 fn assert_shared_markers(english: &str, turkish: &str, markers: &[&str]) {
@@ -136,9 +195,11 @@ fn assert_contract(english: &str, turkish: &str) -> Result<(), String> {
         english,
         &[
             "check",
+            "profile",
             "audit",
             "crate_lookup",
             "docs",
+            "explain",
             "symbol",
             "references",
             "definition",
@@ -147,15 +208,19 @@ fn assert_contract(english: &str, turkish: &str) -> Result<(), String> {
             "hierarchy",
             "rename",
             "refactor",
+            "change",
+            "repair",
         ],
     )?;
     let turkish_tools = keyed_table(
         turkish,
         &[
             "check",
+            "profile",
             "audit",
             "crate_lookup",
             "docs",
+            "explain",
             "symbol",
             "references",
             "definition",
@@ -164,6 +229,8 @@ fn assert_contract(english: &str, turkish: &str) -> Result<(), String> {
             "hierarchy",
             "rename",
             "refactor",
+            "change",
+            "repair",
         ],
     )?;
     for (tool, english_row) in &english_tools {
@@ -176,9 +243,11 @@ fn assert_contract(english: &str, turkish: &str) -> Result<(), String> {
     }
     for direct_name in [
         "rust_check",
+        "rust_profile",
         "rust_audit",
         "rust_crate_lookup",
         "rust_docs",
+        "rust_explain",
         "rust_symbol",
         "rust_references",
         "rust_definition",
@@ -187,6 +256,8 @@ fn assert_contract(english: &str, turkish: &str) -> Result<(), String> {
         "rust_hierarchy",
         "rust_rename",
         "rust_refactor",
+        "rust_change",
+        "rust_repair",
     ] {
         if english.matches(direct_name).count() != turkish.matches(direct_name).count() {
             return Err(format!("OpenCode direct tool drift: {direct_name}"));
@@ -202,6 +273,13 @@ fn assert_contract(english: &str, turkish: &str) -> Result<(), String> {
         "rust_analyzer.workspace_code",
         "docs.fallback",
         "limits.tool_output_bytes",
+        "change.max_bytes",
+        "repair.max_candidates",
+        "repair.max_compiles",
+        "repair.wall_time_ms",
+        "profile.max_report_bytes",
+        "profile.max_runs",
+        "profile.compare_samples",
         "telemetry.enabled",
     ];
     let english_config = keyed_table(english, &config_keys)?;

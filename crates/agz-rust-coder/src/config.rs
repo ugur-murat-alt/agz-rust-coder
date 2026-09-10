@@ -13,7 +13,7 @@ use std::{
 };
 
 use clap::{ArgAction, Parser};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const ENV_PREFIX: &str = "AGZ_RUST_CODER_";
@@ -46,9 +46,16 @@ pub struct Config {
     pub tools: ToolConfig,
     pub cargo: CargoConfig,
     pub gate: GateConfig,
+    pub change: ChangeConfig,
+    pub verify: VerifyConfig,
+    pub work: WorkConfig,
     pub rust_analyzer: RustAnalyzerConfig,
     pub docs: DocsConfig,
+    pub context: ContextConfig,
+    pub api: ApiConfig,
     pub limits: LimitsConfig,
+    pub profile: ProfileConfig,
+    pub repair: RepairConfig,
     pub telemetry: TelemetryConfig,
 }
 
@@ -62,12 +69,20 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolConfig {
     pub check: bool,
+    pub profile: bool,
     pub audit: bool,
     pub crate_lookup: bool,
     pub docs: bool,
+    pub context: bool,
+    pub api: bool,
+    pub verify: bool,
     pub lsp: bool,
+    pub explain: bool,
     pub rename: bool,
     pub refactor: bool,
+    pub change: bool,
+    pub repair: bool,
+    pub work: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +103,17 @@ pub struct GateConfig {
     pub lease_dir: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifyConfig {
+    pub max_cells: u64,
+    pub max_wall_ms: u64,
+    /// Maximum planned test items for `verify` test actions.
+    pub max_tests: u64,
+    /// Hard ceiling for repeated baseline/candidate test runs used to observe
+    /// flakiness. The request may only narrow this value.
+    pub repeats: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GateScope {
     Workspace,
@@ -102,6 +128,30 @@ pub enum GateCache {
     Auto,
     Project,
     Isolated,
+}
+
+/// Bounds and paths for the revision-bound changeset scratch area.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeConfig {
+    pub scratch_dir: PathBuf,
+    pub max_active: u64,
+    pub max_files: u64,
+    pub max_bytes: u64,
+    pub ttl_ms: u64,
+    pub max_revisions: u64,
+}
+
+/// Bounds for the bounded work executor. `wall_time_ms` is the per-work wall
+/// budget; `continuation_ttl_ms` bounds how long a single-use host handoff token
+/// stays valid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkConfig {
+    pub max_active: u64,
+    pub max_compiles: u64,
+    pub max_candidates: u64,
+    pub max_handoffs: u64,
+    pub wall_time_ms: u64,
+    pub continuation_ttl_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,6 +188,21 @@ pub enum DocsFallback {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextConfig {
+    pub max_capsules: u64,
+    pub capsule_ttl_ms: u64,
+    pub max_items: u64,
+}
+
+/// Bounds for `api` resolution evidence and compile-only probes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiConfig {
+    pub max_snippets: u64,
+    pub max_snippet_bytes: u64,
+    pub compile_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LimitsConfig {
     pub max_rename_edits: u64,
     pub max_refactor_edits: u64,
@@ -156,6 +221,77 @@ pub struct LimitsConfig {
     pub audit_file_bytes: u64,
     pub audit_total_bytes: u64,
     pub audit_findings: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileConfig {
+    pub max_report_bytes: u64,
+    pub max_runs: u64,
+    pub compare_samples: u64,
+    /// Maximum measured samples per side for `profile(action=runtime_compare)`.
+    pub runtime_max_samples: u64,
+    /// Minimum measured samples per side before any runtime speed claim.
+    pub runtime_min_samples: u64,
+    /// Maximum discarded warmup runs per side before measurement.
+    pub runtime_max_warmup: u64,
+    /// Hard timeout for one operator-authorized runtime adapter process.
+    pub runtime_run_timeout_ms: u64,
+    /// Operator-authorized, revision-bound runtime benchmark adapters. An empty
+    /// list keeps `runtime_compare` fail-closed.
+    pub runtime_adapters: Vec<RuntimeAdapterConfig>,
+}
+
+/// One operator-authorized runtime benchmark adapter. The fixed `command` and
+/// the workload argv below are the only executables `runtime_compare` may run;
+/// tool input selects an adapter and workload by name and never supplies argv.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeAdapterConfig {
+    pub name: String,
+    pub command: PathBuf,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Optional argv run once per side before warmup; its wall time is recorded
+    /// separately as preparation/compile time and never as workload time.
+    #[serde(default)]
+    pub prepare_args: Vec<String>,
+    #[serde(default)]
+    pub workloads: Vec<RuntimeWorkloadConfig>,
+    #[serde(default)]
+    pub metric: RuntimeMetric,
+}
+
+/// One named workload accepted by an adapter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeWorkloadConfig {
+    pub name: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+/// Metric actually measured by an adapter. MVP supports wall duration only;
+/// allocation, peak-RSS, and hardware counters stay `unavailable` unless a
+/// future adapter measures them for real.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeMetric {
+    #[default]
+    Duration,
+}
+
+/// Bounds for the compiler-driven `repair` tool. Request budgets may only
+/// narrow these configured caps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepairConfig {
+    pub max_candidates: u32,
+    pub max_compiles: u32,
+    pub wall_time_ms: u64,
+    /// Reduction attempts and Cargo runs for `action=minimize`. Minimization
+    /// searches a different, larger space than candidate repair, so it has its
+    /// own caps; a request may still only narrow them.
+    pub minimize_max_candidates: u32,
+    pub minimize_max_compiles: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,12 +317,20 @@ impl Config {
             },
             tools: ToolConfig {
                 check: true,
+                profile: true,
                 audit: true,
                 crate_lookup: true,
                 docs: true,
+                context: true,
+                api: true,
+                verify: true,
                 lsp: true,
+                explain: true,
                 rename: true,
                 refactor: true,
+                change: true,
+                repair: true,
+                work: true,
             },
             cargo: CargoConfig { path: None },
             gate: GateConfig {
@@ -200,6 +344,28 @@ impl Config {
                 cache_dir: state_dir.join("gate"),
                 lease_dir: state_dir.join("leases"),
             },
+            change: ChangeConfig {
+                scratch_dir: state_dir.join("change"),
+                max_active: 4,
+                max_files: 20_000,
+                max_bytes: 268_435_456,
+                ttl_ms: 86_400_000,
+                max_revisions: 32,
+            },
+            verify: VerifyConfig {
+                max_cells: 8,
+                max_wall_ms: 120_000,
+                max_tests: 16,
+                repeats: 2,
+            },
+            work: WorkConfig {
+                max_active: 4,
+                max_compiles: 12,
+                max_candidates: 4,
+                max_handoffs: 3,
+                wall_time_ms: 600_000,
+                continuation_ttl_ms: 900_000,
+            },
             rust_analyzer: RustAnalyzerConfig {
                 path: None,
                 timeout_ms: 30_000,
@@ -212,6 +378,16 @@ impl Config {
                 timeout_ms: 300_000,
                 fallback: DocsFallback::Auto,
                 cache_dir: docs_dir,
+            },
+            context: ContextConfig {
+                max_capsules: 32,
+                capsule_ttl_ms: 900_000,
+                max_items: 64,
+            },
+            api: ApiConfig {
+                max_snippets: 4,
+                max_snippet_bytes: 32_768,
+                compile_timeout_ms: 120_000,
             },
             limits: LimitsConfig {
                 max_rename_edits: 200,
@@ -231,6 +407,23 @@ impl Config {
                 audit_file_bytes: 2_097_152,
                 audit_total_bytes: 67_108_864,
                 audit_findings: 200,
+            },
+            profile: ProfileConfig {
+                max_report_bytes: 4 * 1024 * 1024,
+                max_runs: 4,
+                compare_samples: 3,
+                runtime_max_samples: 8,
+                runtime_min_samples: 3,
+                runtime_max_warmup: 2,
+                runtime_run_timeout_ms: 120_000,
+                runtime_adapters: Vec::new(),
+            },
+            repair: RepairConfig {
+                max_candidates: 4,
+                max_compiles: 4,
+                wall_time_ms: 120_000,
+                minimize_max_candidates: 32,
+                minimize_max_compiles: 16,
             },
             telemetry: TelemetryConfig {
                 enabled: true,
@@ -322,6 +515,15 @@ impl Config {
         )?;
         check_range("gate.debounce_ms", self.gate.debounce_ms, 0, 5_000)?;
         check_range("gate.host_concurrency", self.gate.host_concurrency, 1, 64)?;
+        check_range("verify.max_cells", self.verify.max_cells, 1, 64)?;
+        check_range(
+            "verify.max_wall_ms",
+            self.verify.max_wall_ms,
+            1_000,
+            3_600_000,
+        )?;
+        check_range("verify.max_tests", self.verify.max_tests, 1, 64)?;
+        check_range("verify.repeats", self.verify.repeats, 1, 5)?;
         check_range(
             "rust_analyzer.timeout_ms",
             self.rust_analyzer.timeout_ms,
@@ -341,6 +543,111 @@ impl Config {
             16,
         )?;
         check_range("docs.timeout_ms", self.docs.timeout_ms, 1, 3_600_000)?;
+        check_range("change.max_active", self.change.max_active, 1, 64)?;
+        check_range("change.max_files", self.change.max_files, 1, 1_000_000)?;
+        check_range("change.max_bytes", self.change.max_bytes, 1_024, u64::MAX)?;
+        check_range("change.ttl_ms", self.change.ttl_ms, 1, u64::MAX)?;
+        check_range("change.max_revisions", self.change.max_revisions, 1, 4_096)?;
+        check_range("work.max_active", self.work.max_active, 1, 64)?;
+        check_range("work.max_compiles", self.work.max_compiles, 1, 4_096)?;
+        check_range("work.max_candidates", self.work.max_candidates, 1, 256)?;
+        check_range("work.max_handoffs", self.work.max_handoffs, 0, 64)?;
+        check_range("work.wall_time_ms", self.work.wall_time_ms, 1, 86_400_000)?;
+        check_range(
+            "work.continuation_ttl_ms",
+            self.work.continuation_ttl_ms,
+            1_000,
+            86_400_000,
+        )?;
+        check_range("context.max_capsules", self.context.max_capsules, 1, 1_024)?;
+        check_range(
+            "context.capsule_ttl_ms",
+            self.context.capsule_ttl_ms,
+            1_000,
+            86_400_000,
+        )?;
+        check_range("context.max_items", self.context.max_items, 1, 256)?;
+        check_range("api.max_snippets", self.api.max_snippets, 1, 16)?;
+        check_range(
+            "api.max_snippet_bytes",
+            self.api.max_snippet_bytes,
+            256,
+            1_048_576,
+        )?;
+        check_range(
+            "api.compile_timeout_ms",
+            self.api.compile_timeout_ms,
+            1_000,
+            3_600_000,
+        )?;
+        check_range(
+            "profile.max_report_bytes",
+            self.profile.max_report_bytes,
+            1_024,
+            67_108_864,
+        )?;
+        check_range("profile.max_runs", self.profile.max_runs, 1, 16)?;
+        check_range(
+            "profile.compare_samples",
+            self.profile.compare_samples,
+            1,
+            8,
+        )?;
+        check_range(
+            "repair.max_candidates",
+            u64::from(self.repair.max_candidates),
+            1,
+            32,
+        )?;
+        check_range(
+            "profile.runtime_max_samples",
+            self.profile.runtime_max_samples,
+            1,
+            32,
+        )?;
+        check_range(
+            "repair.max_compiles",
+            u64::from(self.repair.max_compiles),
+            1,
+            64,
+        )?;
+        check_range(
+            "repair.wall_time_ms",
+            self.repair.wall_time_ms,
+            1_000,
+            3_600_000,
+        )?;
+        check_range(
+            "profile.runtime_min_samples",
+            self.profile.runtime_min_samples,
+            2,
+            self.profile.runtime_max_samples,
+        )?;
+        check_range(
+            "profile.runtime_max_warmup",
+            self.profile.runtime_max_warmup,
+            0,
+            16,
+        )?;
+        check_range(
+            "profile.runtime_run_timeout_ms",
+            self.profile.runtime_run_timeout_ms,
+            1,
+            86_400_000,
+        )?;
+        validate_runtime_adapters(&self.profile.runtime_adapters)?;
+        check_range(
+            "repair.minimize_max_candidates",
+            u64::from(self.repair.minimize_max_candidates),
+            1,
+            256,
+        )?;
+        check_range(
+            "repair.minimize_max_compiles",
+            u64::from(self.repair.minimize_max_compiles),
+            3,
+            64,
+        )?;
         check_range(
             "limits.tool_output_bytes",
             self.limits.tool_output_bytes,
@@ -414,6 +721,11 @@ impl Config {
             ("gate.lease_dir", self.gate.lease_dir.as_path(), true),
             ("docs.cache_dir", self.docs.cache_dir.as_path(), true),
             (
+                "change.scratch_dir",
+                self.change.scratch_dir.as_path(),
+                self.tools.change,
+            ),
+            (
                 "telemetry.path",
                 self.telemetry.path.as_path(),
                 self.telemetry.enabled,
@@ -438,6 +750,9 @@ impl Config {
         if self.tools.check {
             names.push("check");
         }
+        if self.tools.profile {
+            names.push("profile");
+        }
         if self.tools.audit {
             names.push("audit");
         }
@@ -446,6 +761,18 @@ impl Config {
         }
         if self.tools.docs {
             names.push("docs");
+        }
+        if self.tools.context {
+            names.push("context");
+        }
+        if self.tools.api {
+            names.push("api");
+        }
+        if self.tools.explain {
+            names.push("explain");
+        }
+        if self.tools.verify {
+            names.push("verify");
         }
         if self.tools.lsp {
             names.extend([
@@ -462,6 +789,15 @@ impl Config {
             if self.tools.refactor {
                 names.push("refactor");
             }
+        }
+        if self.tools.change {
+            names.push("change");
+        }
+        if self.tools.repair && self.tools.change {
+            names.push("repair");
+        }
+        if self.tools.work {
+            names.push("work");
         }
         names
     }
@@ -489,18 +825,34 @@ pub struct CliOptions {
     pub allow_dependency_root: Option<Vec<PathBuf>>,
     #[arg(long = "tools-check")]
     pub tools_check: Option<bool>,
+    #[arg(long = "tools-profile")]
+    pub tools_profile: Option<bool>,
     #[arg(long = "tools-audit")]
     pub tools_audit: Option<bool>,
     #[arg(long = "tools-crate-lookup")]
     pub tools_crate_lookup: Option<bool>,
     #[arg(long = "tools-docs")]
     pub tools_docs: Option<bool>,
+    #[arg(long = "tools-context")]
+    pub tools_context: Option<bool>,
+    #[arg(long = "tools-api")]
+    pub tools_api: Option<bool>,
+    #[arg(long = "tools-verify")]
+    pub tools_verify: Option<bool>,
     #[arg(long = "tools-lsp")]
     pub tools_lsp: Option<bool>,
+    #[arg(long = "tools-explain")]
+    pub tools_explain: Option<bool>,
     #[arg(long = "tools-rename")]
     pub tools_rename: Option<bool>,
     #[arg(long = "tools-refactor")]
     pub tools_refactor: Option<bool>,
+    #[arg(long = "tools-change")]
+    pub tools_change: Option<bool>,
+    #[arg(long = "tools-repair")]
+    pub tools_repair: Option<bool>,
+    #[arg(long = "tools-work")]
+    pub tools_work: Option<bool>,
     #[arg(long = "cargo-path")]
     pub cargo_path: Option<PathBuf>,
     #[arg(long = "gate-hard-timeout-ms")]
@@ -521,6 +873,38 @@ pub struct CliOptions {
     pub gate_cache_dir: Option<PathBuf>,
     #[arg(long = "gate-lease-dir")]
     pub gate_lease_dir: Option<PathBuf>,
+    #[arg(long = "change-scratch-dir")]
+    pub change_scratch_dir: Option<PathBuf>,
+    #[arg(long = "change-max-active")]
+    pub change_max_active: Option<u64>,
+    #[arg(long = "change-max-files")]
+    pub change_max_files: Option<u64>,
+    #[arg(long = "change-max-bytes")]
+    pub change_max_bytes: Option<u64>,
+    #[arg(long = "change-ttl-ms")]
+    pub change_ttl_ms: Option<u64>,
+    #[arg(long = "change-max-revisions")]
+    pub change_max_revisions: Option<u64>,
+    #[arg(long = "verify-max-cells")]
+    pub verify_max_cells: Option<u64>,
+    #[arg(long = "verify-max-wall-ms")]
+    pub verify_max_wall_ms: Option<u64>,
+    #[arg(long = "verify-max-tests")]
+    pub verify_max_tests: Option<u64>,
+    #[arg(long = "verify-repeats")]
+    pub verify_repeats: Option<u64>,
+    #[arg(long = "work-max-active")]
+    pub work_max_active: Option<u64>,
+    #[arg(long = "work-max-compiles")]
+    pub work_max_compiles: Option<u64>,
+    #[arg(long = "work-max-candidates")]
+    pub work_max_candidates: Option<u64>,
+    #[arg(long = "work-max-handoffs")]
+    pub work_max_handoffs: Option<u64>,
+    #[arg(long = "work-wall-time-ms")]
+    pub work_wall_time_ms: Option<u64>,
+    #[arg(long = "work-continuation-ttl-ms")]
+    pub work_continuation_ttl_ms: Option<u64>,
     #[arg(long = "rust-analyzer-path")]
     pub rust_analyzer_path: Option<PathBuf>,
     #[arg(long = "rust-analyzer-timeout-ms")]
@@ -539,6 +923,42 @@ pub struct CliOptions {
     pub docs_fallback: Option<String>,
     #[arg(long = "docs-cache-dir")]
     pub docs_cache_dir: Option<PathBuf>,
+    #[arg(long = "context-max-capsules")]
+    pub context_max_capsules: Option<u64>,
+    #[arg(long = "context-capsule-ttl-ms")]
+    pub context_capsule_ttl_ms: Option<u64>,
+    #[arg(long = "context-max-items")]
+    pub context_max_items: Option<u64>,
+    #[arg(long = "api-max-snippets")]
+    pub api_max_snippets: Option<u64>,
+    #[arg(long = "api-max-snippet-bytes")]
+    pub api_max_snippet_bytes: Option<u64>,
+    #[arg(long = "api-compile-timeout-ms")]
+    pub api_compile_timeout_ms: Option<u64>,
+    #[arg(long = "profile-max-report-bytes")]
+    pub profile_max_report_bytes: Option<u64>,
+    #[arg(long = "profile-max-runs")]
+    pub profile_max_runs: Option<u64>,
+    #[arg(long = "profile-compare-samples")]
+    pub profile_compare_samples: Option<u64>,
+    #[arg(long = "repair-max-candidates")]
+    pub repair_max_candidates: Option<u64>,
+    #[arg(long = "repair-max-compiles")]
+    pub repair_max_compiles: Option<u64>,
+    #[arg(long = "repair-wall-time-ms")]
+    pub repair_wall_time_ms: Option<u64>,
+    #[arg(long = "profile-runtime-max-samples")]
+    pub profile_runtime_max_samples: Option<u64>,
+    #[arg(long = "profile-runtime-min-samples")]
+    pub profile_runtime_min_samples: Option<u64>,
+    #[arg(long = "profile-runtime-max-warmup")]
+    pub profile_runtime_max_warmup: Option<u64>,
+    #[arg(long = "profile-runtime-run-timeout-ms")]
+    pub profile_runtime_run_timeout_ms: Option<u64>,
+    #[arg(long = "repair-minimize-max-candidates")]
+    pub repair_minimize_max_candidates: Option<u64>,
+    #[arg(long = "repair-minimize-max-compiles")]
+    pub repair_minimize_max_compiles: Option<u64>,
     #[arg(long = "max-rename-edits")]
     pub max_rename_edits: Option<u64>,
     #[arg(long = "max-refactor-edits")]
@@ -592,9 +1012,16 @@ struct FileConfig {
     tools: Option<FileToolConfig>,
     cargo: Option<FileCargoConfig>,
     gate: Option<FileGateConfig>,
+    change: Option<FileChangeConfig>,
+    verify: Option<FileVerifyConfig>,
+    work: Option<FileWorkConfig>,
     rust_analyzer: Option<FileRustAnalyzerConfig>,
     docs: Option<FileDocsConfig>,
+    context: Option<FileContextConfig>,
+    api: Option<FileApiConfig>,
     limits: Option<FileLimitsConfig>,
+    profile: Option<FileProfileConfig>,
+    repair: Option<FileRepairConfig>,
     telemetry: Option<FileTelemetryConfig>,
 }
 
@@ -609,12 +1036,20 @@ struct FileServerConfig {
 #[serde(deny_unknown_fields)]
 struct FileToolConfig {
     check: Option<bool>,
+    profile: Option<bool>,
     audit: Option<bool>,
     crate_lookup: Option<bool>,
     docs: Option<bool>,
+    context: Option<bool>,
+    api: Option<bool>,
+    verify: Option<bool>,
     lsp: Option<bool>,
+    explain: Option<bool>,
     rename: Option<bool>,
     refactor: Option<bool>,
+    change: Option<bool>,
+    repair: Option<bool>,
+    work: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -645,12 +1080,43 @@ enum GateScopeFile {
     Affected,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct FileVerifyConfig {
+    max_cells: Option<u64>,
+    max_wall_ms: Option<u64>,
+    max_tests: Option<u64>,
+    repeats: Option<u64>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum GateCacheFile {
     Auto,
     Project,
     Isolated,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct FileChangeConfig {
+    scratch_dir: Option<PathBuf>,
+    max_active: Option<u64>,
+    max_files: Option<u64>,
+    max_bytes: Option<u64>,
+    ttl_ms: Option<u64>,
+    max_revisions: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct FileWorkConfig {
+    max_active: Option<u64>,
+    max_compiles: Option<u64>,
+    max_candidates: Option<u64>,
+    max_handoffs: Option<u64>,
+    wall_time_ms: Option<u64>,
+    continuation_ttl_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -690,6 +1156,22 @@ enum DocsFallbackFile {
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
+struct FileContextConfig {
+    max_capsules: Option<u64>,
+    capsule_ttl_ms: Option<u64>,
+    max_items: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct FileApiConfig {
+    max_snippets: Option<u64>,
+    max_snippet_bytes: Option<u64>,
+    compile_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct FileLimitsConfig {
     max_rename_edits: Option<u64>,
     max_refactor_edits: Option<u64>,
@@ -708,6 +1190,35 @@ struct FileLimitsConfig {
     audit_file_bytes: Option<u64>,
     audit_total_bytes: Option<u64>,
     audit_findings: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct FileProfileConfig {
+    max_report_bytes: Option<u64>,
+    max_runs: Option<u64>,
+    compare_samples: Option<u64>,
+    runtime: Option<FileRuntimeConfig>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct FileRuntimeConfig {
+    max_samples: Option<u64>,
+    min_samples: Option<u64>,
+    max_warmup: Option<u64>,
+    run_timeout_ms: Option<u64>,
+    adapters: Option<Vec<RuntimeAdapterConfig>>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct FileRepairConfig {
+    max_candidates: Option<u32>,
+    max_compiles: Option<u32>,
+    wall_time_ms: Option<u64>,
+    minimize_max_candidates: Option<u32>,
+    minimize_max_compiles: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -742,12 +1253,20 @@ fn apply_file(config: &mut Config, file: FileConfig) {
     }
     if let Some(tools) = file.tools {
         apply_opt(&mut config.tools.check, tools.check);
+        apply_opt(&mut config.tools.profile, tools.profile);
         apply_opt(&mut config.tools.audit, tools.audit);
         apply_opt(&mut config.tools.crate_lookup, tools.crate_lookup);
         apply_opt(&mut config.tools.docs, tools.docs);
+        apply_opt(&mut config.tools.context, tools.context);
+        apply_opt(&mut config.tools.api, tools.api);
+        apply_opt(&mut config.tools.verify, tools.verify);
         apply_opt(&mut config.tools.lsp, tools.lsp);
+        apply_opt(&mut config.tools.explain, tools.explain);
         apply_opt(&mut config.tools.rename, tools.rename);
         apply_opt(&mut config.tools.refactor, tools.refactor);
+        apply_opt(&mut config.tools.change, tools.change);
+        apply_opt(&mut config.tools.repair, tools.repair);
+        apply_opt(&mut config.tools.work, tools.work);
     }
     if let Some(cargo) = file.cargo {
         if let Some(path) = cargo.path {
@@ -772,6 +1291,31 @@ fn apply_file(config: &mut Config, file: FileConfig) {
         apply_opt(&mut config.gate.cache_dir, gate.cache_dir);
         apply_opt(&mut config.gate.lease_dir, gate.lease_dir);
     }
+    if let Some(change) = file.change {
+        apply_opt(&mut config.change.scratch_dir, change.scratch_dir);
+        apply_opt(&mut config.change.max_active, change.max_active);
+        apply_opt(&mut config.change.max_files, change.max_files);
+        apply_opt(&mut config.change.max_bytes, change.max_bytes);
+        apply_opt(&mut config.change.ttl_ms, change.ttl_ms);
+        apply_opt(&mut config.change.max_revisions, change.max_revisions);
+    }
+    if let Some(verify) = file.verify {
+        apply_opt(&mut config.verify.max_cells, verify.max_cells);
+        apply_opt(&mut config.verify.max_wall_ms, verify.max_wall_ms);
+        apply_opt(&mut config.verify.max_tests, verify.max_tests);
+        apply_opt(&mut config.verify.repeats, verify.repeats);
+    }
+    if let Some(work) = file.work {
+        apply_opt(&mut config.work.max_active, work.max_active);
+        apply_opt(&mut config.work.max_compiles, work.max_compiles);
+        apply_opt(&mut config.work.max_candidates, work.max_candidates);
+        apply_opt(&mut config.work.max_handoffs, work.max_handoffs);
+        apply_opt(&mut config.work.wall_time_ms, work.wall_time_ms);
+        apply_opt(
+            &mut config.work.continuation_ttl_ms,
+            work.continuation_ttl_ms,
+        );
+    }
     if let Some(ra) = file.rust_analyzer {
         if let Some(path) = ra.path {
             config.rust_analyzer.path = Some(path);
@@ -790,6 +1334,16 @@ fn apply_file(config: &mut Config, file: FileConfig) {
             config.docs.fallback = value.into();
         }
         apply_opt(&mut config.docs.cache_dir, docs.cache_dir);
+    }
+    if let Some(context) = file.context {
+        apply_opt(&mut config.context.max_capsules, context.max_capsules);
+        apply_opt(&mut config.context.capsule_ttl_ms, context.capsule_ttl_ms);
+        apply_opt(&mut config.context.max_items, context.max_items);
+    }
+    if let Some(api) = file.api {
+        apply_opt(&mut config.api.max_snippets, api.max_snippets);
+        apply_opt(&mut config.api.max_snippet_bytes, api.max_snippet_bytes);
+        apply_opt(&mut config.api.compile_timeout_ms, api.compile_timeout_ms);
     }
     if let Some(limits) = file.limits {
         apply_opt(&mut config.limits.max_rename_edits, limits.max_rename_edits);
@@ -834,6 +1388,39 @@ fn apply_file(config: &mut Config, file: FileConfig) {
         );
         apply_opt(&mut config.limits.audit_findings, limits.audit_findings);
     }
+    if let Some(profile) = file.profile {
+        apply_opt(
+            &mut config.profile.max_report_bytes,
+            profile.max_report_bytes,
+        );
+        apply_opt(&mut config.profile.max_runs, profile.max_runs);
+        apply_opt(&mut config.profile.compare_samples, profile.compare_samples);
+        if let Some(runtime) = profile.runtime {
+            apply_opt(&mut config.profile.runtime_max_samples, runtime.max_samples);
+            apply_opt(&mut config.profile.runtime_min_samples, runtime.min_samples);
+            apply_opt(&mut config.profile.runtime_max_warmup, runtime.max_warmup);
+            apply_opt(
+                &mut config.profile.runtime_run_timeout_ms,
+                runtime.run_timeout_ms,
+            );
+            if let Some(adapters) = runtime.adapters {
+                config.profile.runtime_adapters = adapters;
+            }
+        }
+    }
+    if let Some(repair) = file.repair {
+        apply_opt(&mut config.repair.max_candidates, repair.max_candidates);
+        apply_opt(&mut config.repair.max_compiles, repair.max_compiles);
+        apply_opt(&mut config.repair.wall_time_ms, repair.wall_time_ms);
+        apply_opt(
+            &mut config.repair.minimize_max_candidates,
+            repair.minimize_max_candidates,
+        );
+        apply_opt(
+            &mut config.repair.minimize_max_compiles,
+            repair.minimize_max_compiles,
+        );
+    }
     if let Some(telemetry) = file.telemetry {
         apply_opt(&mut config.telemetry.enabled, telemetry.enabled);
         apply_opt(&mut config.telemetry.path, telemetry.path);
@@ -864,12 +1451,20 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
             config.server.allow_dependency_roots = parse_path_list(value).map_err(invalid)?;
         }
         "TOOLS__CHECK" => config.tools.check = parse_bool(value).map_err(invalid)?,
+        "TOOLS__PROFILE" => config.tools.profile = parse_bool(value).map_err(invalid)?,
         "TOOLS__AUDIT" => config.tools.audit = parse_bool(value).map_err(invalid)?,
         "TOOLS__CRATE_LOOKUP" => config.tools.crate_lookup = parse_bool(value).map_err(invalid)?,
         "TOOLS__DOCS" => config.tools.docs = parse_bool(value).map_err(invalid)?,
+        "TOOLS__CONTEXT" => config.tools.context = parse_bool(value).map_err(invalid)?,
+        "TOOLS__API" => config.tools.api = parse_bool(value).map_err(invalid)?,
+        "TOOLS__VERIFY" => config.tools.verify = parse_bool(value).map_err(invalid)?,
         "TOOLS__LSP" => config.tools.lsp = parse_bool(value).map_err(invalid)?,
+        "TOOLS__EXPLAIN" => config.tools.explain = parse_bool(value).map_err(invalid)?,
         "TOOLS__RENAME" => config.tools.rename = parse_bool(value).map_err(invalid)?,
         "TOOLS__REFACTOR" => config.tools.refactor = parse_bool(value).map_err(invalid)?,
+        "TOOLS__CHANGE" => config.tools.change = parse_bool(value).map_err(invalid)?,
+        "TOOLS__REPAIR" => config.tools.repair = parse_bool(value).map_err(invalid)?,
+        "TOOLS__WORK" => config.tools.work = parse_bool(value).map_err(invalid)?,
         "CARGO__PATH" => config.cargo.path = Some(nonempty_path(value).map_err(invalid)?),
         "GATE__HARD_TIMEOUT_MS" => {
             config.gate.hard_timeout_ms = parse_u64(value).map_err(invalid)?;
@@ -888,6 +1483,46 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
         }
         "GATE__CACHE_DIR" => config.gate.cache_dir = nonempty_path(value).map_err(invalid)?,
         "GATE__LEASE_DIR" => config.gate.lease_dir = nonempty_path(value).map_err(invalid)?,
+        "CHANGE__SCRATCH_DIR" => {
+            config.change.scratch_dir = nonempty_path(value).map_err(invalid)?;
+        }
+        "CHANGE__MAX_ACTIVE" => {
+            config.change.max_active = parse_u64(value).map_err(invalid)?;
+        }
+        "CHANGE__MAX_FILES" => {
+            config.change.max_files = parse_u64(value).map_err(invalid)?;
+        }
+        "CHANGE__MAX_BYTES" => {
+            config.change.max_bytes = parse_u64(value).map_err(invalid)?;
+        }
+        "CHANGE__TTL_MS" => {
+            config.change.ttl_ms = parse_u64(value).map_err(invalid)?;
+        }
+        "CHANGE__MAX_REVISIONS" => {
+            config.change.max_revisions = parse_u64(value).map_err(invalid)?;
+        }
+        "VERIFY__MAX_CELLS" => config.verify.max_cells = parse_u64(value).map_err(invalid)?,
+        "VERIFY__MAX_WALL_MS" => config.verify.max_wall_ms = parse_u64(value).map_err(invalid)?,
+        "VERIFY__MAX_TESTS" => config.verify.max_tests = parse_u64(value).map_err(invalid)?,
+        "VERIFY__REPEATS" => config.verify.repeats = parse_u64(value).map_err(invalid)?,
+        "WORK__MAX_ACTIVE" => {
+            config.work.max_active = parse_u64(value).map_err(invalid)?;
+        }
+        "WORK__MAX_COMPILES" => {
+            config.work.max_compiles = parse_u64(value).map_err(invalid)?;
+        }
+        "WORK__MAX_CANDIDATES" => {
+            config.work.max_candidates = parse_u64(value).map_err(invalid)?;
+        }
+        "WORK__MAX_HANDOFFS" => {
+            config.work.max_handoffs = parse_u64(value).map_err(invalid)?;
+        }
+        "WORK__WALL_TIME_MS" => {
+            config.work.wall_time_ms = parse_u64(value).map_err(invalid)?;
+        }
+        "WORK__CONTINUATION_TTL_MS" => {
+            config.work.continuation_ttl_ms = parse_u64(value).map_err(invalid)?;
+        }
         "RUST_ANALYZER__PATH" => {
             config.rust_analyzer.path = Some(nonempty_path(value).map_err(invalid)?);
         }
@@ -909,6 +1544,58 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
         "DOCS__TIMEOUT_MS" => config.docs.timeout_ms = parse_u64(value).map_err(invalid)?,
         "DOCS__FALLBACK" => config.docs.fallback = parse_fallback(value).map_err(invalid)?,
         "DOCS__CACHE_DIR" => config.docs.cache_dir = nonempty_path(value).map_err(invalid)?,
+        "CONTEXT__MAX_CAPSULES" => {
+            config.context.max_capsules = parse_u64(value).map_err(invalid)?;
+        }
+        "CONTEXT__CAPSULE_TTL_MS" => {
+            config.context.capsule_ttl_ms = parse_u64(value).map_err(invalid)?;
+        }
+        "CONTEXT__MAX_ITEMS" => {
+            config.context.max_items = parse_u64(value).map_err(invalid)?;
+        }
+        "API__MAX_SNIPPETS" => {
+            config.api.max_snippets = parse_u64(value).map_err(invalid)?;
+        }
+        "API__MAX_SNIPPET_BYTES" => {
+            config.api.max_snippet_bytes = parse_u64(value).map_err(invalid)?;
+        }
+        "API__COMPILE_TIMEOUT_MS" => {
+            config.api.compile_timeout_ms = parse_u64(value).map_err(invalid)?;
+        }
+        "PROFILE__MAX_REPORT_BYTES" => {
+            config.profile.max_report_bytes = parse_u64(value).map_err(invalid)?;
+        }
+        "PROFILE__MAX_RUNS" => config.profile.max_runs = parse_u64(value).map_err(invalid)?,
+        "PROFILE__COMPARE_SAMPLES" => {
+            config.profile.compare_samples = parse_u64(value).map_err(invalid)?;
+        }
+        "REPAIR__MAX_CANDIDATES" => {
+            config.repair.max_candidates = parse_u32(value).map_err(invalid)?;
+        }
+        "REPAIR__MAX_COMPILES" => {
+            config.repair.max_compiles = parse_u32(value).map_err(invalid)?;
+        }
+        "REPAIR__MINIMIZE_MAX_CANDIDATES" => {
+            config.repair.minimize_max_candidates = parse_u32(value).map_err(invalid)?;
+        }
+        "REPAIR__MINIMIZE_MAX_COMPILES" => {
+            config.repair.minimize_max_compiles = parse_u32(value).map_err(invalid)?;
+        }
+        "REPAIR__WALL_TIME_MS" => {
+            config.repair.wall_time_ms = parse_u64(value).map_err(invalid)?;
+        }
+        "PROFILE__RUNTIME_MAX_SAMPLES" => {
+            config.profile.runtime_max_samples = parse_u64(value).map_err(invalid)?;
+        }
+        "PROFILE__RUNTIME_MIN_SAMPLES" => {
+            config.profile.runtime_min_samples = parse_u64(value).map_err(invalid)?;
+        }
+        "PROFILE__RUNTIME_MAX_WARMUP" => {
+            config.profile.runtime_max_warmup = parse_u64(value).map_err(invalid)?;
+        }
+        "PROFILE__RUNTIME_RUN_TIMEOUT_MS" => {
+            config.profile.runtime_run_timeout_ms = parse_u64(value).map_err(invalid)?;
+        }
         "LIMITS__MAX_RENAME_EDITS" => {
             config.limits.max_rename_edits = parse_u64(value).map_err(invalid)?;
         }
@@ -985,12 +1672,20 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
         value.clone_into(&mut config.server.allow_dependency_roots);
     }
     apply_opt(&mut config.tools.check, cli.tools_check);
+    apply_opt(&mut config.tools.profile, cli.tools_profile);
     apply_opt(&mut config.tools.audit, cli.tools_audit);
     apply_opt(&mut config.tools.crate_lookup, cli.tools_crate_lookup);
     apply_opt(&mut config.tools.docs, cli.tools_docs);
+    apply_opt(&mut config.tools.context, cli.tools_context);
+    apply_opt(&mut config.tools.api, cli.tools_api);
+    apply_opt(&mut config.tools.verify, cli.tools_verify);
     apply_opt(&mut config.tools.lsp, cli.tools_lsp);
+    apply_opt(&mut config.tools.explain, cli.tools_explain);
     apply_opt(&mut config.tools.rename, cli.tools_rename);
     apply_opt(&mut config.tools.refactor, cli.tools_refactor);
+    apply_opt(&mut config.tools.change, cli.tools_change);
+    apply_opt(&mut config.tools.repair, cli.tools_repair);
+    apply_opt(&mut config.tools.work, cli.tools_work);
     if let Some(path) = cli.cargo_path.clone() {
         config.cargo.path = Some(path);
     }
@@ -1010,6 +1705,28 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
     );
     apply_opt(&mut config.gate.cache_dir, cli.gate_cache_dir.clone());
     apply_opt(&mut config.gate.lease_dir, cli.gate_lease_dir.clone());
+    apply_opt(
+        &mut config.change.scratch_dir,
+        cli.change_scratch_dir.clone(),
+    );
+    apply_opt(&mut config.change.max_active, cli.change_max_active);
+    apply_opt(&mut config.change.max_files, cli.change_max_files);
+    apply_opt(&mut config.change.max_bytes, cli.change_max_bytes);
+    apply_opt(&mut config.change.ttl_ms, cli.change_ttl_ms);
+    apply_opt(&mut config.change.max_revisions, cli.change_max_revisions);
+    apply_opt(&mut config.verify.max_cells, cli.verify_max_cells);
+    apply_opt(&mut config.verify.max_wall_ms, cli.verify_max_wall_ms);
+    apply_opt(&mut config.verify.max_tests, cli.verify_max_tests);
+    apply_opt(&mut config.verify.repeats, cli.verify_repeats);
+    apply_opt(&mut config.work.max_active, cli.work_max_active);
+    apply_opt(&mut config.work.max_compiles, cli.work_max_compiles);
+    apply_opt(&mut config.work.max_candidates, cli.work_max_candidates);
+    apply_opt(&mut config.work.max_handoffs, cli.work_max_handoffs);
+    apply_opt(&mut config.work.wall_time_ms, cli.work_wall_time_ms);
+    apply_opt(
+        &mut config.work.continuation_ttl_ms,
+        cli.work_continuation_ttl_ms,
+    );
     if let Some(path) = cli.rust_analyzer_path.clone() {
         config.rust_analyzer.path = Some(path);
     }
@@ -1036,6 +1753,68 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
             parse_fallback(value).map_err(|message| invalid("docs.fallback", message))?;
     }
     apply_opt(&mut config.docs.cache_dir, cli.docs_cache_dir.clone());
+    apply_opt(&mut config.context.max_capsules, cli.context_max_capsules);
+    apply_opt(
+        &mut config.context.capsule_ttl_ms,
+        cli.context_capsule_ttl_ms,
+    );
+    apply_opt(&mut config.context.max_items, cli.context_max_items);
+    apply_opt(&mut config.api.max_snippets, cli.api_max_snippets);
+    apply_opt(&mut config.api.max_snippet_bytes, cli.api_max_snippet_bytes);
+    apply_opt(
+        &mut config.api.compile_timeout_ms,
+        cli.api_compile_timeout_ms,
+    );
+    apply_opt(
+        &mut config.profile.max_report_bytes,
+        cli.profile_max_report_bytes,
+    );
+    apply_opt(&mut config.profile.max_runs, cli.profile_max_runs);
+    apply_opt(
+        &mut config.profile.compare_samples,
+        cli.profile_compare_samples,
+    );
+    if let Some(value) = cli.repair_max_candidates {
+        config.repair.max_candidates = u32::try_from(value)
+            .map_err(|_| invalid("repair.max_candidates", "value exceeds u32".to_owned()))?;
+    }
+    if let Some(value) = cli.repair_max_compiles {
+        config.repair.max_compiles = u32::try_from(value)
+            .map_err(|_| invalid("repair.max_compiles", "value exceeds u32".to_owned()))?;
+    }
+    apply_opt(&mut config.repair.wall_time_ms, cli.repair_wall_time_ms);
+    apply_opt(
+        &mut config.profile.runtime_max_samples,
+        cli.profile_runtime_max_samples,
+    );
+    apply_opt(
+        &mut config.profile.runtime_min_samples,
+        cli.profile_runtime_min_samples,
+    );
+    apply_opt(
+        &mut config.profile.runtime_max_warmup,
+        cli.profile_runtime_max_warmup,
+    );
+    apply_opt(
+        &mut config.profile.runtime_run_timeout_ms,
+        cli.profile_runtime_run_timeout_ms,
+    );
+    if let Some(value) = cli.repair_minimize_max_candidates {
+        config.repair.minimize_max_candidates = u32::try_from(value).map_err(|_| {
+            invalid(
+                "repair.minimize_max_candidates",
+                "value exceeds u32".to_owned(),
+            )
+        })?;
+    }
+    if let Some(value) = cli.repair_minimize_max_compiles {
+        config.repair.minimize_max_compiles = u32::try_from(value).map_err(|_| {
+            invalid(
+                "repair.minimize_max_compiles",
+                "value exceeds u32".to_owned(),
+            )
+        })?;
+    }
     apply_opt(&mut config.limits.max_rename_edits, cli.max_rename_edits);
     apply_opt(
         &mut config.limits.max_refactor_edits,
@@ -1102,6 +1881,120 @@ fn check_range(field: &'static str, value: u64, min: u64, max: u64) -> Result<()
         });
     }
     Ok(())
+}
+
+/// Operator-declared runtime adapters are the only executables and argv that
+/// `runtime_compare` may launch. Names, argv, and workload lists are bounded
+/// here so a malformed config can never widen the runner surface silently.
+fn validate_runtime_adapters(adapters: &[RuntimeAdapterConfig]) -> Result<(), ConfigError> {
+    if adapters.len() > 16 {
+        return Err(ConfigError::InvalidField {
+            field: "profile.runtime.adapters",
+            message: "at most 16 adapters are allowed".to_owned(),
+        });
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for adapter in adapters {
+        if !is_bounded_identifier(&adapter.name, 64) {
+            return Err(ConfigError::InvalidField {
+                field: "profile.runtime.adapters.name",
+                message: format!(
+                    "adapter name {:?} must be a bounded printable identifier",
+                    adapter.name
+                ),
+            });
+        }
+        if !names.insert(adapter.name.as_str()) {
+            return Err(ConfigError::InvalidField {
+                field: "profile.runtime.adapters.name",
+                message: format!("duplicate adapter name {:?}", adapter.name),
+            });
+        }
+        if adapter.command.as_os_str().is_empty() {
+            return Err(ConfigError::InvalidField {
+                field: "profile.runtime.adapters.command",
+                message: "command cannot be empty".to_owned(),
+            });
+        }
+        if adapter
+            .command
+            .to_string_lossy()
+            .chars()
+            .any(char::is_control)
+        {
+            return Err(ConfigError::InvalidField {
+                field: "profile.runtime.adapters.command",
+                message: "command cannot contain control characters".to_owned(),
+            });
+        }
+        validate_adapter_args("profile.runtime.adapters.args", &adapter.args)?;
+        validate_adapter_args(
+            "profile.runtime.adapters.prepare_args",
+            &adapter.prepare_args,
+        )?;
+        if adapter.workloads.is_empty() {
+            return Err(ConfigError::InvalidField {
+                field: "profile.runtime.adapters.workloads",
+                message: format!("adapter {:?} declares no workload", adapter.name),
+            });
+        }
+        if adapter.workloads.len() > 16 {
+            return Err(ConfigError::InvalidField {
+                field: "profile.runtime.adapters.workloads",
+                message: "at most 16 workloads per adapter are allowed".to_owned(),
+            });
+        }
+        let mut workloads = std::collections::BTreeSet::new();
+        for workload in &adapter.workloads {
+            if !is_bounded_identifier(&workload.name, 64) {
+                return Err(ConfigError::InvalidField {
+                    field: "profile.runtime.adapters.workloads.name",
+                    message: format!(
+                        "workload name {:?} must be a bounded printable identifier",
+                        workload.name
+                    ),
+                });
+            }
+            if !workloads.insert(workload.name.as_str()) {
+                return Err(ConfigError::InvalidField {
+                    field: "profile.runtime.adapters.workloads.name",
+                    message: format!(
+                        "adapter {:?} declares workload {:?} more than once",
+                        adapter.name, workload.name
+                    ),
+                });
+            }
+            validate_adapter_args("profile.runtime.adapters.workloads.args", &workload.args)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_adapter_args(field: &'static str, args: &[String]) -> Result<(), ConfigError> {
+    if args.len() > 64 {
+        return Err(ConfigError::InvalidField {
+            field,
+            message: "at most 64 argv entries are allowed".to_owned(),
+        });
+    }
+    for arg in args {
+        if arg.len() > 1_024 || arg.chars().any(char::is_control) {
+            return Err(ConfigError::InvalidField {
+                field,
+                message: "argv entries must be at most 1024 printable bytes".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn is_bounded_identifier(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_bytes
+        && !value.chars().any(char::is_control)
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
 }
 
 fn reject_path_overlap(
@@ -1237,6 +2130,10 @@ fn parse_u64(value: &str) -> Result<u64, String> {
         .trim()
         .parse::<u64>()
         .map_err(|_| "expected an unsigned integer".to_owned())
+}
+
+fn parse_u32(value: &str) -> Result<u32, String> {
+    u32::try_from(parse_u64(value)?).map_err(|_| "expected an unsigned 32-bit integer".to_owned())
 }
 
 fn parse_path_list(value: &str) -> Result<Vec<PathBuf>, String> {
@@ -1432,6 +2329,179 @@ mod tests {
     }
 
     #[test]
+    fn profile_config_accepts_toml_environment_and_cli_layers() {
+        let mut cli = cli();
+        cli.profile_max_runs = Some(3);
+        cli.profile_runtime_max_samples = Some(5);
+        let config = Config::from_sources(
+            "/workspace",
+            Some(
+                "[tools]\nprofile = false\n[profile]\nmax_report_bytes = 8192\ncompare_samples = 2\n\
+                 [profile.runtime]\nmin_samples = 2\nmax_warmup = 1\n\
+                 adapters = [{ name = \"sleepy\", command = \"/bin/sleep\", workloads = [\
+                 { name = \"tiny\", args = [\"0.01\"] }] }]\n",
+            ),
+            [(
+                "AGZ_RUST_CODER_PROFILE__RUNTIME_RUN_TIMEOUT_MS",
+                "9000",
+            ), ("AGZ_RUST_CODER_PROFILE__MAX_RUNS", "5")],
+            &cli,
+        )
+        .unwrap();
+        assert!(!config.tools.profile);
+        assert!(!config.enabled_tool_names().contains(&"profile"));
+        assert_eq!(config.profile.max_report_bytes, 8_192);
+        assert_eq!(config.profile.max_runs, 3);
+        assert_eq!(config.profile.compare_samples, 2);
+        assert_eq!(config.profile.runtime_max_samples, 5);
+        assert_eq!(config.profile.runtime_min_samples, 2);
+        assert_eq!(config.profile.runtime_max_warmup, 1);
+        assert_eq!(config.profile.runtime_run_timeout_ms, 9_000);
+        assert_eq!(config.profile.runtime_adapters.len(), 1);
+        assert_eq!(config.profile.runtime_adapters[0].name, "sleepy");
+        assert_eq!(
+            config.profile.runtime_adapters[0].workloads[0].args,
+            ["0.01"]
+        );
+
+        let out_of_range = Config::from_sources(
+            "/workspace",
+            Some("[profile]\nmax_report_bytes = 1\n"),
+            std::iter::empty::<(String, String)>(),
+            &cli,
+        );
+        assert!(matches!(
+            out_of_range,
+            Err(ConfigError::InvalidField { .. })
+        ));
+
+        let unmeasured_adapter = Config::from_sources(
+            "/workspace",
+            Some(
+                "[profile.runtime]\nadapters = [{ name = \"broken\", command = \"/bin/true\", \
+                 workloads = [] }]\n",
+            ),
+            std::iter::empty::<(String, String)>(),
+            &cli,
+        );
+        assert!(matches!(
+            unmeasured_adapter,
+            Err(ConfigError::InvalidField { .. })
+        ));
+    }
+
+    #[test]
+    fn repair_config_accepts_toml_environment_and_cli_layers() {
+        let plain_cli = cli();
+        let mut cli = cli();
+        cli.repair_max_candidates = Some(1);
+        cli.repair_minimize_max_compiles = Some(5);
+        let config = Config::from_sources(
+            "/workspace",
+            Some(
+                "[tools]\nrepair = false\n[repair]\nmax_compiles = 2\nwall_time_ms = 5_000\nminimize_max_candidates = 9\n",
+            ),
+            [
+                ("AGZ_RUST_CODER_REPAIR__MAX_CANDIDATES", "3"),
+                ("AGZ_RUST_CODER_REPAIR__MINIMIZE_MAX_COMPILES", "7"),
+            ],
+            &cli,
+        )
+        .unwrap();
+        assert!(!config.tools.repair);
+        assert!(!config.enabled_tool_names().contains(&"repair"));
+        assert_eq!(config.repair.max_candidates, 1);
+        assert_eq!(config.repair.max_compiles, 2);
+        assert_eq!(config.repair.wall_time_ms, 5_000);
+        assert_eq!(config.repair.minimize_max_candidates, 9);
+        assert_eq!(config.repair.minimize_max_compiles, 5);
+
+        let defaults = Config::defaults_at("/workspace");
+        assert!(defaults.tools.repair);
+        let names = defaults.enabled_tool_names();
+        let change_index = names
+            .iter()
+            .position(|name| *name == "change")
+            .expect("change tool");
+        assert_eq!(names.get(change_index + 1), Some(&"repair"));
+
+        let mut change_disabled = defaults;
+        change_disabled.tools.change = false;
+        assert!(!change_disabled.enabled_tool_names().contains(&"repair"));
+
+        let out_of_range = Config::from_sources(
+            "/workspace",
+            Some("[repair]\nmax_candidates = 33\n"),
+            std::iter::empty::<(String, String)>(),
+            &plain_cli,
+        );
+        assert!(matches!(
+            out_of_range,
+            Err(ConfigError::InvalidField { .. })
+        ));
+
+        let minimize_out_of_range = Config::from_sources(
+            "/workspace",
+            Some("[repair]\nminimize_max_compiles = 2\n"),
+            std::iter::empty::<(String, String)>(),
+            &plain_cli,
+        );
+        assert!(matches!(
+            minimize_out_of_range,
+            Err(ConfigError::InvalidField { .. })
+        ));
+
+        let environment_out_of_range = Config::from_sources(
+            "/workspace",
+            None,
+            [("AGZ_RUST_CODER_REPAIR__MAX_COMPILES", "0")],
+            &plain_cli,
+        );
+        assert!(matches!(
+            environment_out_of_range,
+            Err(ConfigError::InvalidField { .. })
+        ));
+    }
+
+    #[test]
+    fn work_config_accepts_toml_environment_and_cli_layers() {
+        let mut cli = cli();
+        cli.work_wall_time_ms = Some(5_000);
+        let config = Config::from_sources(
+            "/workspace",
+            Some("[tools]\nwork = false\n[work]\nmax_handoffs = 1\n"),
+            [("AGZ_RUST_CODER_WORK__MAX_CANDIDATES", "2")],
+            &cli,
+        )
+        .unwrap();
+        assert!(!config.tools.work);
+        assert!(!config.enabled_tool_names().contains(&"work"));
+        assert_eq!(config.work.max_handoffs, 1);
+        assert_eq!(config.work.max_candidates, 2);
+        assert_eq!(config.work.wall_time_ms, 5_000);
+
+        let mut enabled = cli.clone();
+        enabled.tools_work = Some(true);
+        let config = Config::from_sources(
+            "/workspace",
+            Some("[tools]\nwork = false\n"),
+            std::iter::empty::<(String, String)>(),
+            &enabled,
+        )
+        .unwrap();
+        assert!(config.tools.work);
+        assert!(config.enabled_tool_names().contains(&"work"));
+
+        let out_of_range = Config::from_sources(
+            "/workspace",
+            Some("[work]\ncontinuation_ttl_ms = 1\n"),
+            std::iter::empty::<(String, String)>(),
+            &cli,
+        );
+        assert_invalid_field(out_of_range.map(|_| ()), "work.continuation_ttl_ms");
+    }
+
+    #[test]
     fn list_layers_replace_instead_of_append() {
         let cli = cli();
         let toml_root = test_path("toml-root");
@@ -1453,6 +2523,55 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.server.allow_roots, vec![env_a, env_b]);
+    }
+
+    #[test]
+    fn verify_configuration_uses_the_declared_precedence() {
+        let mut cli = cli();
+        cli.verify_max_cells = Some(3);
+        cli.tools_verify = Some(false);
+        let config = Config::from_sources(
+            "/workspace",
+            Some("[verify]\nmax_cells = 2\nmax_wall_ms = 5000\nrepeats = 3\nmax_tests = 5\n"),
+            [
+                ("AGZ_RUST_CODER_VERIFY__MAX_CELLS", "4"),
+                ("AGZ_RUST_CODER_VERIFY__REPEATS", "4"),
+                ("AGZ_RUST_CODER_TOOLS__VERIFY", "true"),
+            ],
+            &cli,
+        )
+        .expect("verify configuration is valid");
+        assert_eq!(config.verify.max_cells, 3);
+        assert_eq!(config.verify.max_wall_ms, 5_000);
+        assert_eq!(config.verify.max_tests, 5);
+        assert_eq!(config.verify.repeats, 4);
+        assert!(!config.tools.verify);
+        assert!(!config.enabled_tool_names().contains(&"verify"));
+    }
+
+    #[test]
+    fn verify_configuration_ranges_fail_closed() {
+        for toml in [
+            "[verify]\nmax_cells = 0\n",
+            "[verify]\nmax_cells = 65\n",
+            "[verify]\nmax_wall_ms = 999\n",
+            "[verify]\nmax_wall_ms = 3600001\n",
+            "[verify]\nmax_tests = 0\n",
+            "[verify]\nmax_tests = 65\n",
+            "[verify]\nrepeats = 0\n",
+            "[verify]\nrepeats = 6\n",
+        ] {
+            let config = Config::from_sources(
+                "/workspace",
+                Some(toml),
+                std::iter::empty::<(String, String)>(),
+                &cli(),
+            );
+            assert!(
+                matches!(config, Err(ConfigError::InvalidField { .. })),
+                "expected rejection for {toml}"
+            );
+        }
     }
 
     #[test]
@@ -1611,6 +2730,102 @@ mod tests {
         fs::remove_dir_all(&base).expect("remove canonical missing test root");
 
         assert_invalid_field(result, "gate.cache_dir");
+    }
+
+    #[test]
+    fn context_configuration_wires_toml_environment_and_cli() {
+        let mut cli = cli();
+        cli.tools_context = Some(false);
+        cli.context_max_capsules = Some(8);
+        cli.context_capsule_ttl_ms = Some(9_000);
+        let config = Config::from_sources(
+            "/workspace",
+            Some("[context]\nmax_capsules = 4\ncapsule_ttl_ms = 5000\nmax_items = 8\n"),
+            [
+                ("AGZ_RUST_CODER_CONTEXT__MAX_CAPSULES", "6"),
+                ("AGZ_RUST_CODER_CONTEXT__MAX_ITEMS", "12"),
+                ("AGZ_RUST_CODER_CONTEXT__CAPSULE_TTL_MS", "7000"),
+            ],
+            &cli,
+        )
+        .expect("context configuration layers resolve");
+        assert!(!config.tools.context);
+        assert_eq!(config.context.max_capsules, 8);
+        assert_eq!(config.context.capsule_ttl_ms, 9_000);
+        assert_eq!(config.context.max_items, 12);
+        assert!(
+            !config.enabled_tool_names().contains(&"context"),
+            "tools.context=false must remove the tool from the catalog"
+        );
+
+        // Without the CLI layer, environment beats TOML for the TTL.
+        let env_ttl = Config::from_sources(
+            "/workspace",
+            Some("[context]\ncapsule_ttl_ms = 5000\n"),
+            [("AGZ_RUST_CODER_CONTEXT__CAPSULE_TTL_MS", "7000")],
+            &cli_without_context(),
+        )
+        .expect("context environment TTL resolves");
+        assert_eq!(env_ttl.context.capsule_ttl_ms, 7_000);
+
+        let mut invalid = config;
+        invalid.context.capsule_ttl_ms = 10;
+        assert_invalid_field(invalid.validate(), "context.capsule_ttl_ms");
+
+        let mut invalid_capsules = Config::defaults_at(test_path("context-defaults"));
+        invalid_capsules.context.max_capsules = 0;
+        assert_invalid_field(invalid_capsules.validate(), "context.max_capsules");
+
+        let mut invalid_items = Config::defaults_at(test_path("context-items"));
+        invalid_items.context.max_items = 257;
+        assert_invalid_field(invalid_items.validate(), "context.max_items");
+    }
+
+    fn cli_without_context() -> CliOptions {
+        let mut cli = cli();
+        cli.tools_context = None;
+        cli.context_max_capsules = None;
+        cli.context_capsule_ttl_ms = None;
+        cli.context_max_items = None;
+        cli
+    }
+
+    #[test]
+    fn api_configuration_wires_toml_environment_and_cli() {
+        let mut cli = cli();
+        cli.tools_api = Some(false);
+        cli.api_max_snippets = Some(2);
+        cli.api_max_snippet_bytes = Some(4_096);
+        let config = Config::from_sources(
+            "/workspace",
+            Some("[api]\nmax_snippets = 3\nmax_snippet_bytes = 8192\ncompile_timeout_ms = 9000\n"),
+            [
+                ("AGZ_RUST_CODER_API__MAX_SNIPPETS", "1"),
+                ("AGZ_RUST_CODER_API__COMPILE_TIMEOUT_MS", "7000"),
+            ],
+            &cli,
+        )
+        .expect("api configuration layers resolve");
+        assert!(!config.tools.api);
+        assert_eq!(config.api.max_snippets, 2);
+        assert_eq!(config.api.max_snippet_bytes, 4_096);
+        assert_eq!(config.api.compile_timeout_ms, 7_000);
+        assert!(
+            !config.enabled_tool_names().contains(&"api"),
+            "tools.api=false must remove the tool from the catalog"
+        );
+
+        let mut invalid_snippets = Config::defaults_at(test_path("api-snippets"));
+        invalid_snippets.api.max_snippets = 0;
+        assert_invalid_field(invalid_snippets.validate(), "api.max_snippets");
+
+        let mut invalid_bytes = Config::defaults_at(test_path("api-bytes"));
+        invalid_bytes.api.max_snippet_bytes = 4;
+        assert_invalid_field(invalid_bytes.validate(), "api.max_snippet_bytes");
+
+        let mut invalid_timeout = Config::defaults_at(test_path("api-timeout"));
+        invalid_timeout.api.compile_timeout_ms = 10;
+        assert_invalid_field(invalid_timeout.validate(), "api.compile_timeout_ms");
     }
 
     #[cfg(unix)]

@@ -57,9 +57,7 @@ fn fixture_config() -> (Config, IsolatedState) {
 fn spawn_server(config: Config) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<Result<()>>) {
     let (server_transport, client_transport) = tokio::io::duplex(1 << 20);
     let task = tokio::spawn(async move {
-        let service = RustCoderServer::new(config)?
-            .serve(server_transport)
-            .await?;
+        let service = Box::pin(RustCoderServer::new(config)?.serve(server_transport)).await?;
         service.waiting().await?;
         Ok(())
     });
@@ -103,9 +101,14 @@ async fn initialize_lists_the_static_surface_and_guidance() -> Result<()> {
         names,
         [
             "check",
+            "profile",
             "audit",
             "crate_lookup",
             "docs",
+            "context",
+            "api",
+            "explain",
+            "verify",
             "symbol",
             "references",
             "definition",
@@ -114,6 +117,9 @@ async fn initialize_lists_the_static_surface_and_guidance() -> Result<()> {
             "hierarchy",
             "rename",
             "refactor",
+            "change",
+            "repair",
+            "work",
         ]
     );
     assert!(tools.tools.iter().all(|tool| tool.output_schema.is_some()));

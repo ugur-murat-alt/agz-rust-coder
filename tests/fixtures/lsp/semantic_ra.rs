@@ -8,13 +8,13 @@ use std::{
 fn main() {
     let args = env::args().collect::<Vec<_>>();
     let executable = args.first().map_or("", String::as_str);
-    let has_mode = |flag: &str, name: &str| {
-        args.iter().any(|arg| arg == flag) || executable.contains(name)
-    };
+    let has_mode =
+        |flag: &str, name: &str| args.iter().any(|arg| arg == flag) || executable.contains(name);
     let hierarchical = has_mode("--symbols=hierarchical", "hierarchical");
     let reject_rename = has_mode("--prepare-rename=reject", "reject");
     let default_rename = has_mode("--prepare-rename=default", "default");
     let reciprocal = has_mode("--reciprocal-hierarchy", "reciprocal");
+    let context_refs = has_mode("--context-refs", "context-refs");
     let retry_method = args
         .iter()
         .find_map(|arg| arg.strip_prefix("--content-modified-once="));
@@ -24,6 +24,7 @@ fn main() {
             .then_some("textDocument/hover")
     });
     let message_error = executable.contains("message-retry");
+    let expand_macro = has_mode("--expand-macro", "expand-macro");
     let barrier = executable.contains("barrier");
     let log_path = args
         .iter()
@@ -62,6 +63,27 @@ fn main() {
             ));
             continue;
         }
+        if method == "initialize" && expand_macro {
+            send_raw(&response(
+                &id,
+                r#"{"capabilities":{"hoverProvider":true,"textDocumentSync":2,"experimental":{"expandMacro":true,"failedObligations":true}}}"#,
+            ));
+            continue;
+        }
+        if method == "rust-analyzer/expandMacro" {
+            send_raw(&response(
+                &id,
+                r#"{"name":"mock_macro","expansion":"pub fn mock_fn() -> i32 { 42 }\n"}"#,
+            ));
+            continue;
+        }
+        if method == "rust-analyzer/getFailedObligations" {
+            send_raw(&response(
+                &id,
+                r#"{"failedObligations":[{"obligation":"mock_fn: MockTrait"}]}"#,
+            ));
+            continue;
+        }
         let uri = string_field(&message, "uri").unwrap_or_else(|| "file:///mock/lib.rs".to_owned());
         let result = response_value(
             &method,
@@ -71,6 +93,7 @@ fn main() {
             reject_rename,
             default_rename,
             reciprocal,
+            context_refs,
         );
         if barrier
             && !barrier_waited
@@ -113,9 +136,15 @@ fn response_value(
     reject_rename: bool,
     default_rename: bool,
     reciprocal: bool,
+    context_refs: bool,
 ) -> String {
+    let raw_uri = uri;
     let uri = json_string(uri);
-    let outside_uri = if cfg!(windows) { "file:///C:/agz-outside/other.rs" } else { "file:///mock/other.rs" };
+    let outside_uri = if cfg!(windows) {
+        "file:///C:/agz-outside/other.rs"
+    } else {
+        "file:///mock/other.rs"
+    };
     match method {
         "initialize" => {
             r#"{"capabilities":{"hoverProvider":true,"textDocumentSync":2}}"#.to_owned()
@@ -131,9 +160,15 @@ fn response_value(
         "textDocument/hover" => {
             r#"{"contents":{"kind":"markdown","value":"```rust\nmock_fn: fn() -> i32\n```\nMock hover docs."}}"#.to_owned()
         }
-        "textDocument/references" => format!(
-            r#"[{{"uri":{uri},"range":{{"start":{{"line":0,"character":0}},"end":{{"line":0,"character":4}}}}}},{{"uri":"{outside_uri}","range":{{"start":{{"line":3,"character":2}},"end":{{"line":3,"character":6}}}}}}]"#
-        ),
+        "textDocument/references" => {
+            if context_refs {
+                context_references(raw_uri, &uri)
+            } else {
+                format!(
+                    r#"[{{"uri":{uri},"range":{{"start":{{"line":0,"character":0}},"end":{{"line":0,"character":4}}}}}},{{"uri":"{outside_uri}","range":{{"start":{{"line":3,"character":2}},"end":{{"line":3,"character":6}}}}}}]"#
+                )
+            }
+        }
         "textDocument/definition" => format!(
             r#"[{{"targetUri":{uri},"targetRange":{{"start":{{"line":0,"character":4}},"end":{{"line":0,"character":12}}}},"targetSelectionRange":{{"start":{{"line":0,"character":4}},"end":{{"line":0,"character":12}}}}}}]"#
         ),
@@ -169,6 +204,17 @@ fn response_value(
     }
 }
 
+fn context_references(raw_uri: &str, quoted_uri: &str) -> String {
+    let root = raw_uri
+        .rsplit_once("/src/")
+        .map_or(raw_uri, |(root, _)| root);
+    let consumer = json_string(&format!("{root}/src/app.rs"));
+    let test = json_string(&format!("{root}/tests/widget.rs"));
+    format!(
+        r#"[{{"uri":{quoted_uri},"range":{{"start":{{"line":0,"character":0}},"end":{{"line":0,"character":4}}}}}},{{"uri":{consumer},"range":{{"start":{{"line":2,"character":0}},"end":{{"line":2,"character":4}}}}}},{{"uri":{test},"range":{{"start":{{"line":2,"character":0}},"end":{{"line":2,"character":4}}}}}}]"#
+    )
+}
+
 fn hierarchy_edge(message: &str, uri: &str, reciprocal: bool, incoming: bool) -> String {
     let name = string_field(message, "name").unwrap_or_default();
     let child = if reciprocal {
@@ -192,8 +238,7 @@ fn hierarchy_edge(message: &str, uri: &str, reciprocal: bool, incoming: bool) ->
 
 fn next_frame(reader: &mut impl Read, buffer: &mut Vec<u8>) -> io::Result<Option<String>> {
     loop {
-        let Some(header_end) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
-        else {
+        let Some(header_end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") else {
             let mut chunk = [0u8; 1_024];
             let read = reader.read(&mut chunk)?;
             if read == 0 {
@@ -232,7 +277,10 @@ fn next_frame(reader: &mut impl Read, buffer: &mut Vec<u8>) -> io::Result<Option
 fn string_field(message: &str, field: &str) -> Option<String> {
     let marker = format!("\"{field}\"");
     let start = message.find(&marker)? + marker.len();
-    let value = message[start..].trim_start().strip_prefix(':')?.trim_start();
+    let value = message[start..]
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start();
     let value = value.strip_prefix('"')?;
     let end = value.find('"')?;
     Some(value[..end].to_owned())
@@ -241,7 +289,10 @@ fn string_field(message: &str, field: &str) -> Option<String> {
 fn id_field(message: &str) -> Option<String> {
     let marker = "\"id\"";
     let start = message.find(marker)? + marker.len();
-    let value = message[start..].trim_start().strip_prefix(':')?.trim_start();
+    let value = message[start..]
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start();
     let end = value
         .find(|character: char| !character.is_ascii_digit() && character != '-')
         .unwrap_or(value.len());
@@ -270,7 +321,9 @@ fn frame(body: &str) -> String {
 }
 
 fn response(id: &str, result: &str) -> String {
-    frame(&format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{result}}}"#))
+    frame(&format!(
+        r#"{{"jsonrpc":"2.0","id":{id},"result":{result}}}"#
+    ))
 }
 
 fn response_error(id: &str, code: i64, message: &str) -> String {
@@ -281,6 +334,8 @@ fn response_error(id: &str, code: i64, message: &str) -> String {
 
 fn send_raw(message: &str) {
     let mut stdout = io::stdout();
-    stdout.write_all(message.as_bytes()).expect("write semantic response");
+    stdout
+        .write_all(message.as_bytes())
+        .expect("write semantic response");
     stdout.flush().expect("flush semantic response");
 }

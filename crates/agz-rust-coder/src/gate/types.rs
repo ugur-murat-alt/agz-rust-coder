@@ -147,6 +147,12 @@ pub struct GateRequest {
     pub options: super::ValidationOptions,
     pub directory: Option<PathBuf>,
     pub target: GateTargetId,
+    /// Optional rustup toolchain selector. A direct toolchain cargo is
+    /// preferred and its compiler is pinned through `RUSTC`, `RUSTUP_TOOLCHAIN`,
+    /// and a prepended `PATH`; the rustup shim fallback applies
+    /// `cargo +<toolchain>` before every stage. Both modes bind the selected
+    /// compiler into the command and environment hashes.
+    pub toolchain: Option<String>,
     pub timings: bool,
     pub detail: GateDetail,
     pub client_roots: ClientRoots,
@@ -163,6 +169,7 @@ impl GateRequest {
         Self {
             directory: Some(directory.into()),
             target,
+            toolchain: None,
             timings: false,
             options: super::ValidationOptions::default(),
             detail: GateDetail::Compact,
@@ -180,6 +187,7 @@ impl GateRequest {
         Self {
             directory: None,
             target,
+            toolchain: None,
             timings: false,
             options: super::ValidationOptions::default(),
             detail: GateDetail::Compact,
@@ -196,6 +204,11 @@ impl GateRequest {
 
     pub fn with_timings(mut self, timings: bool) -> Self {
         self.timings = timings;
+        self
+    }
+
+    pub fn with_toolchain(mut self, toolchain: Option<String>) -> Self {
+        self.toolchain = toolchain;
         self
     }
 
@@ -296,6 +309,14 @@ pub enum SuggestionApplicability {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MacroExpansion {
+    pub macro_decl_name: Option<String>,
+    pub span: Box<DiagnosticSpan>,
+    pub definition_span: Option<Box<DiagnosticSpan>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DiagnosticSpan {
     pub file: String,
     pub byte_start: Option<u64>,
@@ -308,6 +329,9 @@ pub struct DiagnosticSpan {
     pub label: Option<String>,
     pub suggested_replacement: Option<String>,
     pub suggestion_applicability: Option<SuggestionApplicability>,
+    /// rustc macro expansion provenance when the compiler retained it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expansion: Option<MacroExpansion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -377,6 +401,15 @@ pub struct CargoBuildTelemetry {
     pub build_scripts: u64,
     pub linked_units: u64,
     pub partial: bool,
+    /// Display names of observed non-fresh compilation units, bounded and deduplicated.
+    #[serde(default)]
+    pub rebuilt_packages: Vec<String>,
+    /// Display names of packages whose build script was executed, bounded.
+    #[serde(default)]
+    pub build_script_packages: Vec<String>,
+    /// True when at least one bounded package list dropped an entry.
+    #[serde(default)]
+    pub packages_truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -439,6 +472,14 @@ pub struct GateEvidence {
     pub finished_at: Option<String>,
     pub response_ms: u64,
     pub queue_ms: u64,
+    /// Time from request acceptance through validation and scheduler admission,
+    /// before the metadata/identity preflight starts.
+    #[serde(default)]
+    pub admission_ms: u64,
+    /// Metadata, identity, scope, and authorization preflight duration. This is
+    /// measured separately and is never merged into Cargo process time.
+    #[serde(default)]
+    pub preflight_ms: u64,
     pub first_diagnostic_ms: Option<u64>,
     pub requested_dir: PathBuf,
     pub workspace_root: Option<PathBuf>,
@@ -470,6 +511,8 @@ impl GateEvidence {
             finished_at: None,
             response_ms: 0,
             queue_ms: 0,
+            admission_ms: 0,
+            preflight_ms: 0,
             first_diagnostic_ms: None,
             requested_dir: request.directory.clone().unwrap_or_default(),
             workspace_root: None,
@@ -513,5 +556,64 @@ impl GateTarget {
             )
             .collect::<Vec<_>>()
             .join(" ")
+    }
+}
+
+/// Bounded rustup toolchain selector shared by the gate and verify planning.
+pub fn validate_toolchain_name(toolchain: &str) -> Result<(), String> {
+    if toolchain.is_empty()
+        || toolchain.len() > 96
+        || toolchain.starts_with('-')
+        || !toolchain
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-.".contains(&byte))
+    {
+        return Err("toolchain must be a bounded rustup toolchain name".to_owned());
+    }
+    // The name is joined into `<rustup-home>/toolchains/<name>/bin/cargo`, so
+    // any dot-only segment would traverse or alias directories.
+    if toolchain
+        .split('-')
+        .any(|segment| !segment.is_empty() && segment.chars().all(|character| character == '.'))
+    {
+        return Err("toolchain must be a bounded rustup toolchain name".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_toolchain_name;
+
+    #[test]
+    fn toolchain_names_reject_path_segments_but_accept_rustup_forms() {
+        for valid in [
+            "stable",
+            "1.88.0-x86_64-unknown-linux-gnu",
+            "nightly-2026-01-01",
+            "my-toolchain",
+        ] {
+            assert!(
+                validate_toolchain_name(valid).is_ok(),
+                "{valid} must be accepted"
+            );
+        }
+        for invalid in [
+            "",
+            "-nightly",
+            ".",
+            "..",
+            "...",
+            "1.88.0-..",
+            "a/b",
+            "a\\b",
+            "name with space",
+            "name\u{7f}",
+        ] {
+            assert!(
+                validate_toolchain_name(invalid).is_err(),
+                "{invalid:?} must be rejected"
+            );
+        }
     }
 }

@@ -5,9 +5,14 @@
   "server": "agz-rust-coder",
   "tools": [
     "check",
+    "profile",
     "audit",
     "crate_lookup",
     "docs",
+    "context",
+    "api",
+    "explain",
+    "verify",
     "symbol",
     "references",
     "definition",
@@ -15,9 +20,14 @@
     "implementations",
     "hierarchy",
     "rename",
-    "refactor"
+    "refactor",
+    "change",
+    "repair",
+    "work"
   ],
-  "prompts": ["workflow"],
+  "prompts": [
+    "workflow"
+  ],
   "resource_count": 4,
   "provider_requests": 0
 }

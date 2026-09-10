@@ -86,6 +86,9 @@ pub fn parse_cargo_output(output: &str) -> CargoOutput {
         rebuilt_units: 0,
         build_scripts: 0,
         linked_units: 0,
+        rebuilt_packages: Vec::new(),
+        build_script_packages: Vec::new(),
+        packages_truncated: false,
     };
 
     for line in clean_output.split('\n') {
@@ -102,6 +105,7 @@ pub fn parse_cargo_output(output: &str) -> CargoOutput {
                             build.fresh_units = build.fresh_units.saturating_add(1);
                         } else {
                             build.rebuilt_units = build.rebuilt_units.saturating_add(1);
+                            build.record_rebuilt_package(message.package_id.as_deref());
                         }
                         let executable = message
                             .executable
@@ -125,6 +129,7 @@ pub fn parse_cargo_output(output: &str) -> CargoOutput {
                     }
                     Some("build-script-executed") => {
                         build.build_scripts = build.build_scripts.saturating_add(1);
+                        build.record_build_script_package(message.package_id.as_deref());
                     }
                     Some("compiler-message") => {
                         if let Some(raw) = message.message {

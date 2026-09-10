@@ -5,12 +5,19 @@ mod progress;
 mod response;
 mod tasks;
 
+pub use crate::context::ContextData;
+pub use crate::tools::ApiData;
 pub use handler::{
-    AuditData, AuditInput, AuditOutput, CheckData, CheckDetail, CheckInput, CheckOutput,
-    CheckTarget, CrateLookupData, CrateLookupInput, CrateLookupOutput, DocsData, DocsInput,
-    DocsOutput, EditData, EditOutput, HierarchyDirection, HierarchyInput, ImplementationsInput,
-    RefactorInput, RenameInput, RustCoderServer, SemanticData, SemanticInput, SemanticOutput,
-    SymbolInput, SymbolsInput, tool_definitions,
+    ApiAnchorInput, ApiConfigurationInput, ApiInput, ApiOutput, AuditData, AuditInput, AuditOutput,
+    ChangeData, ChangeInput, ChangeOutput, CheckData, CheckDetail, CheckInput, CheckOutput,
+    CheckTarget, ContextInput, ContextOutput, CrateLookupData, CrateLookupInput, CrateLookupOutput,
+    DocsData, DocsInput, DocsOutput, EditData, EditOutput, ExplainAction, ExplainAnchorInput,
+    ExplainConfigurationData, ExplainData, ExplainInput, ExplainOutput, ExplainSourceBindingData,
+    HierarchyDirection, HierarchyInput, ImplementationsInput, ProfileAction, ProfileBudgetInput,
+    ProfileConfigurationInput, ProfileData, ProfileInput, ProfileOutput, RefactorInput,
+    RenameInput, RepairData, RepairInput, RepairOutput, RustCoderServer, SemanticData,
+    SemanticInput, SemanticOutput, SymbolInput, SymbolsInput, VerifyInput, VerifyOutput, WorkData,
+    WorkInput, WorkOutput, tool_definitions,
 };
 pub use progress::ProgressReporter;
 pub use response::{ToolData, ToolOutput, WorkspaceInfo};
@@ -23,6 +30,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 use futures::future::{BoxFuture, FutureExt, Shared};
@@ -30,13 +38,20 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    change::{ChangeService, RustAnalyzerMigrationAnalyzer},
     config::{Config, ConfigError},
+    context::CapsuleStore,
     docs::DocsResolver,
     lsp::RustAnalyzerManager,
     process::{ProcessJournal, ProcessSupervisor},
+    repair::RepairService,
     telemetry::ActivityLog,
-    tools::{AuditLimits, AuditService, CheckService},
-    workspace::{AuthorizedRoot, RootGuard},
+    tools::{
+        AuditLimits, AuditService, CheckService, ProfileService, RuntimeCompareService,
+        VerifyService,
+    },
+    work::WorkService,
+    workspace::{AuthorizedRoot, MetadataService, RootGuard},
 };
 use admission::AdmissionController;
 use client_roots::ClientRootsCoordinator;
@@ -49,8 +64,22 @@ pub struct AppState {
     client_roots: ClientRootsCoordinator,
     processes: ProcessSupervisor,
     check: Arc<CheckService>,
+    /// Present only when `tools.change` is enabled so a disabled tool never
+    /// validates, creates, or touches the scratch directory at startup.
+    change: Option<Arc<ChangeService>>,
+    /// Present only when `tools.repair` and `tools.change` are both enabled;
+    /// `repair` always operates on server-owned change scratch.
+    repair: Option<Arc<RepairService>>,
+    /// Bounded work executor. It is always constructed; when `tools.change` is
+    /// disabled it fails every action closed as `BLOCKED`.
+    work: WorkService,
+    profile: ProfileService,
+    runtime: RuntimeCompareService,
+    verify: Arc<VerifyService>,
     audit: AuditService,
     docs: Arc<DocsResolver>,
+    metadata: Arc<MetadataService>,
+    capsules: Arc<CapsuleStore>,
     cargo_home: Option<Arc<AuthorizedRoot>>,
     lsp: Option<Arc<RustAnalyzerManager>>,
     admission: AdmissionController,
@@ -70,6 +99,9 @@ impl fmt::Debug for AppState {
             .field("client_roots", &self.client_roots)
             .field("processes", &self.processes)
             .field("check", &self.check)
+            .field("change", &self.change)
+            .field("verify", &self.verify)
+            .field("work", &self.work)
             .field("lsp_available", &self.lsp.is_some())
             .field("tasks", &self.tasks)
             .field("shutting_down", &self.is_shutting_down())
@@ -128,16 +160,54 @@ impl AppState {
             Arc::clone(&roots),
             processes.clone(),
         ));
+        let lsp =
+            RustAnalyzerManager::from_config_authorized(&config.rust_analyzer, processes.clone())
+                .ok()
+                .map(Arc::new);
+        let change = if config.tools.change {
+            let mut service =
+                ChangeService::new(config.clone(), Arc::clone(&roots), processes.clone()).map_err(
+                    |error| ConfigError::InvalidField {
+                        field: "change.scratch_dir",
+                        message: error,
+                    },
+                )?;
+            if let Some(manager) = lsp.as_ref() {
+                service =
+                    service.with_migration_analyzer(Arc::new(RustAnalyzerMigrationAnalyzer::new(
+                        Arc::clone(manager),
+                        std::time::Duration::from_millis(config.rust_analyzer.timeout_ms),
+                    )));
+            }
+            Some(Arc::new(service))
+        } else {
+            None
+        };
+        let repair = match (&change, config.tools.repair) {
+            (Some(change), true) => Some(Arc::new(RepairService::new(
+                config.clone(),
+                Arc::clone(change),
+            ))),
+            _ => None,
+        };
+        let work = WorkService::new(&config, change.clone());
+        let metadata = Arc::new(MetadataService::new(Arc::clone(&roots)));
+        let capsules = Arc::new(CapsuleStore::new(
+            usize::try_from(config.context.max_capsules).unwrap_or(usize::MAX),
+            Duration::from_millis(config.context.capsule_ttl_ms),
+        ));
+        let profile = ProfileService::new(config.clone(), Arc::clone(&check), processes.clone());
+        let runtime = RuntimeCompareService::new(config.clone(), processes.clone());
+        let verify = Arc::new(
+            VerifyService::new(Arc::clone(&check), config.verify.clone())
+                .with_change(change.clone()),
+        );
         let audit = AuditService::new(AuditLimits::from_u64(
             config.limits.audit_files,
             config.limits.audit_file_bytes,
             config.limits.audit_total_bytes,
             config.limits.audit_findings,
         ));
-        let lsp =
-            RustAnalyzerManager::from_config_authorized(&config.rust_analyzer, processes.clone())
-                .ok()
-                .map(Arc::new);
         let cargo_home = std::env::var_os("CARGO_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
@@ -149,8 +219,16 @@ impl AppState {
             client_roots,
             processes: processes.clone(),
             check,
+            change,
+            repair,
+            work,
+            profile,
+            runtime,
+            verify,
             audit,
             docs: Arc::new(DocsResolver::with_authorized_supervisor(processes)),
+            metadata,
+            capsules,
             cargo_home,
             lsp,
             admission,
@@ -269,12 +347,44 @@ impl AppState {
         &self.check
     }
 
+    pub(crate) fn change_service(&self) -> Option<&Arc<ChangeService>> {
+        self.change.as_ref()
+    }
+
+    pub(crate) fn repair_service(&self) -> Option<&Arc<RepairService>> {
+        self.repair.as_ref()
+    }
+
+    pub(crate) fn work_service(&self) -> &WorkService {
+        &self.work
+    }
+
+    pub(crate) fn profile_service(&self) -> &ProfileService {
+        &self.profile
+    }
+
+    pub(crate) fn runtime_service(&self) -> &RuntimeCompareService {
+        &self.runtime
+    }
+
+    pub(crate) fn verify_service(&self) -> &Arc<VerifyService> {
+        &self.verify
+    }
+
     pub(crate) fn audit_service(&self) -> &AuditService {
         &self.audit
     }
 
     pub(crate) fn docs_service(&self) -> &Arc<DocsResolver> {
         &self.docs
+    }
+
+    pub(crate) fn metadata_service(&self) -> &Arc<MetadataService> {
+        &self.metadata
+    }
+
+    pub(crate) fn capsule_store(&self) -> &Arc<CapsuleStore> {
+        &self.capsules
     }
 
     pub(crate) fn cargo_home(&self) -> Option<&Arc<AuthorizedRoot>> {
@@ -323,4 +433,42 @@ pub enum ShutdownError {
     Telemetry(String),
     #[error("shutdown worker failed: {0}")]
     Worker(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn disabled_change_tool_is_absent_and_does_not_validate_scratch() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let base = std::env::temp_dir().join(format!(
+            "agz-change-disabled-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&base).expect("create base");
+        // A regular file can never become the scratch directory.
+        let blocker = base.join("scratch-file");
+        fs::write(&blocker, b"not a directory").expect("write blocker");
+
+        let mut config = Config::defaults_at(&base);
+        config.tools.change = false;
+        config.change.scratch_dir = blocker.clone();
+        config.telemetry.enabled = false;
+        config.telemetry.path = base.join("activity.jsonl");
+        let state = AppState::new(config.clone()).expect("disabled tool must not build scratch");
+        assert!(state.change_service().is_none());
+        assert!(!config.enabled_tool_names().contains(&"change"));
+
+        let mut enabled = config;
+        enabled.tools.change = true;
+        assert!(
+            AppState::new(enabled).is_err(),
+            "enabled tool must validate the scratch path"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
 }

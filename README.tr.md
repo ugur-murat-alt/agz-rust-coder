@@ -72,9 +72,14 @@ OpenCode gruplanmış MCP araçlarını çoğunlukla `rust_*` adıyla gösterir.
 | MCP tool | OpenCode direct name | Default | Amaç |
 | --- | --- | --- | --- |
 | `check` | `rust_check` | `enabled` | Sınırlı Cargo check, Clippy, test, docs veya tam kapıyı çalıştırır. |
+| `profile` | `rust_profile` | `enabled` | Gözlenen Cargo yeniden derleme davranışını analiz eder ve ölçülmemiş hız iddiası kurmadan sınırlı derleme kanıtını karşılaştırır. |
 | `audit` | `rust_audit` | `enabled` | Rust kaynağını sınırlı statik bulgular için tarar. |
 | `crate_lookup` | `rust_crate_lookup` | `enabled` | Crate adını ve isteğe bağlı tam sürümü crates.io üzerinde doğrular. |
 | `docs` | `rust_docs` | `enabled` | Tam sürüm belgesini cache, yerel kaynak veya docs.rs üzerinden çözer. |
+| `context` | `rust_context` | `enabled` | Öğe başına nedeniyle revizyona bağlı anlamsal bağlam kapsülü hazırlar, genişletir veya farkını üretir. |
+| `api` | `rust_api` | `enabled` | Sınırlı analiz kanıtıyla API imzasını çözer veya aday kod parçasını workspace yapılandırmasının yalıtılmış kopyasında tip kontrolünden geçirir. |
+| `explain` | `rust_explain` | `enabled` | Makro açılım kaynağını, trait yükümlülüklerini veya cfg etkinliğini açıklar. |
+| `verify` | `rust_verify` | `enabled` | Sınırlı feature, hedef, toolchain ve aşama matrisini planlar veya çalıştırır. |
 | `symbol` | `rust_symbol` | `enabled` | Bir sembol için Rust Analyzer hover verisini okur. |
 | `references` | `rust_references` | `enabled` | Sınırlı referansları bulur. |
 | `definition` | `rust_definition` | `enabled` | Seçilen tanımı bulur. |
@@ -83,6 +88,9 @@ OpenCode gruplanmış MCP araçlarını çoğunlukla `rust_*` adıyla gösterir.
 | `hierarchy` | `rust_hierarchy` | `enabled` | Sınırlı çağrı hiyerarşisini izler. |
 | `rename` | `rust_rename` | `enabled` | Uygulamadan doğrulanmış yeniden adlandırma paketi üretir. |
 | `refactor` | `rust_refactor` | `enabled` | Uygulamadan doğrulanmış refactor paketi üretir. |
+| `change` | `rust_change` | `enabled` | Workspace'e yazmadan sunucuya ait scratch alanında revizyona bağlı changeset oluşturur, uygular, göç ettirir ve doğrular. |
+| `repair` | `rust_repair` | `enabled` | Başarısız bir change revizyonu için derleyici güdümlü onarım adaylarını analiz eder, dener, karşılaştırır ve küçültür; workspace'e yazmaz. |
+| `work` | `rust_work` | `enabled` | Tipli bir intent'i açık kapılar ve bütçelerle change/validate üzerinden yürütür; dürüst kapı kanıtı veya sınırlı tek kullanımlık handoff döndürür. |
 
 Her araç belirli yapıda veri ve ona eşdeğer, boyutu sınırlı metin döndürür. Dış
 veri `untrustedData` altında tutulur. Derleme hatası, bulunamayan crate veya
@@ -104,8 +112,25 @@ dosyası ve varsayılanlardır. Ortam anahtarları bölümler arasında `__` kul
 | `gate.cache` | `auto` | Cache politikası: `auto`, `project` veya `isolated`. |
 | `rust_analyzer.workspace_code` | `deny` | Workspace kodu kapatılamazsa RA başlatmayı reddeder. |
 | `docs.fallback` | `auto` | Belge kaynağı politikası. |
+| `profile.max_report_bytes` | `4194304` | Tek Cargo zamanlama artifact'ı için sınırlı okuma/saklama üst sınırı. |
+| `profile.max_runs` | `4` | Bir `profile` çağrısında kullanılabilen taze Cargo koşusu. |
+| `profile.compare_samples` | `3` | Hız iddiası öncesi her taraf için gereken örnek sayısı. |
 | `limits.tool_output_bytes` | `49152` | Serileştirilmiş araç sonucu üst sınırı. |
+| `change.max_bytes` | `268435456` | Changeset başına yakalanan aday byte üst sınırı. |
+| `repair.max_candidates` | `4` | Bir `repair` işleminin deneyebileceği aday sayısı. |
+| `repair.max_compiles` | `4` | Bir `repair` işleminin çalıştırabileceği Cargo doğrulaması. |
+| `repair.wall_time_ms` | `120000` | Bir `repair` işlemi için duvar saati bütçesi. |
+| `repair.minimize_max_candidates` | `32` | Bir `repair(action=minimize)` işleminin derlemeyle değerlendirebileceği küçültme denemesi. |
+| `repair.minimize_max_compiles` | `16` | Bir `repair(action=minimize)` işleminin yeniden üretim ve dışa aktarma doğrulaması dahil çalıştırabileceği Cargo koşusu. |
+| `work.max_candidates` | `4` | Bir work öğesinin stage edebileceği host aday revizyonu. |
+| `work.max_compiles` | `12` | Bir work öğesinin çalıştırabileceği kapı doğrulaması. |
+| `work.wall_time_ms` | `600000` | Bir work öğesi için duvar saati bütçesi. |
 | `telemetry.enabled` | `true` | Prompt veya kaynak içermeyen sınırlı yerel etkinlik kaydı. |
+
+`profile` kanıtı sınırlıdır: en güncel 64 kayıt bellekte tutulur ve sunucuya ait
+`profile-evidence` dizinindeki zamanlama artifact'ları 24 saat sonra veya 64
+dosyayı aşınca temizlenir. `profile` sonucu bu saklama politikasını görünür
+kılar; süresi dolan kanıt sessizce yeniden kullanılmaz.
 
 Tüm CLI alanları için `agz-rust-coder --help` çalıştırın. Tam davranış ve
 varsayılan tablosu [docs/tools.tr.md](docs/tools.tr.md) içindedir.
