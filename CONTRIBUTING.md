@@ -1,6 +1,6 @@
 # Contributing
 
-Contributions to `agz-rust-coder` should preserve its bounded, source-write-free
+Contributions to `agz-rust-mcp` should preserve its bounded, source-write-free
 MCP contract.
 
 ## Setup
@@ -54,7 +54,7 @@ the private process in [SECURITY.md](SECURITY.md), not a public issue or PR.
 
 ## Releases
 
-Releases are immutable and use `agz-rust-coder-v<version>`. A release requires a
+Releases are immutable and use `agz-rust-mcp-v<version>`. A release requires a
 clean reviewed commit, exact package/tag checksum agreement, platform CI, a
 crates.io package whose README exposes the MCP ownership marker, and matching
 `server.json` metadata. Never move a published tag or overwrite a package

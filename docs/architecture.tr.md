@@ -1,6 +1,6 @@
 # Mimari
 
-`agz-rust-coder`; RMCP stdio adaptörü, sınırlı alan servisleri ve denetimli dış
+`agz-rust-mcp`; RMCP stdio adaptörü, sınırlı alan servisleri ve denetimli dış
 süreçlerden oluşan tek bir Rust sürecidir. Uzak transport bağlantısı kabul etmez
 ve workspace kaynağına yazmaz.
 
@@ -60,7 +60,7 @@ Unix komutları process group, Windows komutları Job Object kullanır. Timeout 
 kapanma önce nazik durdurmayı, ardından sınırlı zorla sonlandırma ve reap
 işlemini dener. Temizliğin tamamlandığı kanıtlanamazsa journal kaydı tutulur.
 
-Sunucuya ait durum, yetkili köklerin dışında platformun `agz-rust-coder` ad
+Sunucuya ait durum, yetkili köklerin dışında platformun `agz-rust-mcp` ad
 alanında yaşar. Cache yayını lock korumalı, aynı dizinde atomik değiştirme
 kullanır. Symlink veya üst dizin kimliği belirsizliği şüphede kapalı kalır.
 
@@ -74,7 +74,7 @@ container veya OS sandbox gerekir.
 
 ## Dağıtım
 
-Crate ve binary adı `agz-rust-coder` değeridir. Release tag'leri
-`agz-rust-coder-v<version>` biçimindedir. Resmî MCP Registry kimliği
-`io.github.ugur-murat-alt/agz-rust-coder` olup tam crates.io paket sürümü ve
+Crate ve binary adı `agz-rust-mcp` değeridir. Release tag'leri
+`agz-rust-mcp-v<version>` biçimindedir. Resmî MCP Registry kimliği
+`io.github.ugur-murat-alt/agz-rust-mcp` olup tam crates.io paket sürümü ve
 repository'deki `server.json` tarafından desteklenir.

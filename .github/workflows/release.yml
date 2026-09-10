@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Exact tag to create, for example agz-rust-coder-v0.2.0"
+        description: "Exact tag to create, for example agz-rust-mcp-v0.2.0"
         required: true
         type: string
       publish:
@@ -59,8 +59,8 @@ jobs:
         env:
           REQUESTED_TAG: ${{ inputs.tag }}
         run: |
-          VERSION="$(cargo +1.88.0 metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "agz-rust-coder") | .version')"
-          EXPECTED_TAG="agz-rust-coder-v${VERSION}"
+          VERSION="$(cargo +1.88.0 metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "agz-rust-mcp") | .version')"
+          EXPECTED_TAG="agz-rust-mcp-v${VERSION}"
           if [[ "$GITHUB_EVENT_NAME" = "push" ]]; then
             test "$GITHUB_REF" = "refs/heads/release/${VERSION}"
           else
@@ -87,12 +87,12 @@ jobs:
         shell: bash
         run: |
           MCP_BIN_DIR="$(mktemp -d)"
-          install -m 0755 target/release/agz-rust-coder "$MCP_BIN_DIR/agz-rust-coder"
-          AGZ_RUST_CODER_BIN="$MCP_BIN_DIR/agz-rust-coder" \
+          install -m 0755 target/release/agz-rust-mcp "$MCP_BIN_DIR/agz-rust-mcp"
+          AGZ_RUST_MCP_BIN="$MCP_BIN_DIR/agz-rust-mcp" \
             cargo +1.88.0 run --locked -p xtask -- protocol-smoke
-          AGZ_RUST_CODER_BIN="$MCP_BIN_DIR/agz-rust-coder" \
+          AGZ_RUST_MCP_BIN="$MCP_BIN_DIR/agz-rust-mcp" \
             cargo +1.88.0 run --locked -p xtask -- opencode-smoke
-          AGZ_RUST_CODER_BIN="$MCP_BIN_DIR/agz-rust-coder" \
+          AGZ_RUST_MCP_BIN="$MCP_BIN_DIR/agz-rust-mcp" \
             cargo +1.88.0 run --locked -p xtask -- benchmark-smoke
 
       - name: Validate MCP Registry metadata
@@ -115,8 +115,8 @@ jobs:
           RA_BIN="$(rustup which --toolchain 1.88.0 rust-analyzer)"
           test -x "$RA_BIN"
           "$RA_BIN" --version
-          AGZ_RUST_CODER_RUST_ANALYZER__PATH="$RA_BIN" \
-            cargo +1.88.0 test -p agz-rust-coder --test lsp_real --locked -- --ignored
+          AGZ_RUST_MCP_RUST_ANALYZER__PATH="$RA_BIN" \
+            cargo +1.88.0 test -p agz-rust-mcp --test lsp_real --locked -- --ignored
 
       - name: Package, fresh-install, and dry-run publish
         shell: bash
@@ -124,36 +124,36 @@ jobs:
           CARGO_BUILD_JOBS: 1
           CARGO_INCREMENTAL: 0
         run: |
-          cargo +1.88.0 package -p agz-rust-coder --locked
-          cargo +1.88.0 publish -p agz-rust-coder --dry-run --locked
-          VERSION="$(cargo +1.88.0 metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "agz-rust-coder") | .version')"
+          cargo +1.88.0 package -p agz-rust-mcp --locked
+          cargo +1.88.0 publish -p agz-rust-mcp --dry-run --locked
+          VERSION="$(cargo +1.88.0 metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "agz-rust-mcp") | .version')"
           PACKAGE_DIR="$(mktemp -d)"
           INSTALL_ROOT="$(mktemp -d)"
-          tar -xzf "target/package/agz-rust-coder-${VERSION}.crate" -C "$PACKAGE_DIR"
+          tar -xzf "target/package/agz-rust-mcp-${VERSION}.crate" -C "$PACKAGE_DIR"
           cargo +1.88.0 install \
-            --path "$PACKAGE_DIR/agz-rust-coder-${VERSION}" \
+            --path "$PACKAGE_DIR/agz-rust-mcp-${VERSION}" \
             --root "$INSTALL_ROOT" \
             --locked \
             --offline
-          "$INSTALL_ROOT/bin/agz-rust-coder" --version
-          AGZ_RUST_CODER_BIN="$INSTALL_ROOT/bin/agz-rust-coder" \
+          "$INSTALL_ROOT/bin/agz-rust-mcp" --version
+          AGZ_RUST_MCP_BIN="$INSTALL_ROOT/bin/agz-rust-mcp" \
             cargo +1.88.0 run --locked -p xtask -- protocol-smoke
-          AGZ_RUST_CODER_BIN="$INSTALL_ROOT/bin/agz-rust-coder" \
+          AGZ_RUST_MCP_BIN="$INSTALL_ROOT/bin/agz-rust-mcp" \
             cargo +1.88.0 run --locked -p xtask -- opencode-smoke
-          AGZ_RUST_CODER_BIN="$INSTALL_ROOT/bin/agz-rust-coder" \
+          AGZ_RUST_MCP_BIN="$INSTALL_ROOT/bin/agz-rust-mcp" \
             cargo +1.88.0 run --locked -p xtask -- benchmark-smoke
-          git bundle create target/package/agz-rust-coder-source.bundle HEAD
+          git bundle create target/package/agz-rust-mcp-source.bundle HEAD
           printf '%s\n' "$GITHUB_SHA" > target/package/SOURCE_SHA
           cp install.sh target/package/install.sh
-          (cd target/package && sha256sum agz-rust-coder-*.crate agz-rust-coder-source.bundle install.sh > SHA256SUMS)
+          (cd target/package && sha256sum agz-rust-mcp-*.crate agz-rust-mcp-source.bundle install.sh > SHA256SUMS)
 
       - name: Upload verified package artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: artifact-package-${{ github.sha }}
           path: |
-            target/package/agz-rust-coder-*.crate
-            target/package/agz-rust-coder-source.bundle
+            target/package/agz-rust-mcp-*.crate
+            target/package/agz-rust-mcp-source.bundle
             target/package/SHA256SUMS
             target/package/SOURCE_SHA
             target/package/install.sh
@@ -177,13 +177,13 @@ jobs:
         include:
           - os: ubuntu-24.04
             platform: linux-x86_64
-            binary: agz-rust-coder
+            binary: agz-rust-mcp
           - os: macos-14
             platform: macos-arm64
-            binary: agz-rust-coder
+            binary: agz-rust-mcp
           - os: windows-2025
             platform: windows-x86_64
-            binary: agz-rust-coder.exe
+            binary: agz-rust-mcp.exe
     steps:
       - name: Check out the dispatched commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -198,7 +198,7 @@ jobs:
 
       - name: Build release binary
         shell: bash
-        run: cargo +1.88.0 build --release -p agz-rust-coder --locked
+        run: cargo +1.88.0 build --release -p agz-rust-mcp --locked
 
       - name: Package binary and checksum
         shell: bash
@@ -208,7 +208,7 @@ jobs:
         run: |
           test -f "target/release/$BINARY"
           cd target/release
-          ARCHIVE="agz-rust-coder-${PLATFORM}.tar.gz"
+          ARCHIVE="agz-rust-mcp-${PLATFORM}.tar.gz"
           tar -czf "$ARCHIVE" "$BINARY"
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
@@ -221,8 +221,8 @@ jobs:
         with:
           name: artifact-binary-${{ matrix.platform }}-${{ github.sha }}
           path: |
-            target/release/agz-rust-coder-${{ matrix.platform }}.tar.gz
-            target/release/agz-rust-coder-${{ matrix.platform }}.tar.gz.sha256
+            target/release/agz-rust-mcp-${{ matrix.platform }}.tar.gz
+            target/release/agz-rust-mcp-${{ matrix.platform }}.tar.gz.sha256
           if-no-files-found: error
           retention-days: 7
           overwrite: false
@@ -240,7 +240,7 @@ jobs:
     timeout-minutes: 20
     environment:
       name: release
-      url: https://github.com/ugur-murat-alt/rust-code-mcp/releases
+      url: https://github.com/ugur-murat-alt/agz-rust-mcp/releases
     permissions:
       contents: write
       actions: read
@@ -272,14 +272,14 @@ jobs:
             (cd "$(dirname "$checksum")" && sha256sum --check "$(basename "$checksum")")
           done
           test "$(cat release-artifact/SOURCE_SHA)" = "$GITHUB_SHA"
-          git clone release-artifact/agz-rust-coder-source.bundle release-source
+          git clone release-artifact/agz-rust-mcp-source.bundle release-source
           test "$(git -C release-source rev-parse HEAD)" = "$GITHUB_SHA"
-          cargo +1.88.0 package --manifest-path release-source/Cargo.toml -p agz-rust-coder --locked
+          cargo +1.88.0 package --manifest-path release-source/Cargo.toml -p agz-rust-mcp --locked
           ARTIFACT_SHA="$(awk 'NR == 1 {print $1}' release-artifact/SHA256SUMS)"
-          BUILT_SHA="$(sha256sum release-source/target/package/agz-rust-coder-*.crate | awk 'NR == 1 {print $1}')"
+          BUILT_SHA="$(sha256sum release-source/target/package/agz-rust-mcp-*.crate | awk 'NR == 1 {print $1}')"
           test "$ARTIFACT_SHA" = "$BUILT_SHA"
-          VERSION="$(cargo +1.88.0 metadata --manifest-path release-source/Cargo.toml --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "agz-rust-coder") | .version')"
-          EXPECTED_TAG="agz-rust-coder-v${VERSION}"
+          VERSION="$(cargo +1.88.0 metadata --manifest-path release-source/Cargo.toml --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "agz-rust-mcp") | .version')"
+          EXPECTED_TAG="agz-rust-mcp-v${VERSION}"
           if [[ "$GITHUB_EVENT_NAME" = "push" ]]; then
             test "$GITHUB_REF" = "refs/heads/release/${VERSION}"
             REQUESTED_TAG="$EXPECTED_TAG"
@@ -312,19 +312,19 @@ jobs:
           STATUS="$(curl --silent --show-error --location \
             --output "$RESPONSE" \
             --write-out '%{http_code}' \
-            --user-agent "agz-rust-coder-release/${VERSION}" \
-            "https://crates.io/api/v1/crates/agz-rust-coder/${VERSION}")"
+            --user-agent "agz-rust-mcp-release/${VERSION}" \
+            "https://crates.io/api/v1/crates/agz-rust-mcp/${VERSION}")"
           case "$STATUS" in
             200)
               EXPECTED_SHA="$(awk 'NR == 1 {print $1}' release-artifact/SHA256SUMS)"
               PUBLISHED_SHA="$(jq -er '.version.checksum' "$RESPONSE")"
               test "$PUBLISHED_SHA" = "$EXPECTED_SHA"
-              echo "agz-rust-coder ${VERSION} is already published with the verified checksum."
+              echo "agz-rust-mcp ${VERSION} is already published with the verified checksum."
               ;;
             404)
               cargo +1.88.0 publish \
                 --manifest-path release-source/Cargo.toml \
-                -p agz-rust-coder \
+                -p agz-rust-mcp \
                 --locked
               ;;
             *)
@@ -350,7 +350,7 @@ jobs:
         env:
           VERSION: ${{ steps.metadata.outputs.version }}
         run: |
-          SERVER_NAME="io.github.ugur-murat-alt%2Fagz-rust-coder"
+          SERVER_NAME="io.github.ugur-murat-alt%2Fagz-rust-mcp"
           ENDPOINT="https://registry.modelcontextprotocol.io/v0.1/servers/${SERVER_NAME}/versions/${VERSION}"
           STATUS="$(curl --silent --show-error --output registry-response.json --write-out '%{http_code}' "$ENDPOINT")"
           case "$STATUS" in
@@ -384,7 +384,7 @@ jobs:
         run: |
           gh release create "$RELEASE_TAG" \
             release-artifact/*.crate \
-            release-artifact/agz-rust-coder-source.bundle \
+            release-artifact/agz-rust-mcp-source.bundle \
             release-artifact/*.tar.gz \
             release-artifact/*.tar.gz.sha256 \
             release-artifact/SHA256SUMS \

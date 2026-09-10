@@ -1,7 +1,7 @@
 # Tool And Configuration Reference
 
 This document defines the public tool and configuration surface of
-`agz-rust-coder` `0.2.0`.
+`agz-rust-mcp` `0.2.0`.
 
 Request deadlines and cancellation also cover Git probes and input-identity
 collection before and after Cargo. Git subprocesses use the shared process
@@ -378,12 +378,12 @@ validation through the work record's cancellation token.
 
 ## Configuration Sources
 
-The precedence order is CLI, `AGZ_RUST_CODER_*` environment, explicit TOML, and
+The precedence order is CLI, `AGZ_RUST_MCP_*` environment, explicit TOML, and
 defaults. Lists replace lower-priority values instead of appending. Unknown TOML
 or environment keys fail startup.
 
 Environment variables uppercase the field and use `__` between sections:
-`gate.hard_timeout_ms` becomes `AGZ_RUST_CODER_GATE__HARD_TIMEOUT_MS`. Root lists
+`gate.hard_timeout_ms` becomes `AGZ_RUST_MCP_GATE__HARD_TIMEOUT_MS`. Root lists
 use the platform path-list separator.
 
 ## Configuration Reference
@@ -415,8 +415,8 @@ use the platform path-list separator.
 | `gate.cache` | `auto` | `auto`, `project`, or `isolated`. |
 | `gate.min_free_disk_mb` | `1024` | Preflight disk floor. |
 | `gate.min_available_memory_mb` | `512` | Preflight memory floor when the host exposes a reliable available-memory measurement (currently Linux). |
-| `gate.cache_dir` | platform `agz-rust-coder/state/gate` | Server-owned Cargo cache. |
-| `gate.lease_dir` | platform `agz-rust-coder/state/leases` | Host leases and process journal. |
+| `gate.cache_dir` | platform `agz-rust-mcp/state/gate` | Server-owned Cargo cache. |
+| `gate.lease_dir` | platform `agz-rust-mcp/state/leases` | Host leases and process journal. |
 | `profile.max_report_bytes` | `4194304` | Bounded read/store cap for one Cargo timing artifact. |
 | `profile.max_runs` | `4` | Fresh Cargo runs available to one `profile` call. |
 | `profile.compare_samples` | `3` | Required samples per side before any speed claim. |
@@ -437,8 +437,8 @@ use the platform path-list separator.
 | `rust_analyzer.workspace_code` | `deny` | `deny` or explicit `allow`. |
 | `docs.timeout_ms` | `300000` | Documentation resolution deadline. |
 | `docs.fallback` | `auto` | `auto`, `local`, `network`, or `off`. |
-| `docs.cache_dir` | platform `agz-rust-coder/docs` | Server-owned docs cache. |
-| `change.scratch_dir` | platform `agz-rust-coder/state/change` | Server-owned changeset scratch outside authorized roots. |
+| `docs.cache_dir` | platform `agz-rust-mcp/docs` | Server-owned docs cache. |
+| `change.scratch_dir` | platform `agz-rust-mcp/state/change` | Server-owned changeset scratch outside authorized roots. |
 | `change.max_active` | `4` | Concurrent active changes per server. |
 | `change.max_files` | `20000` | Captured files per change. |
 | `change.max_bytes` | `268435456` | Captured candidate bytes per change. |
@@ -479,7 +479,7 @@ use the platform path-list separator.
 | `limits.audit_total_bytes` | `67108864` | Total audit byte cap. |
 | `limits.audit_findings` | `200` | Audit finding cap. |
 | `telemetry.enabled` | `true` | Enable local activity records. |
-| `telemetry.path` | platform `agz-rust-coder/state/activity.jsonl` | Server-owned JSONL path. |
+| `telemetry.path` | platform `agz-rust-mcp/state/activity.jsonl` | Server-owned JSONL path. |
 | `telemetry.retention_bytes` | `8388608` | Rotation threshold. |
 | `telemetry.retention_days` | `7` | Age retention. |
 | `telemetry.max_archives` | `3` | Archive cap. |

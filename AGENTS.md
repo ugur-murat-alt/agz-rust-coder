@@ -1,4 +1,4 @@
-# AGENTS.md - agz-rust-coder
+# AGENTS.md - agz-rust-mcp
 
 ## Delivery
 
@@ -10,8 +10,8 @@
 
 ## Product Boundaries
 
-- Crate, library, executable, and MCP identities are `agz-rust-coder` and
-  `agz_rust_coder`; configuration uses `AGZ_RUST_CODER_*`.
+- Crate, library, executable, and MCP identities are `agz-rust-mcp` and
+  `agz_rust_mcp`; configuration uses `AGZ_RUST_MCP_*`.
 - Stdout belongs exclusively to MCP stdio framing. Diagnostics and logs go to
   stderr or bounded tool results.
 - Cargo/rustc output is authoritative. Audit and Rust Analyzer output is

@@ -79,7 +79,7 @@ pub async fn protocol_smoke(root: &Path) -> Result<ProtocolEvidence> {
         .server_info
         .as_ref()
         .map(|info| info.name.as_ref())
-        != Some("agz-rust-coder")
+        != Some("agz-rust-mcp")
     {
         bail!("unexpected server implementation name");
     }
@@ -336,7 +336,7 @@ impl ProtocolTaskFixture {
         let base = fs::canonicalize(std::env::temp_dir())
             .context("canonical protocol task temp directory")?
             .join(format!(
-                "agz-rust-coder-protocol-task-{}-{timestamp}",
+                "agz-rust-mcp-protocol-task-{}-{timestamp}",
                 std::process::id()
             ));
         let workspace = base.join("workspace");
@@ -409,7 +409,7 @@ pub async fn check(root: &Path, directory: &Path) -> Result<CheckObservation> {
 fn server_command(root: &Path) -> Command {
     if let Some(binary) = server_binary(root) {
         let mut command = Command::new(binary);
-        command.current_dir(root).env_remove("AGZ_RUST_CODER_BIN");
+        command.current_dir(root).env_remove("AGZ_RUST_MCP_BIN");
         return command;
     }
 
@@ -418,16 +418,16 @@ fn server_command(root: &Path) -> Command {
         .current_dir(root)
         .args(["run", "--quiet", "--locked", "--manifest-path"])
         .arg(root.join("Cargo.toml"))
-        .args(["-p", "agz-rust-coder", "--"])
-        .env_remove("AGZ_RUST_CODER_BIN");
+        .args(["-p", "agz-rust-mcp", "--"])
+        .env_remove("AGZ_RUST_MCP_BIN");
     command
 }
 
 fn server_binary(root: &Path) -> Option<PathBuf> {
-    let configured = std::env::var_os("AGZ_RUST_CODER_BIN").map(PathBuf::from);
+    let configured = std::env::var_os("AGZ_RUST_MCP_BIN").map(PathBuf::from);
     let mut candidates = configured.into_iter().chain([
-        root.join("target/debug/agz-rust-coder"),
-        root.join("target/release/agz-rust-coder"),
+        root.join("target/debug/agz-rust-mcp"),
+        root.join("target/release/agz-rust-mcp"),
     ]);
     candidates.find(|path| {
         fs::symlink_metadata(path)

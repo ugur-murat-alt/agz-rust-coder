@@ -1,12 +1,12 @@
-# agz-rust-coder
+# agz-rust-mcp
 
-[![CI](https://github.com/ugur-murat-alt/rust-code-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ugur-murat-alt/rust-code-mcp/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/agz-rust-coder.svg)](https://crates.io/crates/agz-rust-coder)
+[![CI](https://github.com/ugur-murat-alt/agz-rust-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ugur-murat-alt/agz-rust-mcp/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/agz-rust-mcp.svg)](https://crates.io/crates/agz-rust-mcp)
 [![Lisans: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 [English](README.md) | Türkçe
 
-`agz-rust-coder`, derleyici çıktısını temel alan Rust çalışmaları için bağımsız
+`agz-rust-mcp`, derleyici çıktısını temel alan Rust çalışmaları için bağımsız
 bir stdio MCP sunucusudur. Sınırlı Cargo doğrulaması çalıştırır, kaynak kodu
 denetler, tam sürüme ait crate belgelerini çözer, Rust Analyzer ile gezinme
 sağlar ve kaynağa yazmayan rename/refactor paketleri döndürür.
@@ -15,22 +15,22 @@ sağlar ve kaynağa yazmayan rename/refactor paketleri döndürür.
 
 | Sözleşme | Değer |
 | --- | --- |
-| Crate, binary, server | `agz-rust-coder` |
-| MCP Registry | `io.github.ugur-murat-alt/agz-rust-coder` |
+| Crate, binary, server | `agz-rust-mcp` |
+| MCP Registry | `io.github.ugur-murat-alt/agz-rust-mcp` |
 | Güncel sürüm | `0.2.0` |
 | İlk sürüm | `0.1.0` |
-| Release tag | `agz-rust-coder-v<version>` |
+| Release tag | `agz-rust-mcp-v<version>` |
 | Rust edition / MSRV | `2024` / `1.88.0` |
 | Rust MCP SDK | `rmcp` `3.1.4` |
 | Varsayılan / keşfedilen protokol | `2025-11-25` / `2026-07-28` |
 
-MCP paket sahipliği kaydı: `mcp-name: io.github.ugur-murat-alt/agz-rust-coder`.
+MCP paket sahipliği kaydı: `mcp-name: io.github.ugur-murat-alt/agz-rust-mcp`.
 
 ## Kurulum
 
 ```bash
-cargo install agz-rust-coder --locked
-agz-rust-coder --version
+cargo install agz-rust-mcp --locked
+agz-rust-mcp --version
 ```
 
 Paket crates.io üzerinden kaynak olarak dağıtılır. Release sayfalarında ayrıca
@@ -38,7 +38,7 @@ hazır derlenmiş arşivler ve SHA-256 sağlama toplamları bulunur.
 
 ## MCP istemci kurulumu (OpenCode2 örneği)
 
-`agz-rust-coder` bağımsız bir stdio MCP sunucusudur; MCP destekli her istemci
+`agz-rust-mcp` bağımsız bir stdio MCP sunucusudur; MCP destekli her istemci
 çalıştırabilir. Pinli OpenCode2 host'u depodaki uyumluluk smoke'u ile sınanır.
 
 OpenCode2 örnek yapılandırması (`opencode.jsonc`):
@@ -50,7 +50,7 @@ OpenCode2 örnek yapılandırması (`opencode.jsonc`):
     "servers": {
       "rust": {
         "type": "local",
-        "command": ["agz-rust-coder"],
+        "command": ["agz-rust-mcp"],
         "cwd": ".",
         "codemode": false,
         "timeout": {
@@ -102,9 +102,9 @@ ihlali, kaynak tükenmesi ve semantik altyapı yokluğu protokol hatasıdır.
 
 ## Yapılandırma
 
-Öncelik sırası CLI, `AGZ_RUST_CODER_*` ortam değişkenleri, açık `--config` TOML
+Öncelik sırası CLI, `AGZ_RUST_MCP_*` ortam değişkenleri, açık `--config` TOML
 dosyası ve varsayılanlardır. Ortam anahtarları bölümler arasında `__` kullanır;
-örnek: `AGZ_RUST_CODER_GATE__HARD_TIMEOUT_MS=600000`.
+örnek: `AGZ_RUST_MCP_GATE__HARD_TIMEOUT_MS=600000`.
 
 | Key | Default | Anlam |
 | --- | --- | --- |
@@ -135,7 +135,7 @@ dosyası ve varsayılanlardır. Ortam anahtarları bölümler arasında `__` kul
 dosyayı aşınca temizlenir. `profile` sonucu bu saklama politikasını görünür
 kılar; süresi dolan kanıt sessizce yeniden kullanılmaz.
 
-Tüm CLI alanları için `agz-rust-coder --help` çalıştırın. Tam davranış ve
+Tüm CLI alanları için `agz-rust-mcp --help` çalıştırın. Tam davranış ve
 varsayılan tablosu [docs/tools.tr.md](docs/tools.tr.md) içindedir.
 
 ## Güvenlik
@@ -174,8 +174,8 @@ cargo run -p xtask -- benchmark-smoke
 
 ## Kanonik Bağlantılar
 
-- Repository: https://github.com/ugur-murat-alt/rust-code-mcp
-- Crate: https://crates.io/crates/agz-rust-coder
+- Repository: https://github.com/ugur-murat-alt/agz-rust-mcp
+- Crate: https://crates.io/crates/agz-rust-mcp
 - SDK docs: https://docs.rs/rmcp/3.1.4/rmcp/
 - MCP `2025-11-25`: https://modelcontextprotocol.io/specification/2025-11-25
 - MCP `2026-07-28`: https://modelcontextprotocol.io/specification/2026-07-28

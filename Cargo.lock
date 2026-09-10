@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "agz-rust-coder"
+name = "agz-rust-mcp"
 version = "0.2.0"
 dependencies = [
  "anyhow",

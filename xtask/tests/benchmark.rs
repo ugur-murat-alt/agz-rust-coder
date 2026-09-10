@@ -261,12 +261,12 @@ async fn source_checksum_changes_when_harness_source_changes() {
 
     let temp = temp_dir().join(format!("stage7-source-test-{}", std::process::id()));
     let _ = fs::remove_dir_all(&temp);
-    fs::create_dir_all(temp.join("crates/agz-rust-coder/src")).expect("crate source dir");
+    fs::create_dir_all(temp.join("crates/agz-rust-mcp/src")).expect("crate source dir");
     fs::create_dir_all(temp.join("xtask/src")).expect("xtask source dir");
     fs::create_dir_all(temp.join("xtask/tests")).expect("xtask tests dir");
     fs::copy(source.join("Cargo.toml"), temp.join("Cargo.toml")).expect("copy manifest");
     fs::copy(source.join("Cargo.lock"), temp.join("Cargo.lock")).expect("copy lockfile");
-    fs::write(temp.join("crates/agz-rust-coder/src/lib.rs"), "one\n").expect("crate source");
+    fs::write(temp.join("crates/agz-rust-mcp/src/lib.rs"), "one\n").expect("crate source");
     fs::write(temp.join("xtask/src/main.rs"), "one\n").expect("xtask source");
     fs::write(temp.join("xtask/tests/test.rs"), "one\n").expect("xtask test");
     let second = relevant_source_checksum(&temp, &evidence).expect("second source checksum");

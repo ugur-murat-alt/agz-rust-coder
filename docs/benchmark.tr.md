@@ -92,7 +92,7 @@ Canlı kip, ücret oluşturabileceği için açıkça incelenmiş adapter ve aç
 kararı gerektirir:
 
 ```bash
-AGZ_RUST_CODER_LIVE_ADAPTER=/absolute/path/to/reviewed-adapter \
+AGZ_RUST_MCP_LIVE_ADAPTER=/absolute/path/to/reviewed-adapter \
   cargo run -p xtask -- benchmark-smoke --live
 ```
 
@@ -111,8 +111,8 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-targets --all-features --locked --no-fail-fast
 cargo +1.88.0 check --workspace --all-targets --all-features --locked
 cargo build --release --locked
-cargo package -p agz-rust-coder --locked
-cargo publish -p agz-rust-coder --dry-run --locked
+cargo package -p agz-rust-mcp --locked
+cargo publish -p agz-rust-mcp --dry-run --locked
 ```
 
 Provider-free smoke'lar, gerçek pinli Rust Analyzer/docs adapter'ları,
@@ -122,7 +122,7 @@ Windows süreç/yol kapsamını sağlar.
 
 ## Girdi kimliği karşılaştırması (henüz yayımlanmadı)
 
-`crates/agz-rust-coder/examples/identity_measure.rs` örneğini aynı toolchain/profil
+`crates/agz-rust-mcp/examples/identity_measure.rs` örneğini aynı toolchain/profil
 ile eski ve yeni kod üzerinde derleyin. İki binary ile
 `python3 benchmark/identity_compare.py BASELINE CANDIDATE --output comparison.json`
 komutunu çalıştırın. Betik özdeş örnekler üretir, çalışma sırasını dönüşümlü seçer,

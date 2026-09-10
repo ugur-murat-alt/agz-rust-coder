@@ -225,9 +225,9 @@ struct CommandLiveAdapter {
 
 impl CommandLiveAdapter {
     fn from_env() -> Result<Self> {
-        let command = std::env::var_os("AGZ_RUST_CODER_LIVE_ADAPTER")
+        let command = std::env::var_os("AGZ_RUST_MCP_LIVE_ADAPTER")
             .map(PathBuf::from)
-            .context("live mode requires AGZ_RUST_CODER_LIVE_ADAPTER")?;
+            .context("live mode requires AGZ_RUST_MCP_LIVE_ADAPTER")?;
         let metadata = fs::symlink_metadata(&command).context("inspect live adapter")?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             bail!("live adapter must be a regular executable file");
@@ -1179,7 +1179,7 @@ fn source_checksum_for_fixtures(root: &Path, fixtures: &[(&str, &str)]) -> Resul
     for relative in [
         "Cargo.toml",
         "Cargo.lock",
-        "crates/agz-rust-coder/src",
+        "crates/agz-rust-mcp/src",
         "xtask/src",
         "xtask/tests",
     ] {
@@ -1665,7 +1665,7 @@ impl TemporaryDirectory {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos();
-            let path = base.join(format!("agz-rust-coder-{label}-{timestamp}-{nonce}"));
+            let path = base.join(format!("agz-rust-mcp-{label}-{timestamp}-{nonce}"));
             match fs::create_dir(&path) {
                 Ok(()) => return Ok(Self { path }),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}

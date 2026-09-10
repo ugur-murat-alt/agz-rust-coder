@@ -1189,20 +1189,20 @@ fn server_command(root: &Path) -> Vec<Value> {
         Value::String("--manifest-path".to_owned()),
         Value::String(root.join("Cargo.toml").to_string_lossy().into_owned()),
         Value::String("-p".to_owned()),
-        Value::String("agz-rust-coder".to_owned()),
+        Value::String("agz-rust-mcp".to_owned()),
         Value::String("--".to_owned()),
     ]
 }
 
 fn mcp_binary(root: &Path) -> Option<PathBuf> {
-    let configured = std::env::var_os("AGZ_RUST_CODER_BIN").map(PathBuf::from);
+    let configured = std::env::var_os("AGZ_RUST_MCP_BIN").map(PathBuf::from);
     let mut candidates = configured.into_iter().chain([
         root.join(format!(
-            "target/debug/agz-rust-coder{}",
+            "target/debug/agz-rust-mcp{}",
             std::env::consts::EXE_SUFFIX
         )),
         root.join(format!(
-            "target/release/agz-rust-coder{}",
+            "target/release/agz-rust-mcp{}",
             std::env::consts::EXE_SUFFIX
         )),
     ]);
@@ -1252,7 +1252,7 @@ fn unique_directory(label: &str) -> Result<PathBuf> {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let path = base.join(format!("agz-rust-coder-{label}-{timestamp}-{nonce}"));
+        let path = base.join(format!("agz-rust-mcp-{label}-{timestamp}-{nonce}"));
         match fs::create_dir(&path) {
             Ok(()) => return Ok(path),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -1316,7 +1316,7 @@ fn validate_config(value: &Value, expected_codemode: bool) -> Result<ConfigEvide
         .get("command")
         .and_then(Value::as_array)
         .context("OpenCode fixture command")?;
-    if command.len() != 1 || command[0].as_str() != Some("<agz-rust-coder>") {
+    if command.len() != 1 || command[0].as_str() != Some("<agz-rust-mcp>") {
         bail!("OpenCode fixture must use the redacted binary placeholder");
     }
     let timeout = server.get("timeout").context("OpenCode fixture timeout")?;
@@ -1340,7 +1340,7 @@ fn validate_config(value: &Value, expected_codemode: bool) -> Result<ConfigEvide
         server_key: "rust",
         server_type: "local",
         codemode: expected_codemode,
-        command_placeholder: "<agz-rust-coder>",
+        command_placeholder: "<agz-rust-mcp>",
         cwd: ".",
         startup_timeout_ms: startup,
         catalog_timeout_ms: catalog,

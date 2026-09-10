@@ -91,7 +91,7 @@ Live mode requires an explicitly reviewed adapter and an explicit operator
 decision because it may incur cost:
 
 ```bash
-AGZ_RUST_CODER_LIVE_ADAPTER=/absolute/path/to/reviewed-adapter \
+AGZ_RUST_MCP_LIVE_ADAPTER=/absolute/path/to/reviewed-adapter \
   cargo run -p xtask -- benchmark-smoke --live
 ```
 
@@ -110,8 +110,8 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-targets --all-features --locked --no-fail-fast
 cargo +1.88.0 check --workspace --all-targets --all-features --locked
 cargo build --release --locked
-cargo package -p agz-rust-coder --locked
-cargo publish -p agz-rust-coder --dry-run --locked
+cargo package -p agz-rust-mcp --locked
+cargo publish -p agz-rust-mcp --dry-run --locked
 ```
 
 The provider-free smokes, real pinned Rust Analyzer/doc adapters,
@@ -121,7 +121,7 @@ coverage unavailable on a Linux workstation.
 
 ## Input-identity comparisons (unreleased)
 
-Build `crates/agz-rust-coder/examples/identity_measure.rs` against the baseline and
+Build `crates/agz-rust-mcp/examples/identity_measure.rs` against the baseline and
 candidate using the same toolchain/profile. Keep both binaries, then run
 `python3 benchmark/identity_compare.py BASELINE CANDIDATE --output comparison.json`.
 The script generates identical fixtures, alternates measurement order, warms

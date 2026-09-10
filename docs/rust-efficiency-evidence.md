@@ -53,13 +53,13 @@ cargo test --workspace --all-targets --all-features --locked --no-fail-fast
 cargo check --workspace --all-targets --all-features --locked
 cargo build --release --workspace --all-features --locked
 python3 -m unittest discover -s benchmark -p test_identity_compare.py
-cargo test -p agz-rust-coder --test lsp_real --locked -- --ignored
-cargo test -p agz-rust-coder --test docs --locked real_local_generator_writes_only_to_the_external_cache -- --ignored
+cargo test -p agz-rust-mcp --test lsp_real --locked -- --ignored
+cargo test -p agz-rust-mcp --test docs --locked real_local_generator_writes_only_to_the_external_cache -- --ignored
 cargo run --locked -p xtask -- protocol-smoke
 cargo run --locked -p xtask -- opencode-smoke
 cargo run --locked -p xtask -- benchmark-smoke
-cargo package --locked -p agz-rust-coder --allow-dirty
-cargo publish --locked -p agz-rust-coder --allow-dirty --dry-run
+cargo package --locked -p agz-rust-mcp --allow-dirty
+cargo publish --locked -p agz-rust-mcp --allow-dirty --dry-run
 ```
 
 For optional integration, the compiled `check_service` test executable is run

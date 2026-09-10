@@ -2,7 +2,7 @@
   "schema_version": 1,
   "default_protocol": "2025-11-25",
   "discover_protocol": "2026-07-28",
-  "server": "agz-rust-coder",
+  "server": "agz-rust-mcp",
   "tools": [
     "check",
     "profile",

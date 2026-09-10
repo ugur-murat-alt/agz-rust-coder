@@ -1,6 +1,6 @@
 # Architecture
 
-`agz-rust-coder` is one Rust process with an RMCP stdio adapter, bounded domain
+`agz-rust-mcp` is one Rust process with an RMCP stdio adapter, bounded domain
 services, and supervised external processes. It never accepts remote transport
 connections and never writes workspace source.
 
@@ -61,7 +61,7 @@ shutdown attempt graceful stop, then bounded force termination and reap. A
 journal retains entries when cleanup cannot be proven complete.
 
 Server-owned state lives outside authorized roots under the platform
-`agz-rust-coder` namespace. Cache publication uses lock-protected,
+`agz-rust-mcp` namespace. Cache publication uses lock-protected,
 same-directory atomic replacement. Symlink or parent-identity uncertainty fails
 closed.
 
@@ -75,7 +75,7 @@ require a container or OS sandbox.
 
 ## Distribution
 
-The crate and binary are `agz-rust-coder`. Release tags use
-`agz-rust-coder-v<version>`. The official MCP Registry identity is
-`io.github.ugur-murat-alt/agz-rust-coder`, backed by the exact crates.io package
+The crate and binary are `agz-rust-mcp`. Release tags use
+`agz-rust-mcp-v<version>`. The official MCP Registry identity is
+`io.github.ugur-murat-alt/agz-rust-mcp`, backed by the exact crates.io package
 version and the repository's `server.json`.
