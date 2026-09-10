@@ -16,6 +16,7 @@ pub use metadata::{
     CargoMetadataRunner, DependencyClosure, MetadataCacheState, MetadataCommandSpec, MetadataError,
     MetadataLoad, MetadataRun, MetadataRunner, MetadataService, WorkspaceSnapshot,
 };
+pub(crate) use roots::canonical_spelling;
 pub use roots::{
     AuthorizedRoot, BoundedFile, ClientRoots, DirectoryEntry, DirectoryEntryKind, ResolvedPath,
     RootError, RootGuard, RootKind, RootSnapshot, WalkFile, WalkIssue, WalkIssueKind, WalkLimits,

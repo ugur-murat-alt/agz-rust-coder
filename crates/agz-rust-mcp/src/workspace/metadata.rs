@@ -733,7 +733,8 @@ impl<R: MetadataRunner> MetadataService<R> {
         };
         checkpoint(control)?;
         self.check_epoch(selection.epoch())?;
-        let metadata = validate_metadata(&run.metadata, selection, &closure, &self.guard)?;
+        let mut metadata = validate_metadata(&run.metadata, selection, &closure, &self.guard)?;
+        normalize_metadata_path_spelling(&mut metadata);
         checkpoint(control)?;
         let workspace_root = canonical_metadata_workspace_root(&run.metadata, selection)?;
         let target_directory = PathBuf::from(run.metadata.target_directory.as_std_path());
@@ -1232,6 +1233,28 @@ fn canonical_metadata_workspace_root(
         .worktree_authority()
         .authorize_dir(&workspace_root)?;
     Ok(root.path().to_owned())
+}
+
+/// Rewrite Cargo's lexical drive paths into the verbatim spelling used by
+/// authorized roots, so every snapshot consumer compares one path identity.
+///
+/// The workspace root is included because `Metadata::root_package` compares it
+/// against package manifest paths. Syntax-only, and identity on non-Windows
+/// platforms.
+fn normalize_metadata_path_spelling(metadata: &mut Metadata) {
+    metadata.workspace_root = canonical_utf8(&metadata.workspace_root);
+    for package in &mut metadata.packages {
+        package.manifest_path = canonical_utf8(&package.manifest_path);
+        for target in &mut package.targets {
+            target.src_path = canonical_utf8(&target.src_path);
+        }
+    }
+}
+
+fn canonical_utf8(path: &cargo_metadata::camino::Utf8Path) -> cargo_metadata::camino::Utf8PathBuf {
+    let normalized = super::canonical_spelling(path.as_std_path());
+    cargo_metadata::camino::Utf8PathBuf::from_path_buf(normalized)
+        .unwrap_or_else(|_| path.to_owned())
 }
 
 fn validate_metadata(

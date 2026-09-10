@@ -104,7 +104,11 @@ pub fn build_package_graph(metadata: &Metadata) -> PackageGraph {
     let mut graph = PackageGraph::default();
 
     for package in &metadata.packages {
-        let manifest_path = PathBuf::from(package.manifest_path.as_std_path());
+        // Cargo reports ordinary drive paths while authorized roots are
+        // canonical; graph roots must use the canonical spelling so consumers
+        // can compare them against `AuthorizedRoot` paths on Windows.
+        let manifest_path =
+            super::canonical_spelling(&PathBuf::from(package.manifest_path.as_std_path()));
         let root = manifest_path
             .parent()
             .map_or_else(|| manifest_path.clone(), PathBuf::from);

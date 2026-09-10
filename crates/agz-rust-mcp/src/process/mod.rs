@@ -11,6 +11,7 @@ mod output;
 pub mod root_bound;
 pub mod runner;
 mod supervisor;
+mod win32;
 
 #[allow(unused_imports)]
 pub use journal::{
@@ -25,3 +26,4 @@ pub use supervisor::{
     AsyncProcessRunner, CommandSpec, ProcessError, ProcessRunOptions, ProcessRunResult,
     ProcessSupervisor, ShutdownReport,
 };
+pub(crate) use win32::win32_spelling;

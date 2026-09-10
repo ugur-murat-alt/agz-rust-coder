@@ -11,6 +11,7 @@ use thiserror::Error;
 
 use crate::{
     config::{GateCache, GateConfig},
+    process::win32_spelling,
     workspace::WorkspaceSnapshot,
 };
 
@@ -75,6 +76,7 @@ pub fn select_gate_cache(
         if !project_safe {
             return Err(CacheError::OutsideWorkspace(requested));
         }
+        let requested = win32_spelling(&requested).unwrap_or(requested);
         environment.insert(
             OsString::from("CARGO_TARGET_DIR"),
             requested.clone().into_os_string(),
@@ -87,6 +89,7 @@ pub fn select_gate_cache(
         });
     }
     if matches!(config.cache, GateCache::Auto) && project_safe {
+        let requested = win32_spelling(&requested).unwrap_or(requested);
         environment.insert(
             OsString::from("CARGO_TARGET_DIR"),
             requested.clone().into_os_string(),
@@ -108,6 +111,10 @@ pub fn select_gate_cache(
     };
     let target_directory = cache_root.join(workspace_hash).join(mode_name);
     ensure_directory(&target_directory)?;
+    // The isolated directory may live under a canonical (verbatim) path; Cargo
+    // must receive an identity-preserving ordinary spelling so the linker can
+    // open its build artifacts on Windows.
+    let target_directory = win32_spelling(&target_directory).unwrap_or(target_directory);
     environment.insert(
         OsString::from("CARGO_TARGET_DIR"),
         target_directory.clone().into_os_string(),

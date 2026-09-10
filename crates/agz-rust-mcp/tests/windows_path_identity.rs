@@ -1,6 +1,69 @@
 #![cfg(windows)]
-use agz_rust_mcp::workspace::{ClientRoots, RootError, RootGuard};
+use agz_rust_mcp::workspace::{ClientRoots, RootError, RootGuard, build_package_graph};
+use cargo_metadata::Metadata;
+use serde_json::json;
 use std::{fs, path::PathBuf, time::SystemTime};
+
+/// Cargo reports ordinary drive paths for packages while authorized roots are
+/// canonical. The package graph must expose the canonical spelling so anchor
+/// containment and target selection compare one identity.
+#[test]
+fn package_graph_roots_use_the_canonical_verbatim_spelling() {
+    let id = "fixture 0.1.0 (path+file:///C:/fake/workspace)";
+    let metadata: Metadata = serde_json::from_value(json!({
+        "packages": [{
+            "name": "fixture",
+            "version": "0.1.0",
+            "id": id,
+            "license": null,
+            "license_file": null,
+            "description": null,
+            "source": null,
+            "dependencies": [],
+            "targets": [{
+                "kind": ["lib"],
+                "crate_types": ["lib"],
+                "name": "fixture",
+                "src_path": "C:\\fake\\workspace\\src\\lib.rs",
+                "edition": "2024",
+                "doc": true,
+                "doctest": true,
+                "test": true
+            }],
+            "features": {},
+            "manifest_path": "C:\\fake\\workspace\\Cargo.toml",
+            "metadata": null,
+            "publish": null,
+            "authors": [],
+            "categories": [],
+            "keywords": [],
+            "readme": null,
+            "repository": null,
+            "homepage": null,
+            "documentation": null,
+            "edition": "2024",
+            "links": null,
+            "default_run": null,
+            "rust_version": null
+        }],
+        "workspace_members": [id],
+        "workspace_default_members": [id],
+        "resolve": null,
+        "workspace_root": "C:\\fake\\workspace",
+        "target_directory": "C:\\fake\\workspace\\target",
+        "metadata": null,
+        "version": 1
+    }))
+    .expect("metadata fixture");
+
+    let graph = build_package_graph(&metadata);
+    let node = graph.nodes().values().next().expect("package node");
+    assert_eq!(node.root, PathBuf::from(r"\\?\C:\fake\workspace"));
+    assert_eq!(
+        node.manifest_path,
+        PathBuf::from(r"\\?\C:\fake\workspace\Cargo.toml")
+    );
+}
 
 #[test]
 fn ordinary_and_verbatim_drive_paths_share_authority_without_expanding_it() {
