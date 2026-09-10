@@ -147,8 +147,11 @@ pub struct GateRequest {
     pub options: super::ValidationOptions,
     pub directory: Option<PathBuf>,
     pub target: GateTargetId,
-    /// Optional rustup toolchain selector. It is applied as `cargo +<toolchain>`
-    /// before every stage so the command hash binds the actual compiler.
+    /// Optional rustup toolchain selector. A direct toolchain cargo is
+    /// preferred and its compiler is pinned through `RUSTC`, `RUSTUP_TOOLCHAIN`,
+    /// and a prepended `PATH`; the rustup shim fallback applies
+    /// `cargo +<toolchain>` before every stage. Both modes bind the selected
+    /// compiler into the command and environment hashes.
     pub toolchain: Option<String>,
     pub timings: bool,
     pub detail: GateDetail,
@@ -567,5 +570,50 @@ pub fn validate_toolchain_name(toolchain: &str) -> Result<(), String> {
     {
         return Err("toolchain must be a bounded rustup toolchain name".to_owned());
     }
+    // The name is joined into `<rustup-home>/toolchains/<name>/bin/cargo`, so
+    // any dot-only segment would traverse or alias directories.
+    if toolchain
+        .split('-')
+        .any(|segment| !segment.is_empty() && segment.chars().all(|character| character == '.'))
+    {
+        return Err("toolchain must be a bounded rustup toolchain name".to_owned());
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_toolchain_name;
+
+    #[test]
+    fn toolchain_names_reject_path_segments_but_accept_rustup_forms() {
+        for valid in [
+            "stable",
+            "1.88.0-x86_64-unknown-linux-gnu",
+            "nightly-2026-01-01",
+            "my-toolchain",
+        ] {
+            assert!(
+                validate_toolchain_name(valid).is_ok(),
+                "{valid} must be accepted"
+            );
+        }
+        for invalid in [
+            "",
+            "-nightly",
+            ".",
+            "..",
+            "...",
+            "1.88.0-..",
+            "a/b",
+            "a\\b",
+            "name with space",
+            "name\u{7f}",
+        ] {
+            assert!(
+                validate_toolchain_name(invalid).is_err(),
+                "{invalid:?} must be rejected"
+            );
+        }
+    }
 }

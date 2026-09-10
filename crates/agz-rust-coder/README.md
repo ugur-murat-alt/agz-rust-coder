@@ -14,11 +14,13 @@ cargo install agz-rust-coder --locked
 agz-rust-coder --version
 ```
 
-The server exposes `check`, `audit`, `crate_lookup`, `docs`, `context`,
-`symbol`, `references`, `definition`, `symbols`, `implementations`, `hierarchy`,
-`rename`, and `refactor`. Edit tools return bounded packages and never modify
-source. The `context` tool builds revision-bound capsules with per-item reasons,
-bounded pagination, and stale/delta tracking.
+The server exposes `check`, `profile`, `audit`, `crate_lookup`, `docs`,
+`context`, `explain`, `verify`, `symbol`, `references`, `definition`, `symbols`,
+`implementations`, `hierarchy`, `rename`, `refactor`, and `change`. Edit tools
+return bounded packages and never modify source. The `context` tool builds
+revision-bound capsules with per-item reasons, bounded pagination, and
+stale/delta tracking. The `change` tool keeps a revision-bound candidate copy
+with validation evidence and never writes workspace source.
 
 See the [project repository](https://github.com/ugur-murat-alt/agz-rust-coder)
 for client configuration, security boundaries, and release artifacts.

@@ -9,6 +9,7 @@ use std::{
 use agz_rust_coder::{
     Config,
     config::VerifyConfig,
+    gate::{ProgressCallback, ProgressEvent, ProgressStage},
     tools::{
         CheckService, RequiredConfigurations, VerifyAction, VerifyBudget, VerifyOutcome,
         VerifyRequest, VerifyRunner, VerifyService, VerifyStage,
@@ -23,14 +24,45 @@ struct TestProject {
 
 impl TestProject {
     fn new(label: &str, extra_manifest: &str, source: &str) -> Self {
-        Self::build(label, None, extra_manifest, source)
+        Self::build(label, None, extra_manifest, source, None)
     }
 
     fn with_rust_version(label: &str, version: &str, extra_manifest: &str, source: &str) -> Self {
-        Self::build(label, Some(version), extra_manifest, source)
+        Self::build(label, Some(version), extra_manifest, source, None)
     }
 
-    fn build(label: &str, rust_version: Option<&str>, extra_manifest: &str, source: &str) -> Self {
+    fn with_build_script(
+        label: &str,
+        extra_manifest: &str,
+        source: &str,
+        build_script: &str,
+    ) -> Self {
+        Self::build(label, None, extra_manifest, source, Some(build_script))
+    }
+
+    fn with_rust_version_and_build_script(
+        label: &str,
+        version: &str,
+        extra_manifest: &str,
+        source: &str,
+        build_script: &str,
+    ) -> Self {
+        Self::build(
+            label,
+            Some(version),
+            extra_manifest,
+            source,
+            Some(build_script),
+        )
+    }
+
+    fn build(
+        label: &str,
+        rust_version: Option<&str>,
+        extra_manifest: &str,
+        source: &str,
+        build_script: Option<&str>,
+    ) -> Self {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
@@ -61,6 +93,9 @@ impl TestProject {
         )
         .expect("write lockfile");
         fs::write(root.join("src/lib.rs"), source).expect("write source");
+        if let Some(build_script) = build_script {
+            fs::write(root.join("build.rs"), build_script).expect("write build script");
+        }
         git(&root, &["init", "--quiet"]);
         git(&root, &["config", "user.email", "verify@example.invalid"]);
         git(&root, &["config", "user.name", "Verify Fixture"]);
@@ -104,6 +139,96 @@ fn git(root: &Path, arguments: &[&str]) {
         .status()
         .expect("run git fixture command");
     assert!(status.success(), "git command failed: {arguments:?}");
+}
+
+/// Build script that records the compiler Cargo actually asks it to use.
+const COMPILER_PROBE: &str = r#"
+fn main() {
+    let rustc = std::env::var_os("RUSTC").expect("cargo sets RUSTC for build scripts");
+    let output = std::process::Command::new(rustc)
+        .arg("-vV")
+        .output()
+        .expect("probe rustc");
+    let out_dir = std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR");
+    std::fs::write(std::path::Path::new(&out_dir).join("compiler-probe.txt"), output.stdout)
+        .expect("write compiler probe");
+    println!("cargo:rerun-if-changed=build.rs");
+}
+"#;
+
+fn rustup_home() -> PathBuf {
+    std::env::var_os("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".rustup")
+        })
+}
+
+fn installed_toolchain(prefix: &str) -> Option<String> {
+    let mut names = fs::read_dir(rustup_home().join("toolchains"))
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|name| name.starts_with(prefix))
+        .collect::<Vec<_>>();
+    names.sort();
+    names.into_iter().next()
+}
+
+/// Pick an installed toolchain with a different version than `prefix`, so an
+/// ambient compiler that ignores the requested toolchain is observable.
+fn ambient_toolchain_excluding(prefix: &str) -> Option<String> {
+    let home = rustup_home();
+    let default = fs::read_to_string(home.join("settings.toml"))
+        .ok()
+        .and_then(|text| {
+            text.lines().find_map(|line| {
+                let (key, value) = line.split_once('=')?;
+                (key.trim() == "default_toolchain")
+                    .then(|| value.trim().trim_matches('"').to_owned())
+            })
+        });
+    if let Some(default) = default.filter(|name| !name.starts_with(prefix)) {
+        return Some(default);
+    }
+    let mut names = fs::read_dir(home.join("toolchains"))
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|name| !name.starts_with(prefix))
+        .collect::<Vec<_>>();
+    names.sort();
+    names.into_iter().next()
+}
+
+fn find_file(root: &Path, name: &str) -> Option<PathBuf> {
+    let mut pending = vec![(root.to_owned(), 0_usize)];
+    while let Some((directory, depth)) = pending.pop() {
+        if depth > 12 {
+            continue;
+        }
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                if path.file_name().and_then(|value| value.to_str()) == Some(".git") {
+                    continue;
+                }
+                pending.push((path, depth + 1));
+            } else if file_type.is_file()
+                && path.file_name().and_then(|value| value.to_str()) == Some(name)
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 fn request(
@@ -179,7 +304,7 @@ async fn default_pass_and_no_default_failure_are_distinct_and_bound() {
     assert!(outcome.missing_cell_ids.is_empty());
     assert_eq!(outcome.change_id.as_deref(), Some("change-42"));
     assert!(!outcome.exhaustive);
-    assert!(outcome.resolver.contains("edition-default") || !outcome.resolver.is_empty());
+    assert_eq!(outcome.resolver, "edition-default (3)", "{outcome:#?}");
     assert!(outcome.feature_unification.contains("resolver"));
 
     // Evidence binds each result to source/lock/config/toolchain.
@@ -368,19 +493,25 @@ async fn not_installed_target_is_reported_without_download() {
             None,
         )
         .await;
-    let installed_cell = outcome
-        .cells
-        .iter()
-        .any(|cell| cell.target_triple.as_deref() == Some(target));
-    let not_installed = outcome
-        .skipped
-        .iter()
-        .any(|cell| cell.status == "NOT_INSTALLED" && cell.reason.contains(target));
-    assert!(
-        installed_cell || not_installed,
-        "target must be either planned or typed as not installed: {outcome:#?}"
-    );
-    if not_installed {
+    let installed = outcome.installed_targets.iter().any(|item| item == target);
+    if installed {
+        let planned = cell(&outcome, target);
+        assert_eq!(planned.stage, "check");
+        assert!(planned.compile_only);
+    } else {
+        assert!(
+            outcome
+                .cells
+                .iter()
+                .all(|cell| cell.target_triple.as_deref() != Some(target)),
+            "an uninstalled target must never be planned as a runnable cell: {outcome:#?}"
+        );
+        assert!(
+            outcome
+                .skipped
+                .iter()
+                .any(|cell| { cell.status == "NOT_INSTALLED" && cell.reason.contains(target) })
+        );
         assert!(!outcome.installed_targets.iter().any(|item| item == target));
     }
     let run = service
@@ -395,13 +526,20 @@ async fn not_installed_target_is_reported_without_download() {
             None,
         )
         .await;
-    assert!(!run.complete || run.cells.iter().all(|cell| cell.status != "FAIL"));
-    if not_installed {
-        assert_eq!(run.status, "PARTIAL");
+    if installed {
+        assert!(!run.status.is_empty());
+    } else {
+        assert_eq!(run.status, "PARTIAL", "{run:#?}");
+        assert!(!run.complete);
         assert!(
             run.skipped
                 .iter()
                 .any(|cell| cell.status == "NOT_INSTALLED")
+        );
+        assert!(
+            run.cells
+                .iter()
+                .all(|cell| cell.target_triple.as_deref() != Some(target))
         );
     }
 }
@@ -623,4 +761,283 @@ async fn nextest_missing_runner_is_typed_as_runner_unavailable() {
         assert!(!cell.test_execution_claimed);
         assert!(!outcome.complete);
     }
+}
+
+#[tokio::test]
+async fn wall_budget_expiry_skips_the_running_cell_and_the_rest() {
+    let project = TestProject::with_build_script(
+        "wall-budget",
+        "",
+        "pub fn value() -> usize { 1 }\n",
+        "fn main() { std::thread::sleep(std::time::Duration::from_secs(5)); }\n",
+    );
+    let service = project.service();
+    let required = RequiredConfigurations {
+        include_default: true,
+        include_policy: false,
+        stages: vec![VerifyStage::Check],
+        ..RequiredConfigurations::default()
+    };
+    let outcome = service
+        .execute(
+            request(
+                VerifyAction::MatrixRun,
+                &project.root,
+                required,
+                VerifyBudget {
+                    max_cells: Some(4),
+                    max_wall_ms: Some(1_000),
+                },
+            ),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(outcome.status, "PARTIAL", "{outcome:#?}");
+    assert!(!outcome.complete);
+    assert_eq!(outcome.budget.executed, 1);
+    assert_eq!(outcome.cells.len(), 1, "{outcome:#?}");
+    assert_eq!(outcome.cells[0].status, "SKIPPED_BUDGET", "{outcome:#?}");
+    assert!(outcome.cells[0].duration_ms < 5_000, "{outcome:#?}");
+    assert_eq!(outcome.missing_cell_ids.len(), 1);
+    assert!(outcome.completed_cell_ids.is_empty());
+}
+
+#[tokio::test]
+async fn pre_cancelled_request_is_typed_without_starting_cells() {
+    let project = TestProject::new("pre-cancel", "", "pub fn value() -> usize { 1 }\n");
+    let service = project.service();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    cancellation.cancel();
+    let outcome = service
+        .execute(
+            request(
+                VerifyAction::MatrixRun,
+                &project.root,
+                RequiredConfigurations {
+                    include_policy: false,
+                    stages: vec![VerifyStage::Check],
+                    ..RequiredConfigurations::default()
+                },
+                check_only_budget(2),
+            ),
+            None,
+            Some(cancellation),
+        )
+        .await;
+    assert_eq!(outcome.status, "CANCELLED", "{outcome:#?}");
+    assert!(!outcome.complete);
+    assert!(!outcome.all_pass);
+    assert!(outcome.cells.is_empty(), "{outcome:#?}");
+    assert!(outcome.completed_cell_ids.is_empty());
+}
+
+#[tokio::test]
+async fn mid_run_cancellation_marks_running_and_skipped_cells() {
+    let project = TestProject::new("cancel", "", "pub fn value() -> usize { 1 }\n");
+    let service = project.service();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let trigger = cancellation.clone();
+    let cancel_on_first_run: ProgressCallback = std::sync::Arc::new(move |event: ProgressEvent| {
+        if event.stage == ProgressStage::Running {
+            trigger.cancel();
+        }
+    });
+    let required = RequiredConfigurations {
+        include_default: true,
+        include_no_default: true,
+        include_policy: false,
+        stages: vec![VerifyStage::Check],
+        ..RequiredConfigurations::default()
+    };
+    let outcome = service
+        .execute(
+            request(
+                VerifyAction::MatrixRun,
+                &project.root,
+                required,
+                check_only_budget(4),
+            ),
+            Some(cancel_on_first_run),
+            Some(cancellation),
+        )
+        .await;
+    assert_eq!(outcome.status, "PARTIAL", "{outcome:#?}");
+    assert_eq!(outcome.budget.executed, 1);
+    assert_eq!(outcome.cells.len(), 2, "{outcome:#?}");
+    assert_eq!(outcome.cells[0].status, "CANCELLED", "{outcome:#?}");
+    assert_eq!(outcome.cells[1].status, "SKIPPED_CANCELLED", "{outcome:#?}");
+    assert!(outcome.completed_cell_ids.is_empty());
+}
+
+#[tokio::test]
+async fn msrv_toolchain_missing_is_a_separate_not_installed_branch() {
+    let project = TestProject::with_rust_version(
+        "msrv-missing",
+        "1.200.0",
+        "",
+        "pub fn value() -> usize { 1 }\n",
+    );
+    let service = project.service();
+    let required = RequiredConfigurations {
+        include_default: false,
+        include_policy: false,
+        include_msrv: true,
+        stages: vec![VerifyStage::Check],
+        ..RequiredConfigurations::default()
+    };
+    let plan = service
+        .execute(
+            request(
+                VerifyAction::MatrixPlan,
+                &project.root,
+                required.clone(),
+                check_only_budget(2),
+            ),
+            None,
+            None,
+        )
+        .await;
+    assert!(plan.cells.is_empty(), "{plan:#?}");
+    assert!(plan.skipped.iter().any(|cell| {
+        cell.id == "msrv" && cell.status == "NOT_INSTALLED" && cell.reason.contains("1.200.0")
+    }));
+
+    let run = service
+        .execute(
+            request(
+                VerifyAction::MatrixRun,
+                &project.root,
+                required,
+                check_only_budget(2),
+            ),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(run.status, "PARTIAL", "{run:#?}");
+    assert!(!run.complete);
+    assert!(run.cells.iter().all(|cell| cell.toolchain.is_none()));
+}
+
+/// The child process observes a different ambient toolchain, so an MSRV cell
+/// that does not actually bind the selected compiler fails instead of silently
+/// compiling with the ambient rustc.
+#[cfg(unix)]
+#[tokio::test]
+async fn msrv_cell_actually_invokes_the_selected_compiler() {
+    const MARKER: &str = "AGZ_VERIFY_MSRV_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let Some(ambient) = ambient_toolchain_excluding("1.88") else {
+            eprintln!("skipping compiler-binding test: no differing toolchain installed");
+            return;
+        };
+        let executable = std::env::current_exe().expect("current test binary");
+        let status = Command::new(&executable)
+            .args([
+                "--exact",
+                "msrv_cell_actually_invokes_the_selected_compiler",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(MARKER, "1")
+            .env("RUSTUP_TOOLCHAIN", ambient)
+            .env_remove("RUSTC")
+            .status()
+            .expect("spawn compiler-binding child test");
+        assert!(status.success(), "MSRV compiler-binding child test failed");
+        return;
+    }
+    if installed_toolchain("1.88").is_none() {
+        eprintln!("skipping compiler-binding test: no 1.88 toolchain installed");
+        return;
+    }
+    let project = TestProject::with_rust_version_and_build_script(
+        "msrv-compiler",
+        "1.88",
+        "",
+        "pub fn value() -> usize { 1 }\n",
+        COMPILER_PROBE,
+    );
+    let service = project.service();
+    let required = RequiredConfigurations {
+        include_default: false,
+        include_policy: false,
+        include_msrv: true,
+        stages: vec![VerifyStage::Check],
+        ..RequiredConfigurations::default()
+    };
+    let outcome = service
+        .execute(
+            request(
+                VerifyAction::MatrixRun,
+                &project.root,
+                required,
+                check_only_budget(2),
+            ),
+            None,
+            None,
+        )
+        .await;
+    let executed = outcome
+        .cells
+        .iter()
+        .find(|cell| cell.toolchain.is_some())
+        .unwrap_or_else(|| panic!("MSRV cell missing: {outcome:#?}"));
+    assert_eq!(executed.status, "PASS", "{outcome:#?}");
+    let selected = executed.toolchain.clone().expect("selected toolchain");
+    let probe = find_file(
+        project.root.parent().expect("fixture base directory"),
+        "compiler-probe.txt",
+    )
+    .expect("build script compiler probe");
+    let observed = fs::read_to_string(&probe).expect("read compiler probe");
+    let expected = Command::new(
+        rustup_home()
+            .join("toolchains")
+            .join(&selected)
+            .join("bin")
+            .join("rustc"),
+    )
+    .arg("-vV")
+    .output()
+    .expect("probe selected toolchain rustc");
+    assert_eq!(
+        observed,
+        String::from_utf8(expected.stdout).expect("rustc -vV is UTF-8"),
+        "the MSRV cell must run {selected}, not an ambient compiler"
+    );
+    assert!(
+        observed.starts_with("rustc 1.88"),
+        "unexpected compiler probe: {observed}"
+    );
+    // The binding must be visible in the evidence: a host cell runs with a
+    // different command and environment hash than the toolchain cell.
+    let host = service
+        .execute(
+            request(
+                VerifyAction::MatrixRun,
+                &project.root,
+                RequiredConfigurations {
+                    include_default: true,
+                    include_policy: false,
+                    stages: vec![VerifyStage::Check],
+                    include_msrv: false,
+                    ..RequiredConfigurations::default()
+                },
+                check_only_budget(2),
+            ),
+            None,
+            None,
+        )
+        .await;
+    let host_cell = cell(&host, "default--host--default--check");
+    assert_ne!(
+        host_cell.environment_hash, executed.environment_hash,
+        "toolchain binding must change the environment hash"
+    );
+    assert_ne!(
+        host_cell.command_hash, executed.command_hash,
+        "toolchain binding must change the command hash"
+    );
 }

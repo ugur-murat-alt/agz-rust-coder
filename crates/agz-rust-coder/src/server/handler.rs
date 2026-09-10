@@ -4741,6 +4741,78 @@ mod tests {
         assert_eq!(structured["untrustedData"], true);
     }
 
+    #[test]
+    fn verify_handler_validation_bounds_budget_change_id_and_targets() {
+        fn input() -> VerifyInput {
+            VerifyInput {
+                dir: None,
+                action: crate::tools::VerifyAction::MatrixPlan,
+                required_configurations: crate::tools::RequiredConfigurations::default(),
+                budget: crate::tools::VerifyBudget::default(),
+                change_id: None,
+            }
+        }
+        let mut input = input();
+        assert!(validate_verify(&input).is_ok());
+
+        input.budget.max_cells = Some(0);
+        assert!(validate_verify(&input).is_err());
+        input.budget.max_cells = Some(1);
+        assert!(validate_verify(&input).is_ok());
+        input.budget.max_cells = Some(64);
+        assert!(validate_verify(&input).is_ok());
+        input.budget.max_cells = Some(65);
+        assert!(validate_verify(&input).is_err());
+        input.budget.max_cells = None;
+
+        input.budget.max_wall_ms = Some(999);
+        assert!(validate_verify(&input).is_err());
+        input.budget.max_wall_ms = Some(1_000);
+        assert!(validate_verify(&input).is_ok());
+        input.budget.max_wall_ms = Some(3_600_000);
+        assert!(validate_verify(&input).is_ok());
+        input.budget.max_wall_ms = Some(3_600_001);
+        assert!(validate_verify(&input).is_err());
+        input.budget = crate::tools::VerifyBudget::default();
+
+        input.change_id = Some("change-42".to_owned());
+        assert!(validate_verify(&input).is_ok());
+        input.change_id = Some("change\n42".to_owned());
+        assert!(validate_verify(&input).is_err());
+        input.change_id = Some("x".repeat(129));
+        assert!(validate_verify(&input).is_err());
+        input.change_id = None;
+
+        input.required_configurations.targets = vec!["x86_64-unknown-linux-gnu".to_owned()];
+        assert!(validate_verify(&input).is_ok());
+        for invalid in [
+            String::new(),
+            "../outside".to_owned(),
+            "x86_64-unknown-linux-gnu;sh".to_owned(),
+            "x86_64-unknown-linux-gnu --flag".to_owned(),
+        ] {
+            input.required_configurations.targets = vec![invalid.clone()];
+            assert!(
+                validate_verify(&input).is_err(),
+                "{invalid:?} must be rejected"
+            );
+        }
+        input.required_configurations.targets = Vec::new();
+
+        input.required_configurations.feature_groups = vec![vec!["ok".to_owned()]; 17];
+        assert!(validate_verify(&input).is_err());
+        input.required_configurations.feature_groups = vec![vec!["ok".to_owned()]; 16];
+        assert!(validate_verify(&input).is_ok());
+        input.required_configurations.feature_groups = vec![vec!["ok".to_owned(); 33]];
+        assert!(validate_verify(&input).is_err());
+        input.required_configurations.feature_groups = Vec::new();
+
+        input.required_configurations.stages = vec![crate::tools::VerifyStage::Check; 5];
+        assert!(validate_verify(&input).is_err());
+        input.required_configurations.stages = vec![crate::tools::VerifyStage::Check; 4];
+        assert!(validate_verify(&input).is_ok());
+    }
+
     #[tokio::test]
     async fn cancelled_crate_lookup_releases_its_admission_permit() {
         let root = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR"))

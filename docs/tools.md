@@ -273,7 +273,8 @@ Planning derives candidates from `cargo metadata` plus explicit project policy
 under `[workspace.metadata.agz-verify]` (or the first workspace member's
 `[package.metadata.agz-verify]`):
 
-- `feature-groups`: arrays of explicitly supported feature names;
+- `feature-groups`: arrays of explicitly supported feature names; plain
+  names and `dep/feat` or weak `dep?/feat` selectors are accepted;
 - `mutually-exclusive-features`: groups whose members must not be enabled
   together;
 - `targets`: supported built-in target triples, planned only when installed;
@@ -292,9 +293,15 @@ statuses are `PASS`, `FAIL`, `NOT_INSTALLED`, `RUNNER_UNAVAILABLE`,
 green. `FULL_REQUESTED_MATRIX` is returned only when every requested cell
 completed; budget exhaustion returns completed and missing cell ids separately.
 Non-host targets are compile-only and never claim test execution on that
-platform. The MSRV cell runs the installed toolchain's own `cargo`, so the
-command hash binds the actually selected compiler. No toolchain, target, or
-dependency is downloaded, and the existing network policy is preserved.
+platform. Compile-only check cells for installed foreign targets are planned
+only when `check` is among the requested stages; a requested `test`, `clippy`,
+or `doc` stage on a foreign target is typed `UNSUPPORTED_CONFIGURATION`. A
+toolchain/MSRV cell runs the selected toolchain: a direct toolchain `cargo` is
+invoked with `RUSTC`, `RUSTUP_TOOLCHAIN`, and a toolchain-prefixed `PATH` pinned,
+while the rustup shim fallback applies `+toolchain`; either way the selected
+compiler actually runs and is bound into the command and environment hashes.
+No toolchain or target is downloaded; Cargo may still fetch crates according to
+the existing network policy.
 
 The planner is a bounded enumerator and marks its output `NOT exhaustive`.
 Each result binds source/lock/config/toolchain through the gate identity and

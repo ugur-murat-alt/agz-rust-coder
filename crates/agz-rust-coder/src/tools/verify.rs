@@ -3,8 +3,9 @@
 //! Planning derives candidate cells from `cargo metadata` plus explicit
 //! project policy. Execution routes every runnable cell through
 //! [`super::CheckService`] as an ordinary gate request; planning itself never
-//! starts a Cargo build. No toolchain, target, or dependency is downloaded and
-//! no CI workflow is executed as a shell.
+//! starts a Cargo build. No toolchain or target is downloaded, and no CI
+//! workflow is executed as a shell; Cargo may still fetch crates according to
+//! the existing network policy.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -29,7 +30,7 @@ use crate::{
         ProgressCallback, ProgressEvent, ProgressStage, TestRunner, ValidationOptions,
         validate_toolchain_name,
     },
-    workspace::{ClientRoots, WorkspaceSnapshot},
+    workspace::{AuthorizedRoot, ClientRoots, DirectoryEntryKind, WorkspaceSnapshot},
 };
 
 use super::CheckService;
@@ -37,7 +38,8 @@ use super::check::{resolve_toolchain_cargo, rustup_shim_available};
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CI_FILES: usize = 10;
-const MAX_CI_BYTES: usize = 65_536;
+/// Upper bound for authorized reads of workflow and manifest configuration.
+const MAX_CONFIG_BYTES: u64 = 65_536;
 const CI_SUGGESTION_LIMIT: usize = 8;
 const POLICY_FEATURE_GROUP_LIMIT: usize = 16;
 const REQUEST_FEATURE_GROUP_LIMIT: usize = 16;
@@ -452,7 +454,7 @@ impl VerifyService {
         let facts = discover(&self.check, &plan_snapshot, &committed, &mut warnings).await;
         let policy = parse_policy(&plan_snapshot.snapshot);
         warnings.extend(policy.errors.iter().cloned());
-        let resolver = resolver_label(&plan_snapshot.snapshot);
+        let resolver = resolver_label(&plan_snapshot.snapshot, &plan_snapshot.workspace_authority);
         let max_cells = effective_max_cells(&request.budget, &self.config);
         let plan = build_plan(
             &request.required,
@@ -1082,7 +1084,11 @@ async fn discover(
     facts.installed_targets.dedup();
     facts.installed_toolchains.sort();
     facts.installed_toolchains.dedup();
-    facts.ci_suggestions = ci_suggestions(&plan.snapshot.workspace_root, warnings);
+    facts.ci_suggestions = ci_suggestions(
+        &plan.snapshot.workspace_root,
+        &plan.workspace_authority,
+        warnings,
+    );
     warnings.append(&mut facts.notes);
     facts
 }
@@ -1188,14 +1194,19 @@ fn executable_name(name: &str) -> String {
     name.to_owned()
 }
 
-fn ci_suggestions(workspace_root: &Path, warnings: &mut Vec<String>) -> Vec<String> {
+fn ci_suggestions(
+    workspace_root: &Path,
+    authority: &AuthorizedRoot,
+    warnings: &mut Vec<String>,
+) -> Vec<String> {
     let workflows = workspace_root.join(".github").join("workflows");
-    let Ok(entries) = fs::read_dir(&workflows) else {
+    let Ok(entries) = authority.list_directory(&workflows) else {
         return Vec::new();
     };
     let mut files = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
+        .iter()
+        .filter(|entry| entry.kind == DirectoryEntryKind::RegularFile)
+        .map(|entry| workflows.join(&entry.name))
         .filter(|path| {
             path.extension()
                 .and_then(|extension| extension.to_str())
@@ -1214,16 +1225,25 @@ fn ci_suggestions(workspace_root: &Path, warnings: &mut Vec<String>) -> Vec<Stri
     let mut suggestions = Vec::new();
     let mut seen = BTreeSet::new();
     for file in files {
-        let Ok(text) = fs::read_to_string(&file) else {
-            continue;
+        let text = match authority.read_file(&file, MAX_CONFIG_BYTES) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(_) => {
+                    warnings.push(format!(
+                        "CI file {} is not UTF-8 text and was ignored",
+                        file.display()
+                    ));
+                    continue;
+                }
+            },
+            Err(error) => {
+                warnings.push(format!(
+                    "CI file {} was ignored by the bounded authorized read: {error}",
+                    file.display()
+                ));
+                continue;
+            }
         };
-        if text.len() > MAX_CI_BYTES {
-            warnings.push(format!(
-                "CI file {} exceeds the configuration-suggestion read cap and was ignored",
-                file.display()
-            ));
-            continue;
-        }
         let relative = file
             .strip_prefix(workspace_root)
             .unwrap_or(file.as_path())
@@ -1302,6 +1322,7 @@ fn build_plan(
         required,
         policy,
         facts,
+        &stages,
         &mut cells,
         &mut skipped,
         &mut used_ids,
@@ -1490,10 +1511,14 @@ fn workspace_features(snapshot: &WorkspaceSnapshot) -> BTreeMap<String, Vec<Stri
 }
 
 fn feature_is_declared(features: &BTreeMap<String, Vec<String>>, feature: &str) -> bool {
-    features.contains_key(feature)
-        || feature
-            .split_once('/')
-            .is_some_and(|(dependency, _)| features.contains_key(dependency))
+    if features.contains_key(feature) {
+        return true;
+    }
+    let Some((dependency, _)) = feature.split_once('/') else {
+        return false;
+    };
+    let dependency = dependency.strip_suffix('?').unwrap_or(dependency);
+    !dependency.is_empty() && features.contains_key(dependency)
 }
 
 fn feature_closure(
@@ -1539,13 +1564,35 @@ fn feature_conflict(policy: &ProjectPolicy, active: &BTreeSet<String>) -> Option
     None
 }
 
+/// Valid Cargo feature selection: a plain feature name, `dep/feat`, or the
+/// weak `dep?/feat` form. Leading separators and empty segments are rejected so
+/// malformed input becomes a typed unsupported configuration, never a flag.
 fn valid_feature_name(feature: &str) -> bool {
-    !feature.is_empty()
-        && feature.len() <= 128
-        && !feature.starts_with(['-', '.'])
-        && feature
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"_-/+.".contains(&byte))
+    if feature.is_empty() || feature.len() > 128 {
+        return false;
+    }
+    let (dependency, selector) = match feature.split_once('/') {
+        Some((dependency, selector)) => {
+            if selector.is_empty() || selector.contains('/') {
+                return false;
+            }
+            (
+                dependency.strip_suffix('?').unwrap_or(dependency),
+                Some(selector),
+            )
+        }
+        None => (feature, None),
+    };
+    valid_feature_segment(dependency) && selector.is_none_or(valid_feature_segment)
+}
+
+fn valid_feature_segment(segment: &str) -> bool {
+    let mut bytes = segment.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first.is_ascii_alphanumeric() || first == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || b"_.+-".contains(&byte))
 }
 
 fn push_cell(
@@ -1589,6 +1636,7 @@ fn plan_targets(
     required: &RequiredConfigurations,
     policy: &ProjectPolicy,
     facts: &ToolchainFacts,
+    stages: &[VerifyStage],
     cells: &mut Vec<MatrixCell>,
     skipped: &mut Vec<SkippedCell>,
     used_ids: &mut BTreeSet<String>,
@@ -1632,6 +1680,16 @@ fn plan_targets(
                 status: CellStatus::NotInstalled,
                 reason: format!(
                     "target {target} is not installed; no download is attempted and compile-only plans cannot run"
+                ),
+            });
+            continue;
+        }
+        if !stages.contains(&VerifyStage::Check) {
+            skipped.push(SkippedCell {
+                id: format!("target-{}", sanitize_id(&target)),
+                status: CellStatus::UnsupportedConfiguration,
+                reason: format!(
+                    "target {target} is compile-only and `check` was not among the requested stages"
                 ),
             });
             continue;
@@ -1743,7 +1801,7 @@ fn plan_msrv(
             stage: VerifyStage::Check,
             runner: VerifyRunner::Cargo,
             included_because: format!(
-                "installed MSRV toolchain {toolchain} selected for rust-version {requested}; the gate binds the actually selected compiler by command hash"
+                "installed MSRV toolchain {toolchain} selected for rust-version {requested}; the gate pins RUSTC/RUSTUP_TOOLCHAIN/PATH (or uses the rustup +toolchain shim) so the selected compiler is actually invoked and bound by the command and environment hashes"
             ),
             compile_only: false,
         },
@@ -1772,8 +1830,9 @@ fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
     parse(left).cmp(&parse(right))
 }
 
-fn resolver_label(snapshot: &WorkspaceSnapshot) -> String {
-    if let Ok(text) = fs::read_to_string(&snapshot.manifest_path)
+fn resolver_label(snapshot: &WorkspaceSnapshot, authority: &AuthorizedRoot) -> String {
+    if let Ok(bytes) = authority.read_file(&snapshot.manifest_path, MAX_CONFIG_BYTES)
+        && let Ok(text) = String::from_utf8(bytes)
         && let Ok(value) = text.parse::<toml::Value>()
         && let Some(resolver) = value
             .get("workspace")
@@ -1782,24 +1841,26 @@ fn resolver_label(snapshot: &WorkspaceSnapshot) -> String {
     {
         return resolver.to_owned();
     }
-    let edition = snapshot
+    let resolver = snapshot
         .metadata
         .packages
         .iter()
         .filter(|package| snapshot.metadata.workspace_members.contains(&package.id))
-        .map(|package| match package.edition {
-            cargo_metadata::Edition::E2024 => 4_u8,
-            cargo_metadata::Edition::E2021 => 3,
-            cargo_metadata::Edition::E2018 => 2,
-            _ => 1,
-        })
+        .map(|package| resolver_for_edition(package.edition))
         .max()
         .unwrap_or(0);
-    match edition {
+    match resolver {
         0 => "unknown".to_owned(),
-        1 => "edition-default (1)".to_owned(),
-        2 => "edition-default (2)".to_owned(),
         other => format!("edition-default ({other})"),
+    }
+}
+
+/// Cargo resolver defaults by edition: 2015 -> 1, 2018/2021 -> 2, 2024 -> 3.
+fn resolver_for_edition(edition: cargo_metadata::Edition) -> u8 {
+    match edition {
+        cargo_metadata::Edition::E2024 => 3,
+        cargo_metadata::Edition::E2021 | cargo_metadata::Edition::E2018 => 2,
+        _ => 1,
     }
 }
 
@@ -1912,8 +1973,9 @@ mod tests {
             "matrix:\n  target: x86_64-unknown-linux-gnu\n  other: ${{ matrix.target }}\nrun: rustup target add aarch64-unknown-linux-gnu\n",
         )
         .expect("write workflow");
+        let authority = test_authority(&root);
         let mut warnings = Vec::new();
-        let suggestions = ci_suggestions(&root, &mut warnings);
+        let suggestions = ci_suggestions(&root, &authority, &mut warnings);
         assert!(
             suggestions
                 .iter()
@@ -1925,6 +1987,175 @@ mod tests {
                 .any(|value| value.starts_with("aarch64-unknown-linux-gnu"))
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ci_scan_is_bounded_and_never_follows_symlinks() {
+        let root = std::env::temp_dir().join(format!(
+            "agz-verify-ci-bounded-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |value| value.as_nanos())
+        ));
+        let workflows = root.join(".github").join("workflows");
+        fs::create_dir_all(&workflows).expect("create workflow directory");
+        fs::write(
+            workflows.join("huge.yml"),
+            "target: x86_64-unknown-linux-gnu\n".repeat(4_000),
+        )
+        .expect("write oversized workflow");
+        let outside = root.join("outside.yml");
+        fs::write(&outside, "target: aarch64-unknown-linux-gnu\n").expect("write outside file");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, workflows.join("linked.yml"))
+            .expect("create workflow symlink");
+        let authority = test_authority(&root);
+        let mut warnings = Vec::new();
+        let suggestions = ci_suggestions(&root, &authority, &mut warnings);
+        assert!(
+            !suggestions
+                .iter()
+                .any(|value| value.starts_with("x86_64-unknown-linux-gnu"))
+        );
+        #[cfg(unix)]
+        assert!(
+            !suggestions
+                .iter()
+                .any(|value| value.starts_with("aarch64-unknown-linux-gnu"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("bounded authorized read")),
+            "{warnings:#?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolver_defaults_follow_the_cargo_edition_matrix() {
+        use cargo_metadata::Edition;
+        assert_eq!(resolver_for_edition(Edition::E2015), 1);
+        assert_eq!(resolver_for_edition(Edition::E2018), 2);
+        assert_eq!(resolver_for_edition(Edition::E2021), 2);
+        assert_eq!(resolver_for_edition(Edition::E2024), 3);
+    }
+
+    #[test]
+    fn feature_selection_handles_dependency_and_weak_forms() {
+        let map = features(&[("std", &[]), ("serde", &[]), ("derive", &[])]);
+        assert!(valid_feature_name("std"));
+        assert!(valid_feature_name("serde/derive"));
+        assert!(valid_feature_name("serde?/derive"));
+        assert!(feature_is_declared(&map, "serde/derive"));
+        assert!(feature_is_declared(&map, "serde?/derive"));
+        assert!(!feature_is_declared(&map, "missing?/derive"));
+        for invalid in [
+            "",
+            "/std",
+            "+std",
+            "std/",
+            "std//x",
+            "std/derive?/x",
+            ".std",
+            "-std",
+            "std?",
+            "a b",
+            "std?/",
+        ] {
+            assert!(!valid_feature_name(invalid), "{invalid:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn cross_target_check_cells_are_only_planned_when_check_is_requested() {
+        let facts = ToolchainFacts {
+            host_target: Some("x86_64-unknown-linux-gnu".to_owned()),
+            installed_targets: vec![
+                "x86_64-unknown-linux-gnu".to_owned(),
+                "wasm32-unknown-unknown".to_owned(),
+            ],
+            ..ToolchainFacts::default()
+        };
+        let policy = ProjectPolicy::default();
+        let target = "wasm32-unknown-unknown".to_owned();
+        let mut cells = Vec::new();
+        let mut skipped = Vec::new();
+        let mut used_ids = BTreeSet::new();
+        plan_targets(
+            &RequiredConfigurations {
+                include_default: false,
+                include_policy: false,
+                targets: vec![target.clone()],
+                stages: vec![VerifyStage::Test],
+                ..RequiredConfigurations::default()
+            },
+            &policy,
+            &facts,
+            &[VerifyStage::Test],
+            &mut cells,
+            &mut skipped,
+            &mut used_ids,
+        );
+        assert!(cells.is_empty(), "{cells:#?}");
+        assert!(skipped.iter().any(|cell| {
+            cell.status == CellStatus::UnsupportedConfiguration
+                && cell.reason.contains("was not among the requested stages")
+        }));
+
+        let mut cells = Vec::new();
+        let mut skipped = Vec::new();
+        let mut used_ids = BTreeSet::new();
+        plan_targets(
+            &RequiredConfigurations {
+                include_default: false,
+                include_policy: false,
+                targets: vec![target.clone()],
+                stages: vec![VerifyStage::Check],
+                ..RequiredConfigurations::default()
+            },
+            &policy,
+            &facts,
+            &[VerifyStage::Check],
+            &mut cells,
+            &mut skipped,
+            &mut used_ids,
+        );
+        assert_eq!(cells.len(), 1, "{cells:#?}");
+        assert_eq!(cells[0].target_triple.as_deref(), Some(target.as_str()));
+        assert!(cells[0].compile_only);
+    }
+
+    #[test]
+    fn bounded_reads_reject_oversized_and_symlinked_manifests() {
+        let root = std::env::temp_dir().join(format!(
+            "agz-verify-manifest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |value| value.as_nanos())
+        ));
+        fs::create_dir_all(&root).expect("create fixture root");
+        let authority = test_authority(&root);
+        let oversized = root.join("Cargo.toml");
+        fs::write(&oversized, "[workspace]\n".repeat(8_000)).expect("write oversized manifest");
+        assert!(authority.read_file(&oversized, MAX_CONFIG_BYTES).is_err());
+        #[cfg(unix)]
+        {
+            let real = root.join("real.toml");
+            fs::write(&real, "[workspace]\nresolver = \"2\"\n").expect("write real manifest");
+            let link = root.join("linked.toml");
+            std::os::unix::fs::symlink(&real, &link).expect("create manifest symlink");
+            assert!(authority.read_file(&link, MAX_CONFIG_BYTES).is_err());
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn test_authority(root: &Path) -> Arc<AuthorizedRoot> {
+        let guard = crate::workspace::RootGuard::new([root.to_owned()], std::iter::empty())
+            .expect("create test root guard");
+        Arc::clone(&guard.configured_roots()[0])
     }
 
     #[test]
