@@ -1,4 +1,4 @@
-# agz-rust-mcp
+# AGZ Rust MCP
 
 [![CI](https://github.com/ugur-murat-alt/agz-rust-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ugur-murat-alt/agz-rust-mcp/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/agz-rust-mcp.svg)](https://crates.io/crates/agz-rust-mcp)
@@ -6,42 +6,39 @@
 
 [English](README.md) | Türkçe
 
-`agz-rust-mcp`, derleyici çıktısını temel alan Rust çalışmaları için bağımsız
-bir stdio MCP sunucusudur. Sınırlı Cargo doğrulaması çalıştırır, kaynak kodu
-denetler, tam sürüme ait crate belgelerini çözer, Rust Analyzer ile gezinme
-sağlar ve kaynağa yazmayan rename/refactor paketleri döndürür.
-
-## Kimlik
-
-| Sözleşme | Değer |
-| --- | --- |
-| Crate, binary, server | `agz-rust-mcp` |
-| MCP Registry | `io.github.ugur-murat-alt/agz-rust-mcp` |
-| Güncel sürüm | `0.2.0` |
-| İlk sürüm | `0.1.0` |
-| Release tag | `agz-rust-mcp-v<version>` |
-| Rust edition / MSRV | `2024` / `1.88.0` |
-| Rust MCP SDK | `rmcp` `3.1.4` |
-| Varsayılan / keşfedilen protokol | `2025-11-25` / `2026-07-28` |
-
-MCP paket sahipliği kaydı: `mcp-name: io.github.ugur-murat-alt/agz-rust-mcp`.
+**AGZ Yazılım ürünüdür.** `agz-rust-mcp`, Cargo ve rustc çıktısına dayanan
+sınırlı Rust doğruluğu için bağımsız bir stdio MCP sunucusudur. Sınırlı Cargo
+doğrulaması çalıştırır, kaynak kodu denetler, tam sürüme ait crate belgelerini
+çözer, Rust Analyzer ile gezinme sağlar ve kaynağa yazmayan rename/refactor
+paketleri döndürür.
 
 ## Kurulum
 
 ```bash
+# npm wrapper (Node.js gerekir; platforma uyan sürüm binary'sini bulur)
+npx -y @agz-yazilim/agz-rust-mcp --version
+
+# kurulum betiği (Linux x86_64): install.sh ve SHA256SUMS dosyalarını en güncel
+# sürümden indirin, betiği doğrulayın, sonra çalıştırın
+bash install.sh
+
+# crates.io (Rust 1.88.0 veya üzeri gerekir)
 cargo install agz-rust-mcp --locked
 agz-rust-mcp --version
 ```
 
-Paket crates.io üzerinden kaynak olarak dağıtılır. Release sayfalarında ayrıca
-hazır derlenmiş arşivler ve SHA-256 sağlama toplamları bulunur.
+Linux x86_64, macOS arm64 ve Windows x86_64 için `.sha256` dosyalı hazır
+`.tar.gz` arşivleri vardır. `0.2.0` dahil o sürüme kadarki release'ler eski
+`agz-rust-coder-*` varlık adlarını kullanır; `0.3.0` sürümünden itibaren adlar
+`agz-rust-mcp-*` olur.
 
-## MCP istemci kurulumu (OpenCode2 örneği)
+**Adım adım yönergeler, işletim sistemi notları, sağlama toplamı doğrulaması ve
+sorun giderme: [docs/install.tr.md](docs/install.tr.md) ·
+[English](docs/install.md).**
 
-`agz-rust-mcp` bağımsız bir stdio MCP sunucusudur; MCP destekli her istemci
-çalıştırabilir. Pinli OpenCode2 host'u depodaki uyumluluk smoke'u ile sınanır.
+## MCP İstemci Ayarı
 
-OpenCode2 örnek yapılandırması (`opencode.jsonc`):
+Minimal OpenCode2 yapılandırması (`opencode.jsonc`):
 
 ```jsonc
 {
@@ -64,9 +61,51 @@ OpenCode2 örnek yapılandırması (`opencode.jsonc`):
 }
 ```
 
+Minimal Codex yapılandırması (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.rust]
+command = "agz-rust-mcp"
+args = []
+```
+
 Kanonik çalışma dizini varsayılan yetkili köktür. İstemci başka yerde
-başlatıyorsa tekrarlanan `--allow-root` argümanlarıyla açık kökler ekleyin.
-İstemcinin MCP kökleri yapılandırılmış erişimi daraltabilir, genişletemez.
+başlatılıyorsa tekrarlanan `--allow-root` argümanlarıyla açık kökler ekleyin;
+istemcinin MCP kökleri yapılandırılmış erişimi daraltabilir, genişletemez.
+Wrapper ile yönetilen istemci varyantları için
+[docs/install.tr.md](docs/install.tr.md) dosyasına bakın.
+
+## Belgeler
+
+Belgeleri şu sırayla okuyun:
+
+1. [Kurulum ve istemci ayarı](docs/install.tr.md) - tüm kurulum yöntemleri ve
+   istemci yapılandırması.
+2. [Araç ve yapılandırma referansı](docs/tools.tr.md) - araçlar, eylemler,
+   sonuç anlamları ve tüm yapılandırma anahtarları.
+3. [Mimari](docs/architecture.tr.md) - süreç modeli, protokol yaşam döngüsü ve
+   yetki sınırları.
+4. [Doğrulama ve benchmark protokolü](docs/benchmark.tr.md) - smoke'lar, kapılar
+   ve kanıt düzeni.
+5. [Güvenlik politikası](SECURITY.md) ve [Katkı](CONTRIBUTING.md).
+
+Tam okuma yolunu içeren iki dilli dizin:
+[docs/README.tr.md](docs/README.tr.md) / [docs/README.md](docs/README.md).
+
+## Kimlik
+
+| Sözleşme | Değer |
+| --- | --- |
+| Crate, binary, server | `agz-rust-mcp` |
+| MCP Registry | `io.github.ugur-murat-alt/agz-rust-mcp` |
+| Güncel sürüm | `0.2.0` |
+| İlk sürüm | `0.1.0` |
+| Release tag | `agz-rust-mcp-v<version>` |
+| Rust edition / MSRV | `2024` / `1.88.0` |
+| Rust MCP SDK | `rmcp` `3.1.4` |
+| Varsayılan / keşfedilen protokol | `2025-11-25` / `2026-07-28` |
+
+MCP paket sahipliği kaydı: `mcp-name: io.github.ugur-murat-alt/agz-rust-mcp`.
 
 ## Araçlar
 
@@ -144,35 +183,12 @@ Sunucu workspace kaynağını değiştirmez, ancak işletim sistemi sandbox'ı
 değildir. Cargo build script'leri, testler, procedural macro'lar, yerel rustdoc
 ve açıkça etkinleştirilen Rust Analyzer workspace kodu sunucu kullanıcısının
 yetkileriyle çalışır. Daha güçlü sınır gerektiğinde container veya OS sandbox
-kullanın.
+kullanın. Workspace, dependency, cache, lease, journal, docs ve telemetry
+yolları kanonikleştirilir, sınırlandırılır ve şüphede kapalı kalır; stdout
+yalnız MCP çerçevelerine ayrılmıştır. Güvenlik açıklarını [SECURITY.md](SECURITY.md)
+uyarınca özel bildirin.
 
-- Workspace ve dependency yolları kanonikleştirilir ve şüphede kapalı kalır.
-- Cache, lease, journal, docs ve telemetry yolları yetkili köklerle çakışamaz.
-- Alt süreç çıktısı, HTTP gövdeleri, dizin yürüyüşleri, editler, task'lar ve
-  telemetry sınırlıdır.
-- `rename`, `refactor` ve biçim kontrolü yalnız veri döndürür.
-- Stdout MCP çerçevelerine ayrılmıştır; log ve panic çıktısı stderr kullanır.
-
-Güvenlik açıklarını [SECURITY.md](SECURITY.md) uyarınca özel bildirin.
-
-## Geliştirme
-
-```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-targets --all-features --locked --no-fail-fast
-cargo +1.88.0 check --workspace --all-targets --all-features --locked
-cargo build --release --locked
-cargo run -p xtask -- protocol-smoke
-cargo run -p xtask -- opencode-smoke
-cargo run -p xtask -- benchmark-smoke
-```
-
-[CONTRIBUTING.md](CONTRIBUTING.md), [mimari](docs/architecture.tr.md),
-[araç referansı](docs/tools.tr.md), [benchmark protokolü](docs/benchmark.tr.md) ve
-[CHANGELOG.md](CHANGELOG.md) ayrıntıları içerir.
-
-## Kanonik Bağlantılar
+## Bağlantılar
 
 - Repository: https://github.com/ugur-murat-alt/agz-rust-mcp
 - Crate: https://crates.io/crates/agz-rust-mcp
@@ -183,5 +199,3 @@ cargo run -p xtask -- benchmark-smoke
 ## Lisans
 
 [MIT](LICENSE), Copyright (c) 2026 Ugur Murat Altintas.
-
-Henüz yayımlanmamış akış tanıları, açık doğrulama seçenekleri ve isteğe bağlı hızlandırma için [altı başlık çalışmasına](docs/rust-efficiency-plan.tr.md) bakınız.

@@ -1,5 +1,7 @@
 # Code of Conduct
 
+_An AGZ Yazılım product._
+
 English | [Turkce](CODE_OF_CONDUCT.tr.md)
 
 ## Our Standard

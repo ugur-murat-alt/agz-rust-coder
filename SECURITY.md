@@ -1,5 +1,7 @@
 # Security Policy
 
+_An AGZ Yazılım product._
+
 `agz-rust-mcp` is local code-execution infrastructure, not a sandbox. It can
 run Cargo, rustdoc, and Rust Analyzer with the operating-system user's rights.
 

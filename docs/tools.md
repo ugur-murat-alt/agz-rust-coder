@@ -1,5 +1,11 @@
 # Tool And Configuration Reference
 
+**An AGZ Yazılım product.** This is step 2 of the
+[documentation reading path](README.md): install the server first
+([install and client setup](install.md)), then use this reference to configure
+and operate it. [Architecture](architecture.md) explains the process model
+behind these tools.
+
 This document defines the public tool and configuration surface of
 `agz-rust-mcp` `0.2.0`.
 

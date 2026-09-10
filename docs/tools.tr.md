@@ -1,5 +1,11 @@
 # Araç ve Yapılandırma Referansı
 
+**AGZ Yazılım ürünüdür.** Bu belge
+[belge okuma yolunun](README.tr.md) 2. adımıdır: önce sunucuyu kurun
+([kurulum ve istemci ayarı](install.tr.md)), sonra yapılandırma ve kullanım
+için bu referansı kullanın. Bu araçların arkasındaki süreç modelini
+[Mimari](architecture.tr.md) açıklar.
+
 Bu belge `agz-rust-mcp` `0.2.0` sürümünün açık araç ve yapılandırma yüzeyini
 tanımlar.
 

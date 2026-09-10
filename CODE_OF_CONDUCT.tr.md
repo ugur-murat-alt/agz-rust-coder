@@ -1,5 +1,7 @@
 # Davranış Kuralları
 
+_AGZ Yazılım ürünüdür._
+
 [English](CODE_OF_CONDUCT.md) | Türkçe
 
 ## Standardımız

@@ -1,5 +1,11 @@
 # Validation And Benchmark Protocol
 
+**An AGZ Yazılım product.** This is step 4 of the
+[documentation reading path](README.md): it defines how release claims are
+validated with deterministic local gates and optional live benchmarks. The
+next step is the [security policy](../SECURITY.md) and
+[contributing guide](../CONTRIBUTING.md).
+
 Release claims use deterministic local gates first. Live model benchmarks are
 optional measurements and never replace compiler, protocol, package, or
 security checks.

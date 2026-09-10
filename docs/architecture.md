@@ -1,5 +1,10 @@
 # Architecture
 
+**An AGZ Yazılım product.** This is step 3 of the
+[documentation reading path](README.md): it explains the process model behind
+the [tool and configuration reference](tools.md). Continue with the
+[validation and benchmark protocol](benchmark.md).
+
 `agz-rust-mcp` is one Rust process with an RMCP stdio adapter, bounded domain
 services, and supervised external processes. It never accepts remote transport
 connections and never writes workspace source.
