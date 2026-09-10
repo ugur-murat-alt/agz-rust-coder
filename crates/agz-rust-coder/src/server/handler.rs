@@ -4461,6 +4461,73 @@ mod tests {
         assert_eq!(change_request(&input).expected_revision, Some(0));
     }
 
+    #[test]
+    fn oversized_change_feedback_truncates_visibly_and_keeps_the_envelope() {
+        use crate::change::{
+            ChangeDiagnosticData, ChangeEvidenceData, ChangeSuggestionPackageData,
+            ChangeSuggestionPatchData,
+        };
+
+        let mut data = ChangeData {
+            action: "validate".to_owned(),
+            state: "ready".to_owned(),
+            revision: 1,
+            ..ChangeData::default()
+        };
+        data.evidence.push(ChangeEvidenceData {
+            revision: 1,
+            target: "check".to_owned(),
+            command: "cargo check".to_owned(),
+            status: "FAIL".to_owned(),
+            exit_code: Some(1),
+            first_diagnostic_ms: None,
+            total_ms: 1,
+            fresh: true,
+            authoritative: true,
+            diagnostics: vec![ChangeDiagnosticData {
+                code: Some("E0384".to_owned()),
+                level: "error".to_owned(),
+                file: Some("src/lib.rs".to_owned()),
+                line: Some(1),
+                message: "cannot assign twice to immutable variable".to_owned(),
+            }],
+            diagnostics_total: 1,
+            diagnostics_omitted: 0,
+            suggestion_package: Some(ChangeSuggestionPackageData {
+                patches: (0..8)
+                    .map(|index| ChangeSuggestionPatchData {
+                        file: format!("src/generated_{index}.rs"),
+                        old_string: "a".repeat(4_096),
+                        new_string: "b".repeat(4_096),
+                    })
+                    .collect(),
+                skipped: Vec::new(),
+                unsupported: 0,
+                patches_total: 8,
+                skipped_total: 0,
+                truncated: false,
+            }),
+            stats: crate::diagnostics::EvidenceStats::default(),
+        });
+
+        let result = ToolOutput::new("change", "FAIL", "Candidate validation finished.", data)
+            .with_untrusted_data()
+            .into_call_tool_result(4_096, true);
+        let encoded = serde_json::to_vec(&result).expect("serializable result");
+        assert!(
+            encoded.len() <= 4_096,
+            "wire result was {} bytes",
+            encoded.len()
+        );
+        let structured = result
+            .structured_content
+            .as_ref()
+            .expect("structured content");
+        assert_eq!(structured["truncated"], true);
+        assert_eq!(structured["status"], "FAIL");
+        assert_eq!(structured["untrustedData"], true);
+    }
+
     #[tokio::test]
     async fn cancelled_crate_lookup_releases_its_admission_permit() {
         let root = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR"))

@@ -12,7 +12,8 @@ mod service;
 mod store;
 
 pub use model::{
-    ChangeAction, ChangeCaptureData, ChangeData, ChangeEvidenceData, ChangeNewFileData,
-    ChangeOutcome, ChangePatchData, ChangeRequest, ChangeSourceHashData, NewFileInput, PatchInput,
+    ChangeAction, ChangeCaptureData, ChangeData, ChangeDiagnosticData, ChangeEvidenceData,
+    ChangeNewFileData, ChangeOutcome, ChangePatchData, ChangeRequest, ChangeSourceHashData,
+    ChangeSuggestionPackageData, ChangeSuggestionPatchData, NewFileInput, PatchInput,
 };
 pub use service::ChangeService;

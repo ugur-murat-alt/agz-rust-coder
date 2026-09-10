@@ -23,7 +23,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::{ChangeConfig, Config, GateCache},
-    gate::{GateEvidence, GateRequest, GateStatus, ProgressCallback},
+    gate::{
+        GateEvidence, GateRequest, GateStatus, ProgressCallback, SuggestionApplicability,
+        SuggestionPackage,
+    },
     process::ProcessSupervisor,
     tools::CheckService,
     workspace::{
@@ -37,8 +40,9 @@ use super::capture::{
 };
 use super::model::{
     CHANGE_ID_PREFIX, CHANGE_SCHEMA_VERSION, CaptureSummary, ChangeAction, ChangeCaptureData,
-    ChangeData, ChangeEvidenceData, ChangeNewFileData, ChangeOutcome, ChangePatchData,
-    ChangeRecord, ChangeRequest, ChangeSourceHashData, MAX_CHANGED_FILES_IN_RECORD,
+    ChangeData, ChangeDiagnosticData, ChangeEvidenceData, ChangeNewFileData, ChangeOutcome,
+    ChangePatchData, ChangeRecord, ChangeRequest, ChangeSourceHashData,
+    ChangeSuggestionPackageData, ChangeSuggestionPatchData, MAX_CHANGED_FILES_IN_RECORD,
     MAX_COMMAND_CHARS, MAX_LISTED_CHANGED_FILES, MAX_LISTED_EVIDENCE, MAX_LISTED_HASHES,
     MAX_RECORDED_EVIDENCE, NewFileInput, PatchInput, RecordState, StoredEvidence, StoredHash,
     StoredNewFile, StoredPatch,
@@ -49,6 +53,17 @@ use super::store::{
 };
 
 const LOCK_STRIPES: usize = 64;
+
+/// Per-row bounds for compiler feedback persisted in the change record. The
+/// package itself comes from `machine_applicable_package_authorized`; these
+/// limits only bound how much of it a single evidence row keeps so a record
+/// cannot grow without limit. Overruns surface through `truncated` and the
+/// `*Total` counters instead of failing the action.
+const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 2_048;
+const MAX_LISTED_SUGGESTION_PATCHES: usize = 32;
+const MAX_LISTED_SUGGESTION_SKIPPED: usize = 32;
+const MAX_SUGGESTION_PATCH_BYTES: usize = 65_536;
+const MAX_SUGGESTION_SKIPPED_CHARS: usize = 256;
 
 static CHANGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -727,10 +742,10 @@ impl ChangeService {
             let mut failed = record.clone();
             failed.state = RecordState::FailedInconsistent;
             failed.applying_revision = None;
-            failed.evidence.iter_mut().for_each(|evidence| {
-                evidence.fresh = false;
-                evidence.authoritative = false;
-            });
+            failed
+                .evidence
+                .iter_mut()
+                .for_each(StoredEvidence::supersede);
             if failed.cleanup_warnings.len() < MAX_CLEANUP_WARNINGS {
                 failed.cleanup_warnings.push(truncate(&reason, 512));
             }
@@ -797,10 +812,10 @@ impl ChangeService {
             Ok(Some(updated)) if updated.revision == record.revision => updated,
             _ => {
                 let mut stale = record.clone();
-                stale.evidence.iter_mut().for_each(|evidence| {
-                    evidence.fresh = false;
-                    evidence.authoritative = false;
-                });
+                stale
+                    .evidence
+                    .iter_mut()
+                    .for_each(StoredEvidence::supersede);
                 stale
             }
         };
@@ -988,10 +1003,10 @@ impl ChangeService {
             let mut failed = record.clone();
             failed.state = RecordState::FailedInconsistent;
             failed.applying_revision = None;
-            failed.evidence.iter_mut().for_each(|evidence| {
-                evidence.fresh = false;
-                evidence.authoritative = false;
-            });
+            failed
+                .evidence
+                .iter_mut()
+                .for_each(StoredEvidence::supersede);
             if failed.cleanup_warnings.len() < MAX_CLEANUP_WARNINGS {
                 failed.cleanup_warnings.push(truncate(&reason, 512));
             }
@@ -1089,10 +1104,10 @@ impl ChangeService {
         };
         let warnings = self.store.discard_worktree(&id);
         record.state = RecordState::Discarded;
-        record.evidence.iter_mut().for_each(|evidence| {
-            evidence.fresh = false;
-            evidence.authoritative = false;
-        });
+        record
+            .evidence
+            .iter_mut()
+            .for_each(StoredEvidence::supersede);
         for warning in &warnings {
             if record.cleanup_warnings.len() < MAX_CLEANUP_WARNINGS {
                 record.cleanup_warnings.push(warning.clone());
@@ -1144,29 +1159,161 @@ fn evidence_rows(revision: u64, fresh: bool, evidence: &GateEvidence) -> Vec<Sto
             fresh,
             authoritative: fresh,
             recorded_at_ms: recorded_at,
+            diagnostics: Vec::new(),
+            diagnostics_total: 0,
+            diagnostics_omitted: 0,
+            suggestion_package: None,
+            stats: crate::diagnostics::EvidenceStats::default(),
         }];
     }
+    let root = evidence.workspace_root.as_deref();
     evidence
         .steps
         .iter()
         .take(16)
-        .map(|step| StoredEvidence {
-            revision,
-            target: step.target.as_str().to_owned(),
-            command: truncate(&step.command, MAX_COMMAND_CHARS),
-            status: status.as_str().to_owned(),
-            exit_code: Some(step.exit_code),
-            first_diagnostic_ms: step.first_diagnostic_ms,
-            total_ms: step.duration_ms,
-            fresh,
-            authoritative: fresh
-                && matches!(
-                    status,
-                    GateStatus::FastPass | GateStatus::FullPass | GateStatus::Fail
-                ),
-            recorded_at_ms: recorded_at,
+        .map(|step| {
+            // Only a fresh run may persist compiler feedback; a cancelled,
+            // timed-out, or already-superseded run keeps its counters and
+            // stats but no diagnostics or suggestions.
+            let diagnostics = if fresh {
+                step.diagnostics
+                    .iter()
+                    .map(|diagnostic| change_diagnostic(diagnostic, root))
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            let diagnostics_total = if fresh {
+                u64::try_from(diagnostics.len())
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(step.diagnostics_omitted)
+            } else {
+                0
+            };
+            StoredEvidence {
+                revision,
+                target: step.target.as_str().to_owned(),
+                command: truncate(&step.command, MAX_COMMAND_CHARS),
+                status: status.as_str().to_owned(),
+                exit_code: Some(step.exit_code),
+                first_diagnostic_ms: step.first_diagnostic_ms,
+                total_ms: step.duration_ms,
+                fresh,
+                authoritative: fresh
+                    && matches!(
+                        status,
+                        GateStatus::FastPass | GateStatus::FullPass | GateStatus::Fail
+                    ),
+                recorded_at_ms: recorded_at,
+                diagnostics,
+                diagnostics_total,
+                diagnostics_omitted: if fresh { step.diagnostics_omitted } else { 0 },
+                // Suggestions are offered only for a fresh compile failure; a
+                // pass, a stale run, or a refused request must never carry a
+                // patch that assumes a broken candidate.
+                suggestion_package: if fresh && status == GateStatus::Fail {
+                    step.suggestion_package.as_ref().map(|package| {
+                        bounded_suggestion_package(
+                            package,
+                            unsupported_suggestions(&step.diagnostics),
+                        )
+                    })
+                } else {
+                    None
+                },
+                stats: step.evidence.clone(),
+            }
         })
         .collect()
+}
+
+/// Converts one gate diagnostic into candidate-relative, bounded evidence.
+fn change_diagnostic(
+    diagnostic: &crate::gate::GateDiagnostic,
+    root: Option<&Path>,
+) -> ChangeDiagnosticData {
+    ChangeDiagnosticData {
+        code: diagnostic.code.clone(),
+        level: diagnostic.level.clone(),
+        file: relative_diagnostic_file(diagnostic.file.as_deref(), root),
+        line: diagnostic.line,
+        message: truncate(&diagnostic.message, MAX_DIAGNOSTIC_MESSAGE_BYTES),
+    }
+}
+
+/// Keeps compiler paths workspace-relative when the compiler emitted an
+/// absolute path inside the compiled candidate root.
+fn relative_diagnostic_file(file: Option<&str>, root: Option<&Path>) -> Option<String> {
+    let file = file?;
+    let normalized = file.replace('\\', "/");
+    let root = root?;
+    let path = Path::new(&normalized);
+    if path.is_absolute() {
+        if let Ok(relative) = path.strip_prefix(root) {
+            if let Some(relative) = relative.to_str() {
+                return Some(relative.replace('\\', "/"));
+            }
+        }
+    }
+    Some(normalized)
+}
+
+/// Counts suggestions that cannot become a write-free patch because the
+/// compiler did not mark them machine-applicable or supplied no edits.
+fn unsupported_suggestions(diagnostics: &[crate::gate::GateDiagnostic]) -> u64 {
+    diagnostics
+        .iter()
+        .flat_map(|diagnostic| diagnostic.suggestions.iter())
+        .filter(|suggestion| {
+            suggestion.applicability != SuggestionApplicability::MachineApplicable
+                || suggestion.edits.is_empty()
+        })
+        .count()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+/// Applies the per-row persistence limits to a machine-applicable package.
+/// A missing patch or skipped reason is only ever a *visible* truncation: the
+/// `*Total` fields keep the pre-limit counts and `truncated` is set.
+fn bounded_suggestion_package(
+    package: &SuggestionPackage,
+    unsupported: u64,
+) -> ChangeSuggestionPackageData {
+    let mut used = 0usize;
+    let mut patches = Vec::new();
+    for patch in package.patches.iter().take(MAX_LISTED_SUGGESTION_PATCHES) {
+        let size = patch
+            .old_string
+            .len()
+            .saturating_add(patch.new_string.len());
+        if used.saturating_add(size) > MAX_SUGGESTION_PATCH_BYTES {
+            // Skip the oversized patch instead of hiding every later, small
+            // patch behind it; truncation stays visible through `truncated`.
+            continue;
+        }
+        used = used.saturating_add(size);
+        patches.push(ChangeSuggestionPatchData {
+            file: patch.file.clone(),
+            old_string: patch.old_string.clone(),
+            new_string: patch.new_string.clone(),
+        });
+    }
+    let skipped = package
+        .skipped
+        .iter()
+        .take(MAX_LISTED_SUGGESTION_SKIPPED)
+        .map(|reason| truncate(reason, MAX_SUGGESTION_SKIPPED_CHARS))
+        .collect::<Vec<_>>();
+    let truncated = patches.len() < package.patches.len() || skipped.len() < package.skipped.len();
+    ChangeSuggestionPackageData {
+        patches,
+        skipped,
+        unsupported,
+        patches_total: package.patches.len().try_into().unwrap_or(u64::MAX),
+        skipped_total: package.skipped.len().try_into().unwrap_or(u64::MAX),
+        truncated,
+    }
 }
 
 fn data_for_record(
@@ -1195,16 +1342,43 @@ fn data_for_record(
         .iter()
         .rev()
         .take(MAX_LISTED_EVIDENCE)
-        .map(|evidence| ChangeEvidenceData {
-            revision: evidence.revision,
-            target: evidence.target.clone(),
-            command: evidence.command.clone(),
-            status: evidence.status.clone(),
-            exit_code: evidence.exit_code,
-            first_diagnostic_ms: evidence.first_diagnostic_ms,
-            total_ms: evidence.total_ms,
-            fresh: evidence.fresh,
-            authoritative: evidence.authoritative,
+        .map(|evidence| {
+            // Compiler feedback describes the candidate bytes of the revision
+            // it was produced for. Any other row stays historical and carries
+            // no diagnostics or suggestions.
+            let current = evidence.fresh && evidence.revision == record.revision;
+            ChangeEvidenceData {
+                revision: evidence.revision,
+                target: evidence.target.clone(),
+                command: evidence.command.clone(),
+                status: evidence.status.clone(),
+                exit_code: evidence.exit_code,
+                first_diagnostic_ms: evidence.first_diagnostic_ms,
+                total_ms: evidence.total_ms,
+                fresh: evidence.fresh,
+                authoritative: evidence.authoritative,
+                diagnostics: if current {
+                    evidence.diagnostics.clone()
+                } else {
+                    Vec::new()
+                },
+                diagnostics_total: if current {
+                    evidence.diagnostics_total
+                } else {
+                    0
+                },
+                diagnostics_omitted: if current {
+                    evidence.diagnostics_omitted
+                } else {
+                    0
+                },
+                suggestion_package: if current {
+                    evidence.suggestion_package.clone()
+                } else {
+                    None
+                },
+                stats: evidence.stats.clone(),
+            }
         })
         .collect::<Vec<_>>();
     evidence.reverse();
@@ -1899,10 +2073,12 @@ fn stage_blocking(
         record.changed_files.truncate(MAX_CHANGED_FILES_IN_RECORD);
     }
     record.patch_hash = compute_patch_hash(record.revision, &record.patches, &record.new_files);
-    record.evidence.iter_mut().for_each(|evidence| {
-        evidence.fresh = false;
-        evidence.authoritative = false;
-    });
+    // Superseding a revision invalidates its compiler feedback; dropping the
+    // diagnostics here also keeps the durable record bounded across stages.
+    record
+        .evidence
+        .iter_mut()
+        .for_each(StoredEvidence::supersede);
     record.state = RecordState::Ready;
     record.applying_revision = None;
     if let Err(reason) = store.save(&mut record) {
@@ -1937,6 +2113,12 @@ fn refused_data(
     data.evidence.iter_mut().for_each(|evidence| {
         evidence.fresh = false;
         evidence.authoritative = false;
+        // A refused request must never surface compiler feedback as if the
+        // candidate had just been verified for it.
+        evidence.diagnostics.clear();
+        evidence.diagnostics_total = 0;
+        evidence.diagnostics_omitted = 0;
+        evidence.suggestion_package = None;
     });
     data.reason = reason.into();
     data
@@ -2128,5 +2310,129 @@ mod tests {
         assert!(!evidence_freshness(&evidence, &token));
         evidence.steps[0].drain_complete = false;
         assert!(!evidence_freshness(&evidence, &CancellationToken::new()));
+    }
+
+    fn feedback_row(revision: u64, fresh: bool) -> StoredEvidence {
+        StoredEvidence {
+            revision,
+            target: "check".to_owned(),
+            command: "cargo check".to_owned(),
+            status: "FAIL".to_owned(),
+            exit_code: Some(1),
+            first_diagnostic_ms: None,
+            total_ms: 1,
+            fresh,
+            authoritative: fresh,
+            recorded_at_ms: 1,
+            diagnostics: vec![ChangeDiagnosticData {
+                code: Some("E0384".to_owned()),
+                level: "error".to_owned(),
+                file: Some("src/lib.rs".to_owned()),
+                line: Some(1),
+                message: "cannot assign twice".to_owned(),
+            }],
+            diagnostics_total: 1,
+            diagnostics_omitted: 0,
+            suggestion_package: Some(ChangeSuggestionPackageData {
+                patches: vec![ChangeSuggestionPatchData {
+                    file: "src/lib.rs".to_owned(),
+                    old_string: "let x".to_owned(),
+                    new_string: "let mut x".to_owned(),
+                }],
+                skipped: Vec::new(),
+                unsupported: 1,
+                patches_total: 1,
+                skipped_total: 0,
+                truncated: false,
+            }),
+            stats: crate::diagnostics::EvidenceStats {
+                build_success: Some(false),
+                ..crate::diagnostics::EvidenceStats::default()
+            },
+        }
+    }
+
+    #[test]
+    fn only_current_revision_fresh_rows_expose_compiler_feedback() {
+        let mut record = placeholder_record("ch-feedback-1", Path::new("/tmp/agz-feedback"), 1);
+        record.state = RecordState::Ready;
+        record.revision = 2;
+        record.evidence.push(feedback_row(1, false));
+        record.evidence.push(feedback_row(2, true));
+        // A hypothetical old row that is still flagged fresh must be hidden by
+        // the revision gate, not by the storage cleanup alone.
+        record.evidence.push(feedback_row(1, true));
+
+        let data = data_for_record(ChangeAction::Inspect, &record, None);
+        let rows = &data.evidence;
+
+        assert!(rows[0].diagnostics.is_empty());
+        assert!(rows[0].suggestion_package.is_none());
+        assert_eq!(rows[0].diagnostics_total, 0);
+        assert_eq!(rows[0].stats.build_success, Some(false));
+
+        assert_eq!(rows[1].diagnostics.len(), 1);
+        assert_eq!(rows[1].diagnostics_total, 1);
+        let package = rows[1]
+            .suggestion_package
+            .as_ref()
+            .expect("current-row package");
+        assert_eq!(package.unsupported, 1);
+        assert_eq!(package.patches.len(), 1);
+
+        assert!(rows[2].fresh);
+        assert!(rows[2].revision != record.revision);
+        assert!(
+            rows[2].diagnostics.is_empty() && rows[2].suggestion_package.is_none(),
+            "feedback is bound to the current revision: {:#?}",
+            rows[2]
+        );
+
+        let mut superseded = feedback_row(2, true);
+        superseded.supersede();
+        assert!(!superseded.fresh);
+        assert!(superseded.diagnostics.is_empty());
+        assert_eq!(superseded.diagnostics_total, 0);
+        assert!(superseded.suggestion_package.is_none());
+        assert_eq!(superseded.stats.build_success, Some(false));
+    }
+
+    #[test]
+    fn suggestion_package_limits_surface_as_visible_truncation() {
+        let patch = |old: String, new: String| crate::gate::SuggestionPatch {
+            file: "src/lib.rs".to_owned(),
+            old_string: old,
+            new_string: new,
+        };
+        let many = SuggestionPackage {
+            patches: (0..40)
+                .map(|_| patch("a".repeat(64), "b".repeat(64)))
+                .collect(),
+            skipped: (0..40).map(|index| format!("reason {index}")).collect(),
+        };
+        let bounded = bounded_suggestion_package(&many, 7);
+        assert_eq!(bounded.patches.len(), MAX_LISTED_SUGGESTION_PATCHES);
+        assert_eq!(bounded.skipped.len(), MAX_LISTED_SUGGESTION_SKIPPED);
+        assert_eq!(bounded.patches_total, 40);
+        assert_eq!(bounded.skipped_total, 40);
+        assert_eq!(bounded.unsupported, 7);
+        assert!(bounded.truncated);
+
+        let oversized = SuggestionPackage {
+            patches: vec![
+                patch("x".repeat(40_000), "y".repeat(40_000)),
+                patch("a".to_owned(), "b".to_owned()),
+            ],
+            skipped: Vec::new(),
+        };
+        let bounded = bounded_suggestion_package(&oversized, 0);
+        assert_eq!(
+            bounded.patches.len(),
+            1,
+            "the per-row byte budget must drop only oversized patches: {bounded:#?}"
+        );
+        assert_eq!(bounded.patches[0].old_string, "a");
+        assert_eq!(bounded.patches_total, 2);
+        assert!(bounded.truncated);
     }
 }

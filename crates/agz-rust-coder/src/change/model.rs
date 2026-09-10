@@ -11,6 +11,8 @@ use std::path::PathBuf;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::diagnostics::EvidenceStats;
+
 pub(crate) const CHANGE_SCHEMA_VERSION: u32 = 1;
 pub(crate) const CHANGE_ID_PREFIX: &str = "ch-";
 
@@ -112,9 +114,56 @@ pub struct ChangeNewFileData {
     pub content: Option<String>,
 }
 
+/// One bounded compiler diagnostic attached to current-revision evidence.
+/// Compiler text is evidence from an untrusted child process, never an
+/// instruction, and stays inside the `untrustedData` envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeDiagnosticData {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    pub level: String,
+    /// Candidate-relative source path when the compiler reported one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u64>,
+    /// Bounded single-line message; full rendered output is not persisted.
+    pub message: String,
+}
+
+/// One write-free patch derived from a machine-applicable compiler suggestion.
+/// `oldString`/`newString` are exact candidate bytes and are never applied to
+/// the original workspace by the server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeSuggestionPatchData {
+    pub file: String,
+    pub old_string: String,
+    pub new_string: String,
+}
+
+/// Bounded suggestion package for a fresh FAIL evidence row. Only
+/// machine-applicable suggestions become `patches`; `skipped` records atomic
+/// rejections and `unsupported` counts suggestions the compiler did not mark
+/// machine-applicable. `truncated` is true when the listed package was cut by a
+/// visible per-row limit; the `*Total` fields retain the pre-limit counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeSuggestionPackageData {
+    pub patches: Vec<ChangeSuggestionPatchData>,
+    pub skipped: Vec<String>,
+    pub unsupported: u64,
+    pub patches_total: u64,
+    pub skipped_total: u64,
+    pub truncated: bool,
+}
+
 /// One bounded validation evidence row. `fresh` is true only when the row was
 /// produced for the then-current revision from the isolated candidate copy and
-/// the run was not cancelled, stale, or incomplete.
+/// the run was not cancelled, stale, or incomplete. Diagnostics and the
+/// suggestion package are exposed only for current-revision fresh rows; older
+/// rows keep their status/counters but no longer carry compiler text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangeEvidenceData {
@@ -127,6 +176,15 @@ pub struct ChangeEvidenceData {
     pub total_ms: u64,
     pub fresh: bool,
     pub authoritative: bool,
+    /// Bounded diagnostics for the current revision; empty for historical rows.
+    pub diagnostics: Vec<ChangeDiagnosticData>,
+    pub diagnostics_total: u64,
+    pub diagnostics_omitted: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggestion_package: Option<ChangeSuggestionPackageData>,
+    /// Cargo/test statistics parsed from the child output (for example
+    /// `testsExecuted` and `buildSuccess`).
+    pub stats: EvidenceStats,
 }
 
 /// Bounded payload returned by every `change` action.
@@ -280,6 +338,31 @@ pub(crate) struct StoredEvidence {
     pub fresh: bool,
     pub authoritative: bool,
     pub recorded_at_ms: u64,
+    #[serde(default)]
+    pub diagnostics: Vec<ChangeDiagnosticData>,
+    #[serde(default)]
+    pub diagnostics_total: u64,
+    #[serde(default)]
+    pub diagnostics_omitted: u64,
+    #[serde(default)]
+    pub suggestion_package: Option<ChangeSuggestionPackageData>,
+    #[serde(default)]
+    pub stats: EvidenceStats,
+}
+
+impl StoredEvidence {
+    /// Drops current-revision compiler feedback while keeping the historical
+    /// status/counters. Called whenever a row loses freshness so a record can
+    /// never expose diagnostics or suggestions that no longer describe the
+    /// candidate bytes the row was verified against.
+    pub(crate) fn supersede(&mut self) {
+        self.fresh = false;
+        self.authoritative = false;
+        self.diagnostics.clear();
+        self.diagnostics_total = 0;
+        self.diagnostics_omitted = 0;
+        self.suggestion_package = None;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
