@@ -39,13 +39,14 @@ use crate::{
         DocsProvider, DocsStatus,
     },
     gate::{GateDetail, GateEvidence, GateRequest, GateStatus, GateTargetId},
+    lsp::documents,
     tools::{
         AuditCancellation, CompareRequest, ContextEnvironment,
         ContextRequest as DomainContextRequest, CrateLookupInput as DomainCrateLookupInput,
         ProfileBudget, ProfileRequest, ToolError as SemanticToolError, document_symbols,
-        execute_context, semantic_refactor, semantic_rename, symbol_definition, symbol_hierarchy,
-        symbol_hover, symbol_implementations, symbol_references, with_lsp_authority,
-        with_lsp_cancellation,
+        execute_context, explain, semantic_refactor, semantic_rename, symbol_definition,
+        symbol_hierarchy, symbol_hover, symbol_implementations, symbol_references,
+        with_lsp_authority, with_lsp_cancellation,
     },
     workspace::{ClientRoots, WorkspaceRoot, select_in_root},
 };
@@ -205,6 +206,59 @@ pub struct DocsInput {
     pub source: Option<String>,
     #[serde(default)]
     pub expensive_fallback: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ExplainAction {
+    #[default]
+    Macro,
+    Trait,
+    Cfg,
+}
+
+impl ExplainAction {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Macro => "macro",
+            Self::Trait => "trait",
+            Self::Cfg => "cfg",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExplainAnchorInput {
+    /// Workspace-relative or absolute path of the anchor source file.
+    #[schemars(length(min = 1))]
+    pub path: String,
+    /// Optional symbol on the anchor line; resolves the anchor column/line.
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub symbol: Option<String>,
+    /// Optional 1-based anchor line.
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub line: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExplainInput {
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub dir: Option<String>,
+    /// What to explain: macro expansion provenance, trait obligations, or cfg.
+    pub action: ExplainAction,
+    pub anchor: ExplainAnchorInput,
+    /// Optional rustc diagnostic code, for example E0308 or E0277.
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub diagnostic_id: Option<String>,
+    /// Recorded Cargo feature/target selection for this explanation.
+    #[serde(default)]
+    pub configuration: crate::gate::ValidationOptions,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -590,6 +644,52 @@ pub struct DocsData {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct ExplainSourceBindingData {
+    pub path: String,
+    /// SHA-256 of the exact workspace file bytes used for this explanation.
+    pub sha256: String,
+    /// Git revision when it could be read safely from the workspace root.
+    pub revision: Option<String>,
+    pub root_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainConfigurationData {
+    pub features: Vec<String>,
+    pub all_features: bool,
+    pub no_default_features: bool,
+    pub target_triple: Option<String>,
+    /// True only when a Cargo/rustc run for exactly this configuration backed
+    /// the explanation. Metadata-only evaluations remain false.
+    pub executed: bool,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainData {
+    pub action: String,
+    pub status: String,
+    pub anchor_path: String,
+    pub anchor_line: Option<u64>,
+    pub diagnostic_id: Option<String>,
+    pub diagnostics_considered: u64,
+    pub diagnostics_matched: u64,
+    /// Bounded fragments; every fragment is labelled with its provenance.
+    pub fragments: Vec<explain::ExplainFragment>,
+    /// Visible compiler/analyzer disagreements; the compiler side wins.
+    pub conflicts: Vec<explain::ExplainConflict>,
+    /// Capabilities or policies that prevented an advisory source.
+    pub unsupported: Vec<String>,
+    pub source: ExplainSourceBindingData,
+    pub configuration: ExplainConfigurationData,
+    pub bounds: explain::ExplainBounds,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SemanticItem {
     pub path: String,
     pub line: u32,
@@ -628,6 +728,7 @@ pub type AuditOutput = ToolOutput<AuditData>;
 pub type CrateLookupOutput = ToolOutput<CrateLookupData>;
 pub type DocsOutput = ToolOutput<DocsData>;
 pub type ContextOutput = ToolOutput<ContextData>;
+pub type ExplainOutput = ToolOutput<ExplainData>;
 pub type SemanticOutput = ToolOutput<SemanticData>;
 pub type EditOutput = ToolOutput<EditData>;
 
@@ -683,6 +784,17 @@ pub fn tool_definitions(config: &Config) -> Vec<Tool> {
             ToolAnnotations::new()
                 .read_only(true)
                 .idempotent(true)
+                .open_world(true),
+        ));
+    }
+    if config.tools.explain {
+        tools.push(tool::<ExplainInput, ExplainData>(
+            "explain",
+            "Explain macro expansion provenance, failed trait obligations, and cfg enablement from bounded compiler and source evidence.",
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(false)
                 .open_world(true),
         ));
     }
@@ -889,6 +1001,15 @@ impl RustCoderServer {
             Ok(execution) => execution.result,
             Err(error) => docs_internal_error(&self.state, fallback, error.to_string()),
         }
+    }
+
+    async fn explain(
+        &self,
+        input: ExplainInput,
+        workspace: WorkspaceRequest,
+        request_cancellation: tokio_util::sync::CancellationToken,
+    ) -> CallToolResult {
+        explain_result(&self.state, input, workspace, request_cancellation).await
     }
 
     async fn semantic(
@@ -1611,6 +1732,35 @@ impl ServerHandler for RustCoderServer {
                     .await,
                 ))
             }
+            "explain" => {
+                let input: ExplainInput = parse_input(arguments)?;
+                validate_explain(&input)?;
+                let Ok(_permit) = self.state.try_admit() else {
+                    return Ok(CallToolResponse::Complete(resource_blocked_explain(
+                        &self.state,
+                        &input,
+                    )));
+                };
+                if self.state.is_shutting_down() {
+                    return Ok(CallToolResponse::Complete(resource_blocked_explain(
+                        &self.state,
+                        &input,
+                    )));
+                }
+                let workspace = match self.resolve_workspace(input.dir.as_deref(), &context).await {
+                    Ok(workspace) => workspace,
+                    Err(reason) => {
+                        return Ok(CallToolResponse::Complete(inconclusive_explain(
+                            &self.state,
+                            &input,
+                            reason,
+                        )));
+                    }
+                };
+                Ok(CallToolResponse::Complete(
+                    self.explain(input, workspace, context.ct.clone()).await,
+                ))
+            }
             "symbol" | "references" | "definition" => {
                 let input: SemanticInput = parse_input(arguments)?;
                 validate_semantic(&input)?;
@@ -2303,6 +2453,22 @@ fn validate_context(input: &ContextInput) -> Result<(), McpError> {
         }
     }
     Ok(())
+}
+
+fn validate_explain(input: &ExplainInput) -> Result<(), McpError> {
+    validate_dir(input.dir.as_deref())?;
+    validate_string(&input.anchor.path, "anchor.path")?;
+    if let Some(symbol) = input.anchor.symbol.as_deref() {
+        validate_string(symbol, "anchor.symbol")?;
+    }
+    validate_line(input.anchor.line)?;
+    if let Some(diagnostic_id) = input.diagnostic_id.as_deref() {
+        validate_string(diagnostic_id, "diagnosticId")?;
+    }
+    input
+        .configuration
+        .validate(GateTargetId::Check)
+        .map_err(|message| McpError::invalid_params(message, None))
 }
 
 fn validate_semantic(input: &SemanticInput) -> Result<(), McpError> {
@@ -3426,6 +3592,710 @@ fn docs_internal_error(state: &AppState, input: DocsInput, reason: String) -> Ca
         },
     )
     .into_call_tool_result(state.max_output_bytes(), true)
+}
+
+#[derive(Default)]
+struct AnalyzerEvidence {
+    fragments: Vec<explain::ExplainFragment>,
+    unsupported: Vec<String>,
+    available: bool,
+    bytes: usize,
+    obligations: Option<explain::RaObligations>,
+}
+
+struct ExplainOutcome {
+    status: &'static str,
+    fragments: Vec<explain::ExplainFragment>,
+    conflicts: Vec<explain::ExplainConflict>,
+    unsupported: Vec<String>,
+    diagnostics_considered: u64,
+    diagnostics_matched: u64,
+    executed: bool,
+    configuration_note: String,
+    bounds: explain::ExplainBounds,
+    reason: String,
+}
+
+struct SourceBinding {
+    source: Option<String>,
+    sha256: String,
+    revision: Option<String>,
+}
+
+fn configuration_data(
+    input: &ExplainInput,
+    executed: bool,
+    note: String,
+) -> ExplainConfigurationData {
+    let mut features = input.configuration.features.clone();
+    features.sort();
+    features.dedup();
+    ExplainConfigurationData {
+        features,
+        all_features: input.configuration.all_features,
+        no_default_features: input.configuration.no_default_features,
+        target_triple: input.configuration.target_triple.clone(),
+        executed,
+        note,
+    }
+}
+
+fn empty_explain_data(input: &ExplainInput, status: &str, reason: String) -> ExplainData {
+    ExplainData {
+        action: input.action.as_str().to_owned(),
+        status: status.to_owned(),
+        anchor_path: input.anchor.path.clone(),
+        anchor_line: input.anchor.line.map(u64::from),
+        diagnostic_id: input.diagnostic_id.clone(),
+        diagnostics_considered: 0,
+        diagnostics_matched: 0,
+        fragments: Vec::new(),
+        conflicts: Vec::new(),
+        unsupported: Vec::new(),
+        source: ExplainSourceBindingData {
+            path: input.anchor.path.clone(),
+            sha256: String::new(),
+            revision: None,
+            root_epoch: 0,
+        },
+        configuration: configuration_data(input, false, String::new()),
+        bounds: explain::ExplainBounds::default(),
+        reason,
+    }
+}
+
+fn resource_blocked_explain(state: &AppState, input: &ExplainInput) -> CallToolResult {
+    ToolOutput::new(
+        "explain",
+        "RESOURCE_BLOCKED",
+        "The explanation request could not be admitted.",
+        empty_explain_data(
+            input,
+            "RESOURCE_BLOCKED",
+            RESOURCE_BLOCKED_REASON.to_owned(),
+        ),
+    )
+    .into_call_tool_result(state.max_output_bytes(), true)
+}
+
+fn inconclusive_explain(state: &AppState, input: &ExplainInput, reason: String) -> CallToolResult {
+    ToolOutput::new(
+        "explain",
+        "INCONCLUSIVE",
+        "The explanation workspace could not be resolved.",
+        empty_explain_data(input, "INCONCLUSIVE", reason),
+    )
+    .into_call_tool_result(state.max_output_bytes(), true)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    explain::source_sha256(bytes)
+}
+
+fn read_source_binding(authority: &crate::workspace::AuthorizedRoot, path: &str) -> SourceBinding {
+    let revision = workspace_revision(authority);
+    match documents::read_authorized_file_with_hook(
+        authority,
+        Path::new(path),
+        crate::diagnostics::MAX_SOURCE_SNAPSHOT_BYTES,
+        || {},
+    ) {
+        Ok((_, _, bytes)) => SourceBinding {
+            sha256: sha256_hex(&bytes),
+            source: String::from_utf8(bytes).ok(),
+            revision,
+        },
+        Err(_) => SourceBinding {
+            source: None,
+            sha256: String::new(),
+            revision,
+        },
+    }
+}
+
+fn workspace_revision(authority: &crate::workspace::AuthorizedRoot) -> Option<String> {
+    let (_, _, head) =
+        documents::read_authorized_file_with_hook(authority, Path::new(".git/HEAD"), 4_096, || {})
+            .ok()?;
+    let head = String::from_utf8(head).ok()?;
+    let head = head.trim();
+    if let Some(reference) = head.strip_prefix("ref: ") {
+        let relative = Path::new(".git").join(reference.trim());
+        let (_, _, value) =
+            documents::read_authorized_file_with_hook(authority, &relative, 4_096, || {}).ok()?;
+        let value = String::from_utf8(value).ok()?;
+        let value = value.trim().to_owned();
+        return is_revision(&value).then_some(value);
+    }
+    is_revision(head).then(|| head.to_owned())
+}
+
+fn is_revision(value: &str) -> bool {
+    (7..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+async fn compiler_check(
+    state: &AppState,
+    selection: &crate::workspace::WorkspaceSelection,
+    configuration: &crate::gate::ValidationOptions,
+    client_roots: ClientRoots,
+    cancellation: &CancellationBridge,
+) -> GateEvidence {
+    let request = GateRequest {
+        options: configuration.clone(),
+        directory: Some(selection.requested_dir().to_path_buf()),
+        target: GateTargetId::Check,
+        timings: false,
+        detail: GateDetail::Compact,
+        client_roots,
+        root_epoch: selection.epoch(),
+        source: crate::gate::GateSource::Explicit,
+    };
+    state
+        .check_service()
+        .run(request, None, Some(cancellation.token()))
+        .await
+}
+
+async fn ra_macro_evidence(
+    manager: &std::sync::Arc<crate::lsp::RustAnalyzerManager>,
+    root: std::path::PathBuf,
+    path: String,
+    symbol: Option<String>,
+    line: u32,
+    timeout: Duration,
+) -> AnalyzerEvidence {
+    const CAPABILITY: &str = "rust-analyzer/expandMacro";
+    match explain::expand_macro(
+        manager.as_ref(),
+        &root,
+        Path::new(&path),
+        symbol,
+        line,
+        timeout,
+    )
+    .await
+    {
+        explain::RaStatus::Available(expansion) => {
+            let detail = expansion.name.as_ref().map_or_else(
+                || {
+                    format!(
+                        "rust-analyzer expansion (advisory only):\n{}",
+                        expansion.expansion
+                    )
+                },
+                |name| {
+                    format!(
+                        "rust-analyzer expansion `{name}` (advisory only):\n{}",
+                        expansion.expansion
+                    )
+                },
+            );
+            AnalyzerEvidence {
+                fragments: vec![
+                    explain::ExplainFragment::new(
+                        explain::ExplainProvenance::AdvisoryAnalyzer,
+                        "macroExpansion",
+                        detail,
+                    )
+                    .mark_truncated(expansion.truncated),
+                ],
+                bytes: expansion.expansion.len(),
+                available: true,
+                ..AnalyzerEvidence::default()
+            }
+        }
+        explain::RaStatus::Unsupported(reason) => AnalyzerEvidence {
+            unsupported: vec![reason],
+            ..AnalyzerEvidence::default()
+        },
+        explain::RaStatus::Unavailable(reason) => AnalyzerEvidence {
+            fragments: vec![explain::ExplainFragment::new(
+                explain::ExplainProvenance::Unknown,
+                "macroExpansion",
+                format!("rust-analyzer macro expansion is unavailable: {reason}"),
+            )],
+            unsupported: vec![format!("{CAPABILITY} request failed: {reason}")],
+            ..AnalyzerEvidence::default()
+        },
+    }
+}
+
+async fn ra_obligation_evidence(
+    manager: &std::sync::Arc<crate::lsp::RustAnalyzerManager>,
+    root: std::path::PathBuf,
+    path: String,
+    symbol: Option<String>,
+    line: u32,
+    timeout: Duration,
+) -> AnalyzerEvidence {
+    const CAPABILITY: &str = "rust-analyzer/getFailedObligations";
+    match explain::failed_obligations(
+        manager.as_ref(),
+        &root,
+        Path::new(&path),
+        symbol,
+        line,
+        timeout,
+    )
+    .await
+    {
+        explain::RaStatus::Available(obligations) => {
+            let fragments = obligations
+                .items
+                .iter()
+                .map(|item| {
+                    explain::ExplainFragment::new(
+                        explain::ExplainProvenance::AdvisoryAnalyzer,
+                        "failedBound",
+                        format!("rust-analyzer failed obligation (advisory): {item}"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            AnalyzerEvidence {
+                fragments,
+                bytes: obligations.items.iter().map(String::len).sum(),
+                available: true,
+                obligations: Some(obligations),
+                ..AnalyzerEvidence::default()
+            }
+        }
+        explain::RaStatus::Unsupported(reason) => AnalyzerEvidence {
+            unsupported: vec![reason],
+            ..AnalyzerEvidence::default()
+        },
+        explain::RaStatus::Unavailable(reason) => AnalyzerEvidence {
+            fragments: vec![explain::ExplainFragment::new(
+                explain::ExplainProvenance::Unknown,
+                "failedBound",
+                format!("rust-analyzer failed obligations are unavailable: {reason}"),
+            )],
+            unsupported: vec![format!("{CAPABILITY} request failed: {reason}")],
+            ..AnalyzerEvidence::default()
+        },
+    }
+}
+
+fn metadata_feature_maps(
+    metadata: &cargo_metadata::Metadata,
+) -> (
+    std::collections::BTreeMap<String, Vec<String>>,
+    std::collections::BTreeSet<String>,
+) {
+    let mut declared = std::collections::BTreeMap::new();
+    for package in &metadata.packages {
+        for (name, enables) in &package.features {
+            declared
+                .entry(name.clone())
+                .or_insert_with(Vec::new)
+                .extend(enables.iter().cloned());
+        }
+    }
+    let mut recorded = std::collections::BTreeSet::new();
+    if let Some(resolve) = &metadata.resolve {
+        for node in &resolve.nodes {
+            for feature in &node.features {
+                recorded.insert(feature.as_ref().to_owned());
+            }
+        }
+    }
+    (declared, recorded)
+}
+
+fn render_explain(
+    state: &AppState,
+    input: &ExplainInput,
+    anchor_line: Option<u32>,
+    binding: &SourceBinding,
+    root_epoch: u64,
+    outcome: ExplainOutcome,
+) -> CallToolResult {
+    let is_error = matches!(
+        outcome.status,
+        "UNAVAILABLE" | "INCONCLUSIVE" | "RESOURCE_BLOCKED" | "CANCELLED"
+    );
+    ToolOutput::new(
+        "explain",
+        outcome.status,
+        "The explanation contains only bounded, provenance-labelled fragments; compiler output remains authoritative.",
+        ExplainData {
+            action: input.action.as_str().to_owned(),
+            status: outcome.status.to_owned(),
+            anchor_path: input.anchor.path.clone(),
+            anchor_line: anchor_line.map(u64::from),
+            diagnostic_id: input.diagnostic_id.clone(),
+            diagnostics_considered: outcome.diagnostics_considered,
+            diagnostics_matched: outcome.diagnostics_matched,
+            fragments: outcome.fragments,
+            conflicts: outcome.conflicts,
+            unsupported: outcome.unsupported,
+            source: ExplainSourceBindingData {
+                path: input.anchor.path.clone(),
+                sha256: binding.sha256.clone(),
+                revision: binding.revision.clone(),
+                root_epoch,
+            },
+            configuration: configuration_data(
+                input,
+                outcome.executed,
+                outcome.configuration_note,
+            ),
+            bounds: outcome.bounds,
+            reason: outcome.reason,
+        },
+    )
+    .with_untrusted_data()
+    .into_call_tool_result(state.max_output_bytes(), is_error)
+}
+
+async fn explain_result(
+    state: &AppState,
+    input: ExplainInput,
+    workspace: WorkspaceRequest,
+    request_cancellation: tokio_util::sync::CancellationToken,
+) -> CallToolResult {
+    let path = input.anchor.path.clone();
+    let root_epoch = workspace.root.epoch();
+    let client_roots = workspace.client_roots.clone();
+    let cancellation = workspace.cancellation(request_cancellation, state.shutdown_token());
+    let selection = match select_in_root(&workspace.root) {
+        Ok(selection) => selection,
+        Err(error) => {
+            return inconclusive_explain(
+                state,
+                &input,
+                format!("workspace selection failed: {error}"),
+            );
+        }
+    };
+    let authority = selection.authority().clone();
+    let binding = read_source_binding(&authority, &path);
+    let anchor_line = binding
+        .source
+        .as_deref()
+        .and_then(|source| {
+            explain::resolve_anchor_line(source, input.anchor.symbol.as_deref(), input.anchor.line)
+        })
+        .or(input.anchor.line);
+
+    let mut bounds = explain::ExplainBounds::default();
+    let timeout = Duration::from_millis(state.config().rust_analyzer.timeout_ms);
+
+    match input.action {
+        ExplainAction::Cfg => {
+            let Some(source) = binding.source.as_deref() else {
+                return render_explain(
+                    state,
+                    &input,
+                    anchor_line,
+                    &binding,
+                    root_epoch,
+                    ExplainOutcome {
+                        status: "UNAVAILABLE",
+                        fragments: Vec::new(),
+                        conflicts: Vec::new(),
+                        unsupported: Vec::new(),
+                        diagnostics_considered: 0,
+                        diagnostics_matched: 0,
+                        executed: false,
+                        configuration_note: String::new(),
+                        bounds,
+                        reason: format!(
+                            "the anchor source `{path}` could not be read inside the authorized workspace"
+                        ),
+                    },
+                );
+            };
+            let Some(anchor_line) = anchor_line else {
+                return render_explain(
+                    state,
+                    &input,
+                    None,
+                    &binding,
+                    root_epoch,
+                    ExplainOutcome {
+                        status: "NOT_FOUND",
+                        fragments: Vec::new(),
+                        conflicts: Vec::new(),
+                        unsupported: Vec::new(),
+                        diagnostics_considered: 0,
+                        diagnostics_matched: 0,
+                        executed: false,
+                        configuration_note: String::new(),
+                        bounds,
+                        reason: "the anchor could not be resolved to a line; pass line or symbol"
+                            .to_owned(),
+                    },
+                );
+            };
+
+            let check = std::sync::Arc::clone(state.check_service());
+            let metadata_selection = selection.clone();
+            let metadata = tokio::task::spawn_blocking(move || {
+                check
+                    .metadata_service()
+                    .acquire(&metadata_selection, check.cargo_path().to_owned())
+            })
+            .await;
+
+            let mut fragments = Vec::new();
+            let mut unsupported = Vec::new();
+            let (features, configuration_note) = match metadata {
+                Ok(Ok(load)) => {
+                    let (declared, recorded) = metadata_feature_maps(&load.snapshot.metadata);
+                    let features = explain::feature_selection(
+                        recorded,
+                        &declared,
+                        &input.configuration.features,
+                        input.configuration.all_features,
+                        input.configuration.no_default_features,
+                    );
+                    let note = features.note.clone();
+                    (features, note)
+                }
+                Ok(Err(error)) => {
+                    unsupported.push(format!("cargo metadata failed: {error}"));
+                    (
+                        explain::FeatureSelection::default(),
+                        format!(
+                            "Cargo metadata for this workspace could not be resolved ({error}); feature enablement is unknown"
+                        ),
+                    )
+                }
+                Err(error) => {
+                    unsupported.push(format!("cargo metadata worker failed: {error}"));
+                    (
+                        explain::FeatureSelection::default(),
+                        format!(
+                            "the Cargo metadata worker did not complete ({error}); feature enablement is unknown"
+                        ),
+                    )
+                }
+            };
+            let view = explain::cfg_view(&path, anchor_line, source, &features, None);
+            bounds.diagnostics_shown = view.shown as u64;
+            bounds.truncated |= view.truncated;
+            fragments.extend(view.fragments);
+            render_explain(
+                state,
+                &input,
+                Some(anchor_line),
+                &binding,
+                root_epoch,
+                ExplainOutcome {
+                    status: "OK",
+                    fragments,
+                    conflicts: Vec::new(),
+                    unsupported,
+                    diagnostics_considered: view.matched as u64,
+                    diagnostics_matched: view.matched as u64,
+                    executed: false,
+                    configuration_note,
+                    bounds,
+                    reason: "cfg enablement is evaluated from recorded Cargo metadata; no compiler run was executed for this configuration".to_owned(),
+                },
+            )
+        }
+        ExplainAction::Macro | ExplainAction::Trait => {
+            let evidence = compiler_check(
+                state,
+                &selection,
+                &input.configuration,
+                client_roots,
+                &cancellation,
+            )
+            .await;
+            let usable = matches!(
+                evidence.status,
+                GateStatus::Fail | GateStatus::FastPass | GateStatus::FullPass
+            );
+            if !usable {
+                let status = match evidence.status {
+                    GateStatus::Cancelled => "CANCELLED",
+                    GateStatus::ResourceBlocked => "RESOURCE_BLOCKED",
+                    GateStatus::Timeout | GateStatus::Unavailable => "UNAVAILABLE",
+                    _ => "INCONCLUSIVE",
+                };
+                return render_explain(
+                    state,
+                    &input,
+                    anchor_line,
+                    &binding,
+                    root_epoch,
+                    ExplainOutcome {
+                        status,
+                        fragments: Vec::new(),
+                        conflicts: Vec::new(),
+                        unsupported: Vec::new(),
+                        diagnostics_considered: 0,
+                        diagnostics_matched: 0,
+                        executed: false,
+                        configuration_note: String::new(),
+                        bounds,
+                        reason: evidence.message.clone().unwrap_or_else(|| {
+                            format!(
+                                "the compiler check finished with {}",
+                                evidence.status.as_str()
+                            )
+                        }),
+                    },
+                );
+            }
+            let diagnostics = evidence
+                .steps
+                .iter()
+                .flat_map(|step| step.diagnostics.iter().cloned())
+                .collect::<Vec<crate::gate::GateDiagnostic>>();
+            let diagnostics_considered = diagnostics.len() as u64;
+            let selected = explain::select_diagnostics(
+                &diagnostics,
+                &path,
+                anchor_line,
+                input.diagnostic_id.as_deref(),
+            );
+            let diagnostics_matched = selected.len() as u64;
+            let mut fragments = Vec::new();
+            let mut conflicts = Vec::new();
+            let mut unsupported = Vec::new();
+            let analyzer_line = anchor_line.unwrap_or(1);
+            let analyzer = match state.lsp_manager() {
+                Some(manager) => {
+                    let root = authority.path().to_owned();
+                    let symbol = input.anchor.symbol.clone();
+                    match input.action {
+                        ExplainAction::Macro => {
+                            ra_macro_evidence(
+                                manager,
+                                root,
+                                path.clone(),
+                                symbol,
+                                analyzer_line,
+                                timeout,
+                            )
+                            .await
+                        }
+                        _ => {
+                            ra_obligation_evidence(
+                                manager,
+                                root,
+                                path.clone(),
+                                symbol,
+                                analyzer_line,
+                                timeout,
+                            )
+                            .await
+                        }
+                    }
+                }
+                None => AnalyzerEvidence {
+                    unsupported: vec!["rust-analyzer manager is unavailable".to_owned()],
+                    ..AnalyzerEvidence::default()
+                },
+            };
+            unsupported.extend(analyzer.unsupported.iter().cloned());
+            bounds.expansion_bytes = analyzer.bytes.min(explain::MAX_EXPANSION_BYTES) as u64;
+
+            match input.action {
+                ExplainAction::Macro => {
+                    let view = explain::macro_compiler_view(&selected);
+                    bounds.diagnostics_shown = view.shown as u64;
+                    bounds.macro_depth_reached = view.macro_depth as u64;
+                    bounds.truncated |= view.truncated;
+                    fragments.extend(view.fragments);
+                    let observed_expansion = fragments.iter().any(|fragment| {
+                        fragment.kind == "macroExpansion"
+                            && fragment.provenance == explain::ExplainProvenance::ObservedCompiler
+                    });
+                    fragments.extend(analyzer.fragments.iter().cloned());
+                    bounds.truncated |=
+                        analyzer.fragments.iter().any(|fragment| fragment.truncated);
+                    let status =
+                        if !observed_expansion && !analyzer.available && !unsupported.is_empty() {
+                            "UNSUPPORTED_CAPABILITY"
+                        } else if diagnostics_matched == 0 && !analyzer.available {
+                            "NOT_FOUND"
+                        } else {
+                            "OK"
+                        };
+                    unsupported.sort();
+                    unsupported.dedup();
+                    render_explain(
+                        state,
+                        &input,
+                        anchor_line,
+                        &binding,
+                        root_epoch,
+                        ExplainOutcome {
+                            status,
+                            fragments,
+                            conflicts,
+                            unsupported,
+                            diagnostics_considered,
+                            diagnostics_matched,
+                            executed: true,
+                            configuration_note:
+                                "a Cargo check ran with exactly this recorded configuration".to_owned(),
+                            bounds,
+                            reason: "macro provenance comes from rustc diagnostics; rust-analyzer expansion is advisory only".to_owned(),
+                        },
+                    )
+                }
+                _ => {
+                    let hint = explain::trait_hint(&selected);
+                    let view = explain::trait_compiler_view(
+                        &selected,
+                        &path,
+                        analyzer_line,
+                        binding.source.as_deref(),
+                        hint.as_deref(),
+                    );
+                    bounds.diagnostics_shown = view.shown as u64;
+                    bounds.truncated |= view.truncated;
+                    fragments.extend(view.fragments);
+                    let compiler_failed = fragments.iter().any(|fragment| {
+                        fragment.kind == "failedBound"
+                            && fragment.provenance == explain::ExplainProvenance::ObservedCompiler
+                    });
+                    if analyzer.available {
+                        let obligations = analyzer.obligations.clone().unwrap_or_default();
+                        conflicts =
+                            explain::obligation_conflicts(compiler_failed, &obligations, None);
+                    }
+                    fragments.extend(analyzer.fragments.iter().cloned());
+                    bounds.truncated |=
+                        analyzer.fragments.iter().any(|fragment| fragment.truncated);
+                    let status = if diagnostics_matched == 0 && !analyzer.available {
+                        "NOT_FOUND"
+                    } else {
+                        "OK"
+                    };
+                    unsupported.sort();
+                    unsupported.dedup();
+                    render_explain(
+                        state,
+                        &input,
+                        anchor_line,
+                        &binding,
+                        root_epoch,
+                        ExplainOutcome {
+                            status,
+                            fragments,
+                            conflicts,
+                            unsupported,
+                            diagnostics_considered,
+                            diagnostics_matched,
+                            executed: true,
+                            configuration_note:
+                                "a Cargo check ran with exactly this recorded configuration"
+                                    .to_owned(),
+                            bounds,
+                            reason: "trait obligations and expected/found types are compiler-reported; rust-analyzer obligations are advisory".to_owned(),
+                        },
+                    )
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

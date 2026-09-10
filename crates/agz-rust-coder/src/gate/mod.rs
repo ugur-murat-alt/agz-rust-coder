@@ -18,9 +18,9 @@ pub use targets::{target_for, targets_for};
 pub use types::{
     CompilerSuggestion, DiagnosticChild, DiagnosticSpan, GateAuthority, GateBuildInfo, GateDetail,
     GateDiagnostic, GateEvidence, GateMode, GateRequest, GateScope, GateScopeStrategy, GateSource,
-    GateStatus, GateStepResult, GateTarget, GateTargetId, ProgressCallback, ProgressEvent,
-    ProgressStage, SuggestionApplicability, SuggestionEdit, SuggestionPackage, SuggestionPatch,
-    ValidationProfile,
+    GateStatus, GateStepResult, GateTarget, GateTargetId, MacroExpansion, ProgressCallback,
+    ProgressEvent, ProgressStage, SuggestionApplicability, SuggestionEdit, SuggestionPackage,
+    SuggestionPatch, ValidationProfile,
 };
 
 pub use crate::tools::CheckService;

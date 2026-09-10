@@ -71,6 +71,7 @@ pub struct ToolConfig {
     pub docs: bool,
     pub context: bool,
     pub lsp: bool,
+    pub explain: bool,
     pub rename: bool,
     pub refactor: bool,
     pub change: bool,
@@ -218,6 +219,7 @@ impl Config {
                 docs: true,
                 context: true,
                 lsp: true,
+                explain: true,
                 rename: true,
                 refactor: true,
                 change: true,
@@ -536,6 +538,9 @@ impl Config {
         if self.tools.context {
             names.push("context");
         }
+        if self.tools.explain {
+            names.push("explain");
+        }
         if self.tools.lsp {
             names.extend([
                 "symbol",
@@ -593,6 +598,8 @@ pub struct CliOptions {
     pub tools_context: Option<bool>,
     #[arg(long = "tools-lsp")]
     pub tools_lsp: Option<bool>,
+    #[arg(long = "tools-explain")]
+    pub tools_explain: Option<bool>,
     #[arg(long = "tools-rename")]
     pub tools_rename: Option<bool>,
     #[arg(long = "tools-refactor")]
@@ -740,6 +747,7 @@ struct FileToolConfig {
     docs: Option<bool>,
     context: Option<bool>,
     lsp: Option<bool>,
+    explain: Option<bool>,
     rename: Option<bool>,
     refactor: Option<bool>,
     change: Option<bool>,
@@ -903,6 +911,7 @@ fn apply_file(config: &mut Config, file: FileConfig) {
         apply_opt(&mut config.tools.docs, tools.docs);
         apply_opt(&mut config.tools.context, tools.context);
         apply_opt(&mut config.tools.lsp, tools.lsp);
+        apply_opt(&mut config.tools.explain, tools.explain);
         apply_opt(&mut config.tools.rename, tools.rename);
         apply_opt(&mut config.tools.refactor, tools.refactor);
         apply_opt(&mut config.tools.change, tools.change);
@@ -1049,6 +1058,7 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
         "TOOLS__DOCS" => config.tools.docs = parse_bool(value).map_err(invalid)?,
         "TOOLS__CONTEXT" => config.tools.context = parse_bool(value).map_err(invalid)?,
         "TOOLS__LSP" => config.tools.lsp = parse_bool(value).map_err(invalid)?,
+        "TOOLS__EXPLAIN" => config.tools.explain = parse_bool(value).map_err(invalid)?,
         "TOOLS__RENAME" => config.tools.rename = parse_bool(value).map_err(invalid)?,
         "TOOLS__REFACTOR" => config.tools.refactor = parse_bool(value).map_err(invalid)?,
         "TOOLS__CHANGE" => config.tools.change = parse_bool(value).map_err(invalid)?,
@@ -1207,6 +1217,7 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
     apply_opt(&mut config.tools.docs, cli.tools_docs);
     apply_opt(&mut config.tools.context, cli.tools_context);
     apply_opt(&mut config.tools.lsp, cli.tools_lsp);
+    apply_opt(&mut config.tools.explain, cli.tools_explain);
     apply_opt(&mut config.tools.rename, cli.tools_rename);
     apply_opt(&mut config.tools.refactor, cli.tools_refactor);
     apply_opt(&mut config.tools.change, cli.tools_change);

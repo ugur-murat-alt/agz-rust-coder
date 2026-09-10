@@ -59,6 +59,16 @@
     "inputSchemaHash": "fnv1a64:81c3a0964d395caf",
     "outputSchemaHash": "fnv1a64:19c3c672779aab23"
   },
+  "explain": {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "inputSchemaHash": "fnv1a64:0cbce897f1ac3141",
+    "outputSchemaHash": "fnv1a64:4cddacf3126d96a0"
+  },
   "hierarchy": {
     "annotations": {
       "idempotentHint": true,

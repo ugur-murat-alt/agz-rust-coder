@@ -77,6 +77,7 @@ OpenCode commonly exposes grouped MCP tools as `rust_*`.
 | `crate_lookup` | `rust_crate_lookup` | `enabled` | Verify a crate and optional exact version on crates.io. |
 | `docs` | `rust_docs` | `enabled` | Resolve exact-version docs from cache, local sources, or docs.rs. |
 | `context` | `rust_context` | `enabled` | Prepare, expand, or delta a revision-bound semantic context capsule with per-item reasons. |
+| `explain` | `rust_explain` | `enabled` | Explain macro expansion provenance, trait obligations, or cfg enablement. |
 | `symbol` | `rust_symbol` | `enabled` | Read Rust Analyzer hover data for one symbol. |
 | `references` | `rust_references` | `enabled` | Find bounded references. |
 | `definition` | `rust_definition` | `enabled` | Find the selected definition. |

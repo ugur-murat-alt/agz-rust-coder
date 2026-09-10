@@ -10,6 +10,7 @@
     "crate_lookup",
     "docs",
     "context",
+    "explain",
     "symbol",
     "references",
     "definition",

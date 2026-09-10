@@ -296,6 +296,14 @@ pub enum SuggestionApplicability {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MacroExpansion {
+    pub macro_decl_name: Option<String>,
+    pub span: Box<DiagnosticSpan>,
+    pub definition_span: Option<Box<DiagnosticSpan>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DiagnosticSpan {
     pub file: String,
     pub byte_start: Option<u64>,
@@ -308,6 +316,9 @@ pub struct DiagnosticSpan {
     pub label: Option<String>,
     pub suggested_replacement: Option<String>,
     pub suggestion_applicability: Option<SuggestionApplicability>,
+    /// rustc macro expansion provenance when the compiler retained it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expansion: Option<MacroExpansion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
