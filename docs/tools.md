@@ -27,7 +27,7 @@ Failed compilations are revalidated before offering edit/context evidence. Trunc
 | `hierarchy` | Rust Analyzer | Depends on workspace-code policy | Bounded incoming/outgoing call graph. |
 | `rename` | Rust Analyzer | Never writes source | Verified `old_string`/`new_string` edit package. |
 | `refactor` | Rust Analyzer | Never writes source | Verified write-free refactor package. |
-| `change` | Server-owned scratch + Cargo/rustc for candidate validation | Never writes the workspace; compiles only the candidate copy | Revision-bound change record with candidate hashes, validation evidence, and a verified/unverified export package. |
+| `change` | Server-owned scratch + Cargo/rustc for candidate validation | Never writes the workspace; compiles only the candidate copy | Revision-bound change record with candidate hashes, validation evidence (bounded diagnostics and write-free suggestions for a fresh `FAIL`), and a verified/unverified export package. |
 
 `check` targets are `check`, `clippy`, `test`, `doc`, `fmt`, and `all`. Formatting
 uses check-only behavior. A completed explicit validation is never reused as
@@ -64,6 +64,21 @@ reproduce their relative `path = "..."` references. A mid-apply I/O failure, a
 crash between the applying marker and the final publish, or candidate bytes
 that no longer match the recorded revision mark the change
 `FAILED_INCONSISTENT` and refuse further stage/validate/export requests.
+
+`validate`, and a fresh `inspect`/`export` evidence row, also return bounded
+candidate compiler feedback: at most five, twelve, or twenty-four diagnostics
+(for `compact`, `standard`, or `full` detail) carrying `code`, `level`,
+candidate-relative `file`, `line`, and a truncated `message`, plus
+`diagnosticsTotal`/`diagnosticsOmitted` counters and the parsed Cargo/test
+`stats` (`testsExecuted`, `buildSuccess`). A fresh `FAIL` row additionally
+carries a write-free `suggestionPackage` built from machine-applicable compiler
+suggestions through the same helper as `check`, verified against the candidate
+bytes and never written to any workspace; `skipped`, `unsupported`, `*Total`,
+and `truncated` keep omissions visible. Only current-revision, non-cancelled,
+byte-verified rows carry diagnostics or suggestions: a later `stage` supersedes
+the earlier row and drops that feedback. Compiler text stays untrusted evidence
+and the whole result stays inside `limits.tool_output_bytes` with visible
+truncation.
 ## Context Capsules
 
 `context` works from typed anchors only: `{kind:"file",file,range?}` and

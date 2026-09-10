@@ -28,7 +28,7 @@ işaretini korur.
 | `hierarchy` | Rust Analyzer | Workspace-code politikasına bağlı | Sınırlı gelen/giden çağrı grafiği. |
 | `rename` | Rust Analyzer | Kaynağa asla yazmaz | Doğrulanmış `old_string`/`new_string` edit paketi. |
 | `refactor` | Rust Analyzer | Kaynağa asla yazmaz | Doğrulanmış, yazmasız refactor paketi. |
-| `change` | Sunucuya ait scratch + aday doğrulaması için Cargo/rustc | Workspace'e asla yazmaz; yalnız aday kopyayı derler | Aday hash'leri, doğrulama kanıtı ve doğrulanmış/doğrulanmamış export paketi içeren revizyona bağlı change kaydı. |
+| `change` | Sunucuya ait scratch + aday doğrulaması için Cargo/rustc | Workspace'e asla yazmaz; yalnız aday kopyayı derler | Aday hash'leri, doğrulama kanıtı (taze `FAIL` için sınırlı tanılar ve yazmasız öneriler) ve doğrulanmış/doğrulanmamış export paketi içeren revizyona bağlı change kaydı. |
 
 `check` hedefleri `check`, `clippy`, `test`, `doc`, `fmt` ve `all` değerleridir.
 Biçimlendirme yalnız kontrol kipinde çalışır. Tamamlanmış açık bir doğrulama daha
@@ -65,6 +65,21 @@ başarısız olur. Uygulama sırasında G/Ç hatası, "applying" işareti ile so
 arasında çökme veya kayıtlı revizyonla eşleşmeyen aday byte'ları change'i
 `FAILED_INCONSISTENT` işaretler ve sonraki stage/validate/export istekleri
 reddedilir.
+
+`validate` ve taze `inspect`/`export` kanıt satırı ayrıca sınırlı aday
+derleyici geri bildirimi döndürür: `compact`, `standard` veya `full` detayına
+göre en çok beş, on iki veya yirmi dört tanı; her tanıda `code`, `level`, adaya
+göreli `file`, `line` ve kırpılmış `message` ile birlikte
+`diagnosticsTotal`/`diagnosticsOmitted` sayaçları ve ayrıştırılan Cargo/test
+`stats` verisi (`testsExecuted`, `buildSuccess`). Taze bir `FAIL` satırı ek
+olarak, `check` ile aynı yardımcıdan üretilen ve aday byte'larına karşı
+doğrulanan yazmasız bir `suggestionPackage` taşır; hiçbir workspace'e yazılmaz
+ve `skipped`, `unsupported`, `*Total` ile `truncated` alanları eksiltmeleri
+görünür kılar. Tanı ve öneriler yalnız güncel revizyona ait, iptal edilmemiş ve
+byte doğrulaması geçmiş satırlarda bulunur: sonraki bir `stage` önceki satırı
+geçersiz kılar ve bu geri bildirimi kaldırır. Derleyici metni güvenilmez kanıt
+olarak kalır ve tüm sonuç `limits.tool_output_bytes` içinde görünür kırpmayla
+sınırlanır.
 ## Bağlam Kapsülleri
 
 `context` yalnız tipli çıpalarla çalışır: `{kind:"file",file,range?}` ve

@@ -1186,3 +1186,227 @@ async fn validate_pins_revision_and_identity_and_rejects_mismatch() {
             .any(|row| row.revision == 1 && row.fresh && row.authoritative)
     );
 }
+
+#[tokio::test]
+async fn fail_candidate_exposes_bounded_diagnostics_and_candidate_only_suggestions() {
+    let fixture = Fixture::new(
+        "diagnostics",
+        b"pub fn value() -> u8 { 1 }\n",
+        false,
+        |_root, _config| {},
+    );
+    let originals = [
+        ("Cargo.toml", digest(&fixture.root.join("Cargo.toml"))),
+        ("Cargo.lock", digest(&fixture.root.join("Cargo.lock"))),
+        ("src/lib.rs", digest(&fixture.root.join("src/lib.rs"))),
+    ];
+    let created = fixture.execute(create_request()).await;
+    assert_eq!(created.status, "CREATED", "{created:#?}");
+    let id = created.data.change_id.clone().expect("change id");
+    let base = created.data.base_identity.clone().expect("base identity");
+
+    // `let x` assigned twice is an E0384 whose `let mut x` help is
+    // machine-applicable, so the candidate must carry a write-free patch.
+    let staged = fixture
+        .execute(stage_request(
+            &id,
+            0,
+            &base,
+            vec![patch(
+                "src/lib.rs",
+                "pub fn value() -> u8 { 1 }",
+                "pub fn value() -> u8 { let x: u8 = 1; x = 2; x }",
+            )],
+            vec![],
+        ))
+        .await;
+    assert_eq!(staged.status, "STAGED", "{staged:#?}");
+
+    let failed = fixture.execute(validate_request(&id, 1, &base)).await;
+    assert_eq!(failed.status, "FAIL", "{failed:#?}");
+    let row = failed.data.evidence.last().expect("evidence row");
+    assert_eq!(row.revision, 1);
+    assert!(row.fresh && row.authoritative);
+    assert_eq!(
+        row.diagnostics_total,
+        u64::try_from(row.diagnostics.len()).unwrap_or(0) + row.diagnostics_omitted
+    );
+    assert!(
+        row.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some("E0384")),
+        "the compile failure must carry its bounded diagnostics: {row:#?}"
+    );
+    assert!(
+        row.diagnostics.iter().all(
+            |diagnostic| diagnostic.file.as_deref() == Some("src/lib.rs")
+                && diagnostic.line.is_some()
+        )
+    );
+    assert_eq!(row.stats.build_success, Some(false));
+
+    let package = row
+        .suggestion_package
+        .as_ref()
+        .expect("a failed candidate must offer its machine-applicable package");
+    assert!(!package.patches.is_empty(), "{package:#?}");
+    assert!(!package.truncated);
+    let candidate_source = fs::read_to_string(fixture.candidate(&id).join("src/lib.rs"))
+        .expect("read candidate source");
+    let suggestion = package
+        .patches
+        .iter()
+        .find(|patch| patch.file == "src/lib.rs")
+        .expect("candidate patch");
+    assert!(
+        candidate_source.contains(&suggestion.old_string),
+        "the suggestion patch must apply to the candidate bytes: {suggestion:#?}"
+    );
+    let repaired = candidate_source.replacen(&suggestion.old_string, &suggestion.new_string, 1);
+    assert_ne!(repaired, candidate_source);
+    assert!(
+        repaired.contains("let mut x"),
+        "the suggestion must repair the candidate: {repaired}"
+    );
+    // Suggestions are offered, never applied: the candidate still holds the
+    // error and the original workspace was not touched.
+    assert!(candidate_source.contains("let x: u8 = 1; x = 2; x"));
+    assert_unchanged(&fixture, &originals);
+
+    // A fresh inspect/export row carries the same current-revision feedback.
+    let inspected = fixture.execute(inspect_request(&id)).await;
+    assert_eq!(inspected.status, "INSPECTED", "{inspected:#?}");
+    let inspected_row = inspected.data.evidence.last().expect("inspected row");
+    assert_eq!(inspected_row.revision, 1);
+    assert!(inspected_row.fresh && inspected_row.authoritative);
+    assert_eq!(inspected_row.diagnostics.len(), row.diagnostics.len());
+    assert_eq!(
+        inspected_row
+            .suggestion_package
+            .as_ref()
+            .map(|package| package.patches.len()),
+        Some(package.patches.len())
+    );
+    let exported = fixture.execute(export_request(&id)).await;
+    assert_eq!(exported.status, "EXPORTED_UNVERIFIED", "{exported:#?}");
+    let exported_row = exported.data.evidence.last().expect("exported row");
+    assert!(
+        exported_row.fresh && !exported_row.diagnostics.is_empty(),
+        "a fresh export must carry the current diagnostics: {exported_row:#?}"
+    );
+    assert_unchanged(&fixture, &originals);
+
+    // Repair the candidate through stage so the failed revision becomes
+    // historical; only the current revision may carry feedback.
+    let fixed = fixture
+        .execute(stage_request(
+            &id,
+            1,
+            &base,
+            vec![patch(
+                "src/lib.rs",
+                "let x: u8 = 1; x = 2; x",
+                "let mut x: u8 = 1; x = 2; x",
+            )],
+            vec![],
+        ))
+        .await;
+    assert_eq!(fixed.status, "STAGED", "{fixed:#?}");
+    assert_eq!(fixed.data.revision, 2);
+    assert!(
+        fixed
+            .data
+            .evidence
+            .iter()
+            .all(|row| { row.suggestion_package.is_none() && row.diagnostics.is_empty() })
+    );
+
+    let passed = fixture.execute(validate_request(&id, 2, &base)).await;
+    assert_eq!(passed.status, "PASS", "{passed:#?}");
+    let historical = passed
+        .data
+        .evidence
+        .iter()
+        .filter(|row| row.revision == 1)
+        .collect::<Vec<_>>();
+    assert!(!historical.is_empty());
+    assert!(
+        historical.iter().all(|row| !row.fresh
+            && row.diagnostics.is_empty()
+            && row.suggestion_package.is_none()),
+        "historical evidence must not carry stale diagnostics or suggestions: {historical:#?}"
+    );
+    let current = passed.data.evidence.last().expect("current row");
+    assert_eq!(current.revision, 2);
+    assert!(current.fresh);
+    assert!(current.suggestion_package.is_none());
+    assert_eq!(current.stats.build_success, Some(true));
+    assert_unchanged(&fixture, &originals);
+}
+
+#[tokio::test]
+async fn diagnostic_flood_is_bounded_and_reports_omitted_counts() {
+    let fixture = Fixture::new(
+        "flood",
+        b"pub fn value() -> u8 { 1 }\n",
+        false,
+        |_root, _config| {},
+    );
+    let created = fixture.execute(create_request()).await;
+    assert_eq!(created.status, "CREATED", "{created:#?}");
+    let id = created.data.change_id.clone().expect("change id");
+    let base = created.data.base_identity.clone().expect("base identity");
+
+    let staged = fixture
+        .execute(stage_request(
+            &id,
+            0,
+            &base,
+            vec![patch(
+                "src/lib.rs",
+                "pub fn value() -> u8 { 1 }",
+                "pub fn value() -> u8 { let _ = (nope1, nope2, nope3, nope4, nope5, nope6, nope7, nope8); 1 }",
+            )],
+            vec![],
+        ))
+        .await;
+    assert_eq!(staged.status, "STAGED", "{staged:#?}");
+
+    let failed = fixture.execute(validate_request(&id, 1, &base)).await;
+    assert_eq!(failed.status, "FAIL", "{failed:#?}");
+    let row = failed.data.evidence.last().expect("evidence row");
+    assert!(row.fresh && row.authoritative);
+    assert_eq!(
+        row.diagnostics.len(),
+        5,
+        "compact detail lists five: {row:#?}"
+    );
+    assert!(
+        row.diagnostics_omitted >= 3,
+        "unlisted diagnostics must be counted, not dropped: {row:#?}"
+    );
+    assert_eq!(
+        row.diagnostics_total,
+        u64::try_from(row.diagnostics.len()).unwrap_or(0) + row.diagnostics_omitted
+    );
+    assert!(row.diagnostics_total >= 8, "{row:#?}");
+    assert!(
+        row.diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code.as_deref() == Some("E0425")),
+        "{row:#?}"
+    );
+    if let Some(package) = &row.suggestion_package {
+        assert!(
+            package.patches.is_empty(),
+            "unsupported suggestions must never become patches: {package:#?}"
+        );
+    }
+    let candidate = fixture.candidate(&id).join("src/lib.rs");
+    assert!(
+        fs::read_to_string(&candidate)
+            .expect("candidate source")
+            .contains("nope8"),
+        "diagnostics must not modify the candidate"
+    );
+}
