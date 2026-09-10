@@ -18,7 +18,7 @@ while (($#)); do
     --output) output="$2"; shift 2 ;;
     --proto|--retry) shift 2 ;;
     --fail|--location|--tlsv1.2|--silent|--show-error) shift ;;
-    https://github.com/ugur-murat-alt/agz-rust-coder/releases/download/*) url="$1"; shift ;;
+    https://github.com/ugur-murat-alt/rust-code-mcp/releases/download/*) url="$1"; shift ;;
     *) echo "unexpected curl argument: $1" >&2; exit 1 ;;
   esac
 done

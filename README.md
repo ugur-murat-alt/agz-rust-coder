@@ -1,6 +1,6 @@
 # agz-rust-coder
 
-[![CI](https://github.com/ugur-murat-alt/agz-rust-coder/actions/workflows/ci.yml/badge.svg)](https://github.com/ugur-murat-alt/agz-rust-coder/actions/workflows/ci.yml)
+[![CI](https://github.com/ugur-murat-alt/rust-code-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ugur-murat-alt/rust-code-mcp/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/agz-rust-coder.svg)](https://crates.io/crates/agz-rust-coder)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -176,7 +176,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), [architecture](docs/architecture.md),
 
 ## Canonical Links
 
-- Repository: https://github.com/ugur-murat-alt/agz-rust-coder
+- Repository: https://github.com/ugur-murat-alt/rust-code-mcp
 - Crate: https://crates.io/crates/agz-rust-coder
 - SDK docs: https://docs.rs/rmcp/3.1.4/rmcp/
 - MCP `2025-11-25`: https://modelcontextprotocol.io/specification/2025-11-25

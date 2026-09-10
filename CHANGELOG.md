@@ -103,7 +103,7 @@ Semantic Versioning and follows the Keep a Changelog structure.
 - Cargo distribution through crates.io and discovery metadata for the official
   MCP Registry.
 
-[Unreleased]: https://github.com/ugur-murat-alt/agz-rust-coder/compare/agz-rust-coder-v0.2.0...HEAD
-[0.2.0]: https://github.com/ugur-murat-alt/agz-rust-coder/compare/agz-rust-coder-v0.1.1...agz-rust-coder-v0.2.0
-[0.1.1]: https://github.com/ugur-murat-alt/agz-rust-coder/compare/agz-rust-coder-v0.1.0...agz-rust-coder-v0.1.1
-[0.1.0]: https://github.com/ugur-murat-alt/agz-rust-coder/releases/tag/agz-rust-coder-v0.1.0
+[Unreleased]: https://github.com/ugur-murat-alt/rust-code-mcp/compare/agz-rust-coder-v0.2.0...HEAD
+[0.2.0]: https://github.com/ugur-murat-alt/rust-code-mcp/compare/agz-rust-coder-v0.1.1...agz-rust-coder-v0.2.0
+[0.1.1]: https://github.com/ugur-murat-alt/rust-code-mcp/compare/agz-rust-coder-v0.1.0...agz-rust-coder-v0.1.1
+[0.1.0]: https://github.com/ugur-murat-alt/rust-code-mcp/releases/tag/agz-rust-coder-v0.1.0

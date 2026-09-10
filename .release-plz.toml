@@ -14,7 +14,7 @@ publish_allow_dirty = false
 publish_no_verify = false
 publish_timeout = "10m"
 release_always = false
-repo_url = "https://github.com/ugur-murat-alt/agz-rust-coder"
+repo_url = "https://github.com/ugur-murat-alt/rust-code-mcp"
 semver_check = false
 
 [[package]]

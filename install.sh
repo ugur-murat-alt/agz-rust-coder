@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-readonly REPOSITORY="ugur-murat-alt/agz-rust-coder"
+readonly REPOSITORY="ugur-murat-alt/rust-code-mcp"
 readonly BINARY_NAME="agz-rust-coder"
 readonly VERSION="${AGZ_RUST_CODER_VERSION:-0.2.0}"
 
