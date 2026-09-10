@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod benchmark;
+mod benchmark_tasks;
 mod child_process;
 mod evidence;
 mod mcp;
@@ -22,6 +23,7 @@ async fn main() -> Result<()> {
         "protocol-smoke" if extra.is_empty() => protocol_smoke(&root).await,
         "opencode-smoke" if extra.is_empty() => opencode_smoke(&root).await,
         "benchmark-smoke" => benchmark::run(&root, extra).await,
+        "task-benchmark-smoke" if extra.is_empty() => benchmark_tasks::run(&root).await,
         "--help" | "-h" if extra.is_empty() => {
             print_help();
             Ok(())
@@ -70,5 +72,7 @@ async fn opencode_smoke(root: &std::path::Path) -> Result<()> {
 }
 
 fn print_help() {
-    println!("Usage: xtask <protocol-smoke|opencode-smoke|benchmark-smoke [--live]>");
+    println!(
+        "Usage: xtask <protocol-smoke|opencode-smoke|benchmark-smoke [--live]|task-benchmark-smoke>"
+    );
 }

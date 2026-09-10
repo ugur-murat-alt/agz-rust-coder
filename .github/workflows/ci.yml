@@ -89,6 +89,10 @@ jobs:
         shell: bash
         run: cargo +1.88.0 run --locked -p xtask -- benchmark-smoke
 
+      - name: Run Rust task benchmark replay
+        shell: bash
+        run: cargo +1.88.0 run --locked -p xtask -- task-benchmark-smoke
+
       - name: Run Linux full gate
         if: runner.os == 'Linux'
         shell: bash

@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "corpus_id": "rust-agent-tasks-v1",
+  "frozen": true,
+  "frozen_before_change_engine": true,
+  "frozen_source_commit": "a7f5125479e6affb361e6319b5985d844d7272a7",
+  "baseline_mcp_release": "0.2.0",
+  "harness_version": "task-benchmark-v1",
+  "repetitions": 3,
+  "arms": [
+    "shell_files",
+    "mcp_0_2_0",
+    "change_engine"
+  ],
+  "budget": {
+    "wall_time_ms": 600000,
+    "max_host_turns": 20,
+    "max_cargo_calls": 20
+  },
+  "quality_gate": {
+    "baseline_arm": "mcp_0_2_0",
+    "candidate_arm": "change_engine",
+    "non_inferiority_margin_percentage_points": 0.0
+  },
+  "performance_targets": {
+    "host_turn_reduction_percent": 20.0,
+    "cargo_call_reduction_percent": 15.0,
+    "wall_time_regression_limit_percent": 10.0
+  },
+  "ablations": [
+    "context_capsule_off",
+    "repair_loop_off",
+    "candidate_comparison_off"
+  ],
+  "fixture_set_hash": "3d41acc83d4e9b4a73927824a4a828c43a7fea379b1a6fd364198cf77edb7cab",
+  "tasks": [
+    {
+      "id": "trait-impl",
+      "class": "missing_trait_impl",
+      "task_summary": "Implement the missing Label implementation for Item without changing the public trait contract.",
+      "fixture_hash": "14ab89f001475ed178317a357f3521f189b9b4a281c75ea95a69930424f85d8c",
+      "oracle_id": "oracle-01",
+      "fixture_id": "trait-impl"
+    },
+    {
+      "id": "borrow-move",
+      "class": "borrow_move_repair",
+      "task_summary": "Repair the move/ownership error while preserving the returned String and byte length.",
+      "fixture_hash": "e30258e996974bbf001669e058af4ae404787fd80edb2acc766b9c488c920c77",
+      "oracle_id": "oracle-02",
+      "fixture_id": "borrow-move"
+    },
+    {
+      "id": "crate-api",
+      "class": "exact_crate_api",
+      "task_summary": "Use the vendored exact-api 1.4.0 API to render values with the required task prefix.",
+      "fixture_hash": "e805caa074647f1822fe9ff7f1897f66798f7bcc98c255885a8cf1dcb446a5b5",
+      "oracle_id": "oracle-03",
+      "fixture_id": "crate-api"
+    },
+    {
+      "id": "multi-crate-signature",
+      "class": "multi_crate_signature",
+      "task_summary": "Migrate the app consumer to the current two-argument task-api score signature across the workspace.",
+      "fixture_hash": "7356ae46f2ea622ae2268828a3be00e1a5fda9718925e13a9d565dbe26fb0bea",
+      "oracle_id": "oracle-04",
+      "fixture_id": "multi-crate-signature"
+    },
+    {
+      "id": "feature-only",
+      "class": "feature_only_breakage",
+      "task_summary": "Repair the extra feature without breaking the default feature configuration.",
+      "fixture_hash": "c0ed807cd99176878ee12a962e6cd1bbb8de4f653efdf47784c35486f62a4b2c",
+      "oracle_id": "oracle-05",
+      "fixture_id": "feature-only"
+    },
+    {
+      "id": "regression-test",
+      "class": "regression_test_addition",
+      "task_summary": "Fix lower-bound clamping and add a regression test that would fail on the original bug.",
+      "fixture_hash": "7980e5c00e6c956d37c258386eb53c3e18ef5e0cc75798c3d0fb7675ce1d0f8e",
+      "oracle_id": "oracle-06",
+      "fixture_id": "regression-test"
+    },
+    {
+      "id": "dependency-upgrade",
+      "class": "dependency_upgrade",
+      "task_summary": "Migrate the consumer from the old metrics API shape to vendored metrics-v2 2.0.0.",
+      "fixture_hash": "7a534c1806ba9d5340bde1f95cc31b375cf72b6ad383ad1eddedded21a7c7ec2",
+      "oracle_id": "oracle-07",
+      "fixture_id": "dependency-upgrade"
+    },
+    {
+      "id": "performance-behavior",
+      "class": "behavior_preserving_performance",
+      "task_summary": "Reduce stable_unique asymptotic lookup cost while preserving first-seen order and behavior.",
+      "fixture_hash": "f61acaaf8121fa614eb31d685cc37a7c3ae33df65d677e21ba605e6e98413b47",
+      "oracle_id": "oracle-08",
+      "fixture_id": "performance-behavior"
+    }
+  ],
+  "order_seeds": [
+    240918,
+    240919,
+    240920
+  ],
+  "fixture_catalog_sha256": "770cdfe17d1d8c1ef166da22c0f9a96f5b05361c33392974f6c1d7136b18acc2"
+}

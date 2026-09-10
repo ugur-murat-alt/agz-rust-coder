@@ -10,6 +10,7 @@ security checks.
 cargo run -p xtask -- protocol-smoke
 cargo run -p xtask -- opencode-smoke
 cargo run -p xtask -- benchmark-smoke
+cargo run -p xtask -- task-benchmark-smoke
 ```
 
 `protocol-smoke` starts the real stdio binary and checks initialization, tool
@@ -23,6 +24,53 @@ no paid or external model endpoint is used.
 `benchmark-smoke` runs frozen clean and broken Rust fixtures against an oracle.
 It verifies that status and `passed` fields agree and compares current behavior
 to the preserved benchmark contract.
+
+`task-benchmark-smoke` extends that benchmark harness with the frozen
+`rust-agent-tasks-v1` corpus. It replays eight Rust task classes over three
+paired and position-balanced repetitions with three distinct order seeds:
+A) ordinary shell/file work, B) the preserved `0.2.0` MCP surface, and C) the
+Rust Change Engine contract. The task request contains only public task data;
+independent oracle observations and mutation guards decide success. The replay
+retains failed, timeout, and cancelled trials instead of filtering them.
+
+The provider-free replay is a harness fixture, not measured model performance.
+Its timing, Cargo-call, recompile, and host-turn numbers exist to exercise
+aggregation and gate logic. Input/output/cache/schema token counts and cost are
+recorded as `unknown`, never as zero. Real provider/model measurements remain
+explicit opt-in work.
+
+The frozen v1 corpus covers missing trait implementation, borrow/move repair,
+exact crate API use, multi-crate signature migration, feature-only breakage,
+regression-test addition, dependency upgrade, and behavior-preserving
+performance work. `xtask/tests/task_benchmark.rs`, which is part of the normal
+workspace CI test command, verifies corpus hashes, replay completeness,
+independent scoring, unknown usage semantics, negative controls, and balanced
+ordering. CI also invokes `task-benchmark-smoke` directly on the platform matrix
+so transcript replay and evidence publication are exercised as a product path.
+
+## Predeclared Task Benchmark Gates
+
+Before Change Engine implementation, the corpus fixes these comparison rules:
+
+- quality: C may not fall below B; the `non_inferiority_margin` is 0 percentage
+  points for v1;
+- efficiency: C targets at least 20% fewer host turns and 15% fewer Cargo calls
+  than B;
+- wall time: C may regress by at most 10% versus B.
+
+Every arm reports sample count, success rate with a Wilson 95% interval, wall
+time dispersion, CPU time, snapshot preparation, Cargo/recompile counts,
+host turns, cold/warm cache strata, token fields, cost, timeout and
+cancellation outcomes. Provider-free replay can prove the harness evaluates
+these gates, but it can never make Change Engine default-on; comparable opt-in
+live runs are required for that decision.
+
+Raw replay observations live in
+`benchmark/task-corpus/provider-free-replay.json`. The frozen task manifest,
+embedded `fixtures.json` workspace snapshots, and independent oracle catalog
+live beside it. Fixture and settings hashes bind results to the exact corpus.
+The recorded provenance includes provider, model, harness version, MCP SHA,
+fixture hash, toolchain, OS/hardware, cache state, and settings hash.
 
 ## Evidence Layout
 
@@ -66,7 +114,7 @@ cargo package -p agz-rust-coder --locked
 cargo publish -p agz-rust-coder --dry-run --locked
 ```
 
-The three provider-free smokes, real pinned Rust Analyzer/doc adapters,
+The provider-free smokes, real pinned Rust Analyzer/doc adapters,
 `cargo deny check`, workflow lint, and secret/vulnerability scans complete the
 release evidence. Platform CI supplies macOS and Windows process and path
 coverage unavailable on a Linux workstation.
