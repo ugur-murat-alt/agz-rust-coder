@@ -109,8 +109,7 @@ impl RepairService {
                 self.analyze(request, workspace, cancellation, lsp).await
             }
             super::model::RepairAction::Try | super::model::RepairAction::Compare => {
-                self.run_candidates(request, workspace, cancellation, lsp)
-                    .await
+                Box::pin(self.run_candidates(request, workspace, cancellation, lsp)).await
             }
             super::model::RepairAction::Minimize => {
                 self.minimize(request, workspace, cancellation).await
