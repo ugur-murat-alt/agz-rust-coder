@@ -31,6 +31,7 @@ Failed compilations are revalidated before offering edit/context evidence. Trunc
 | `rename` | Rust Analyzer | Never writes source | Verified `old_string`/`new_string` edit package. |
 | `refactor` | Rust Analyzer | Never writes source | Verified write-free refactor package. |
 | `change` | Server-owned scratch + Cargo/rustc for candidate validation | Never writes the workspace; compiles only the candidate copy | Revision-bound change record with candidate hashes, validation evidence (bounded diagnostics and write-free suggestions for a fresh `FAIL`), and a verified/unverified export package. |
+| `repair` | Server-owned scratch + Cargo/rustc for candidate validation | Never writes the workspace; creates and compiles only temporary candidate copies | Grouped diagnostics with reasoned root-cause hypotheses and source-backed ownership evidence, per-candidate measured compile/test results, behavior/performance guards, and a measured selection with residual risks. |
 
 `check` targets are `check`, `clippy`, `test`, `doc`, `fmt`, and `all`. Formatting
 uses check-only behavior. A completed explicit validation is never reused as
@@ -121,6 +122,36 @@ byte-verified rows carry diagnostics or suggestions: a later `stage` supersedes
 the earlier row and drops that feedback. Compiler text stays untrusted evidence
 and the whole result stays inside `limits.tool_output_bytes` with visible
 truncation.
+
+## Repair Candidates
+
+`repair` acts on the current-revision fresh `FAIL` evidence of an existing
+`change`. `analyze` groups bounded diagnostics by code and file with primary and
+secondary spans, labels root-cause links as reasoned hypotheses (never proven
+facts), and explains ownership and trait obligations with source excerpts read
+from the revision-bound candidate copy. Candidate sources are the
+machine-applicable suggestion package (replayed as one atomic candidate because
+the flattened package does not preserve per-suggestion grouping), verifiable
+Rust Analyzer quick fixes, and a few explicit mechanical transforms
+(clone-at-move, derive-for-local-type, known standard-library import). Every
+candidate is a write-free `oldString`/`newString` package.
+
+`try` recreates its own change for every candidate (`create`, replay of the
+previous patches, then the candidate patches as one atomic stage) and validates
+it through the same isolated Cargo path as `change`. A stale or overlapping part
+rejects the whole candidate without partial application, identical candidate
+hashes are never retried, and `maxCandidates`, `maxCompiles`, and `wallTimeMs`
+stop with an explicit stop reason. `compare` adds measured compile status,
+diagnostic delta, changed lines, public API delta, and the optional
+`constraints.testTarget` gate result. A candidate that failed to compile, adds a
+behavior/performance impact (test deletion or `#[ignore]`, assertion removal,
+lint disabling, new `todo!`/`unimplemented!`/`panic!`/`unwrap`, unnecessary
+clone, `unsafe`, error-swallowing conversion, block deletion, or public API
+change), or fails the requested test gate is never selected; without a test gate
+the comparison is `compileVerified` only. Pre-existing impacts are reported
+separately from candidate-added impacts. Cancelled, timed-out, incomplete, or
+cleanup-failed runs publish no usable repair evidence.
+
 ## Context Capsules
 
 `context` works from typed anchors only: `{kind:"file",file,range?}` and
@@ -198,6 +229,7 @@ use the platform path-list separator.
 | `tools.rename` | `true` | Register `rename` when LSP is enabled. |
 | `tools.refactor` | `true` | Register `refactor` when LSP is enabled. |
 | `tools.change` | `true` | Register `change`. |
+| `tools.repair` | `true` | Register `repair` when `change` is enabled. |
 | `cargo.path` | PATH `cargo` | Optional Cargo executable override. |
 | `gate.hard_timeout_ms` | `600000` | One Cargo operation deadline. |
 | `gate.debounce_ms` | `500` | Stable-input debounce. |
@@ -228,6 +260,9 @@ use the platform path-list separator.
 | `change.max_bytes` | `268435456` | Captured candidate bytes per change. |
 | `change.ttl_ms` | `86400000` | Orphan and discarded scratch retention before the startup sweep. |
 | `change.max_revisions` | `32` | Stage revisions per change. |
+| `repair.max_candidates` | `4` | Candidate attempts per `repair` action; requests may only narrow. |
+| `repair.max_compiles` | `4` | Cargo validations per `repair` action; requests may only narrow. |
+| `repair.wall_time_ms` | `120000` | Wall-clock budget per `repair` action; requests may only narrow. |
 | `context.max_capsules` | `32` | In-memory capsule ring capacity. |
 | `context.capsule_ttl_ms` | `900000` | Capsule TTL; root-epoch changes also invalidate. |
 | `context.max_items` | `64` | Items selected into one capsule. |

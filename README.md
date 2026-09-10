@@ -88,6 +88,7 @@ OpenCode commonly exposes grouped MCP tools as `rust_*`.
 | `rename` | `rust_rename` | `enabled` | Produce a verified rename edit package without applying it. |
 | `refactor` | `rust_refactor` | `enabled` | Produce a verified refactor edit package without applying it. |
 | `change` | `rust_change` | `enabled` | Create, stage, and validate a revision-bound changeset in server-owned scratch without writing the workspace. |
+| `repair` | `rust_repair` | `enabled` | Analyze, try, and compare compiler-driven repair candidates for a failing change revision without writing the workspace. |
 
 Every tool returns deterministic structured data plus an equivalent bounded text
 fallback. External data stays under `untrustedData`. Expected domain outcomes
@@ -115,6 +116,9 @@ sections, for example `AGZ_RUST_CODER_GATE__HARD_TIMEOUT_MS=600000`.
 | `profile.compare_samples` | `3` | Required samples per side before any speed claim. |
 | `limits.tool_output_bytes` | `49152` | Maximum serialized tool result size. |
 | `change.max_bytes` | `268435456` | Maximum captured candidate bytes per changeset. |
+| `repair.max_candidates` | `4` | Candidates one `repair` action may try. |
+| `repair.max_compiles` | `4` | Cargo validations one `repair` action may run. |
+| `repair.wall_time_ms` | `120000` | Wall-clock budget for one `repair` action. |
 | `telemetry.enabled` | `true` | Bounded local activity records without prompts or source. |
 
 `profile` evidence is bounded: the latest 64 records stay in memory, and

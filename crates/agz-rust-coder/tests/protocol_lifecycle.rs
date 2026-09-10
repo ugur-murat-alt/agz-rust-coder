@@ -119,6 +119,7 @@ async fn initialize_lists_the_static_surface_and_guidance() -> Result<()> {
             "rename",
             "refactor",
             "change",
+            "repair",
         ]
     );
     assert!(tools.tools.iter().all(|tool| tool.output_schema.is_some()));

@@ -20,7 +20,8 @@
     "hierarchy",
     "rename",
     "refactor",
-    "change"
+    "change",
+    "repair"
   ],
   "prompts": ["workflow"],
   "resource_count": 4,

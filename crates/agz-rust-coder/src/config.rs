@@ -53,6 +53,7 @@ pub struct Config {
     pub context: ContextConfig,
     pub limits: LimitsConfig,
     pub profile: ProfileConfig,
+    pub repair: RepairConfig,
     pub telemetry: TelemetryConfig,
 }
 
@@ -77,6 +78,7 @@ pub struct ToolConfig {
     pub rename: bool,
     pub refactor: bool,
     pub change: bool,
+    pub repair: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +200,15 @@ pub struct ProfileConfig {
     pub compare_samples: u64,
 }
 
+/// Bounds for the compiler-driven `repair` tool. Request budgets may only
+/// narrow these configured caps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepairConfig {
+    pub max_candidates: u32,
+    pub max_compiles: u32,
+    pub wall_time_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TelemetryConfig {
     pub enabled: bool,
@@ -232,6 +243,7 @@ impl Config {
                 rename: true,
                 refactor: true,
                 change: true,
+                repair: true,
             },
             cargo: CargoConfig { path: None },
             gate: GateConfig {
@@ -298,6 +310,11 @@ impl Config {
                 max_report_bytes: 4 * 1024 * 1024,
                 max_runs: 4,
                 compare_samples: 3,
+            },
+            repair: RepairConfig {
+                max_candidates: 4,
+                max_compiles: 4,
+                wall_time_ms: 120_000,
             },
             telemetry: TelemetryConfig {
                 enabled: true,
@@ -442,6 +459,24 @@ impl Config {
             8,
         )?;
         check_range(
+            "repair.max_candidates",
+            u64::from(self.repair.max_candidates),
+            1,
+            32,
+        )?;
+        check_range(
+            "repair.max_compiles",
+            u64::from(self.repair.max_compiles),
+            1,
+            64,
+        )?;
+        check_range(
+            "repair.wall_time_ms",
+            self.repair.wall_time_ms,
+            1_000,
+            3_600_000,
+        )?;
+        check_range(
             "limits.tool_output_bytes",
             self.limits.tool_output_bytes,
             512,
@@ -583,6 +618,9 @@ impl Config {
         if self.tools.change {
             names.push("change");
         }
+        if self.tools.repair && self.tools.change {
+            names.push("repair");
+        }
         names
     }
 
@@ -631,6 +669,8 @@ pub struct CliOptions {
     pub tools_refactor: Option<bool>,
     #[arg(long = "tools-change")]
     pub tools_change: Option<bool>,
+    #[arg(long = "tools-repair")]
+    pub tools_repair: Option<bool>,
     #[arg(long = "cargo-path")]
     pub cargo_path: Option<PathBuf>,
     #[arg(long = "gate-hard-timeout-ms")]
@@ -697,6 +737,12 @@ pub struct CliOptions {
     pub profile_max_runs: Option<u64>,
     #[arg(long = "profile-compare-samples")]
     pub profile_compare_samples: Option<u64>,
+    #[arg(long = "repair-max-candidates")]
+    pub repair_max_candidates: Option<u64>,
+    #[arg(long = "repair-max-compiles")]
+    pub repair_max_compiles: Option<u64>,
+    #[arg(long = "repair-wall-time-ms")]
+    pub repair_wall_time_ms: Option<u64>,
     #[arg(long = "max-rename-edits")]
     pub max_rename_edits: Option<u64>,
     #[arg(long = "max-refactor-edits")]
@@ -757,6 +803,7 @@ struct FileConfig {
     context: Option<FileContextConfig>,
     limits: Option<FileLimitsConfig>,
     profile: Option<FileProfileConfig>,
+    repair: Option<FileRepairConfig>,
     telemetry: Option<FileTelemetryConfig>,
 }
 
@@ -782,6 +829,7 @@ struct FileToolConfig {
     rename: Option<bool>,
     refactor: Option<bool>,
     change: Option<bool>,
+    repair: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -913,6 +961,14 @@ struct FileProfileConfig {
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
+struct FileRepairConfig {
+    max_candidates: Option<u32>,
+    max_compiles: Option<u32>,
+    wall_time_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct FileTelemetryConfig {
     enabled: Option<bool>,
     path: Option<PathBuf>,
@@ -954,6 +1010,7 @@ fn apply_file(config: &mut Config, file: FileConfig) {
         apply_opt(&mut config.tools.rename, tools.rename);
         apply_opt(&mut config.tools.refactor, tools.refactor);
         apply_opt(&mut config.tools.change, tools.change);
+        apply_opt(&mut config.tools.repair, tools.repair);
     }
     if let Some(cargo) = file.cargo {
         if let Some(path) = cargo.path {
@@ -1065,6 +1122,11 @@ fn apply_file(config: &mut Config, file: FileConfig) {
         apply_opt(&mut config.profile.max_runs, profile.max_runs);
         apply_opt(&mut config.profile.compare_samples, profile.compare_samples);
     }
+    if let Some(repair) = file.repair {
+        apply_opt(&mut config.repair.max_candidates, repair.max_candidates);
+        apply_opt(&mut config.repair.max_compiles, repair.max_compiles);
+        apply_opt(&mut config.repair.wall_time_ms, repair.wall_time_ms);
+    }
     if let Some(telemetry) = file.telemetry {
         apply_opt(&mut config.telemetry.enabled, telemetry.enabled);
         apply_opt(&mut config.telemetry.path, telemetry.path);
@@ -1106,6 +1168,7 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
         "TOOLS__RENAME" => config.tools.rename = parse_bool(value).map_err(invalid)?,
         "TOOLS__REFACTOR" => config.tools.refactor = parse_bool(value).map_err(invalid)?,
         "TOOLS__CHANGE" => config.tools.change = parse_bool(value).map_err(invalid)?,
+        "TOOLS__REPAIR" => config.tools.repair = parse_bool(value).map_err(invalid)?,
         "CARGO__PATH" => config.cargo.path = Some(nonempty_path(value).map_err(invalid)?),
         "GATE__HARD_TIMEOUT_MS" => {
             config.gate.hard_timeout_ms = parse_u64(value).map_err(invalid)?;
@@ -1180,6 +1243,15 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
         "PROFILE__MAX_RUNS" => config.profile.max_runs = parse_u64(value).map_err(invalid)?,
         "PROFILE__COMPARE_SAMPLES" => {
             config.profile.compare_samples = parse_u64(value).map_err(invalid)?;
+        }
+        "REPAIR__MAX_CANDIDATES" => {
+            config.repair.max_candidates = parse_u32(value).map_err(invalid)?;
+        }
+        "REPAIR__MAX_COMPILES" => {
+            config.repair.max_compiles = parse_u32(value).map_err(invalid)?;
+        }
+        "REPAIR__WALL_TIME_MS" => {
+            config.repair.wall_time_ms = parse_u64(value).map_err(invalid)?;
         }
         "LIMITS__MAX_RENAME_EDITS" => {
             config.limits.max_rename_edits = parse_u64(value).map_err(invalid)?;
@@ -1268,6 +1340,7 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
     apply_opt(&mut config.tools.rename, cli.tools_rename);
     apply_opt(&mut config.tools.refactor, cli.tools_refactor);
     apply_opt(&mut config.tools.change, cli.tools_change);
+    apply_opt(&mut config.tools.repair, cli.tools_repair);
     if let Some(path) = cli.cargo_path.clone() {
         config.cargo.path = Some(path);
     }
@@ -1339,6 +1412,15 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
         &mut config.profile.compare_samples,
         cli.profile_compare_samples,
     );
+    if let Some(value) = cli.repair_max_candidates {
+        config.repair.max_candidates = u32::try_from(value)
+            .map_err(|_| invalid("repair.max_candidates", "value exceeds u32".to_owned()))?;
+    }
+    if let Some(value) = cli.repair_max_compiles {
+        config.repair.max_compiles = u32::try_from(value)
+            .map_err(|_| invalid("repair.max_compiles", "value exceeds u32".to_owned()))?;
+    }
+    apply_opt(&mut config.repair.wall_time_ms, cli.repair_wall_time_ms);
     apply_opt(&mut config.limits.max_rename_edits, cli.max_rename_edits);
     apply_opt(
         &mut config.limits.max_refactor_edits,
@@ -1540,6 +1622,10 @@ fn parse_u64(value: &str) -> Result<u64, String> {
         .trim()
         .parse::<u64>()
         .map_err(|_| "expected an unsigned integer".to_owned())
+}
+
+fn parse_u32(value: &str) -> Result<u32, String> {
+    u32::try_from(parse_u64(value)?).map_err(|_| "expected an unsigned 32-bit integer".to_owned())
 }
 
 fn parse_path_list(value: &str) -> Result<Vec<PathBuf>, String> {
@@ -1761,6 +1847,60 @@ mod tests {
         );
         assert!(matches!(
             out_of_range,
+            Err(ConfigError::InvalidField { .. })
+        ));
+    }
+
+    #[test]
+    fn repair_config_accepts_toml_environment_and_cli_layers() {
+        let plain_cli = cli();
+        let mut cli = cli();
+        cli.repair_max_candidates = Some(1);
+        let config = Config::from_sources(
+            "/workspace",
+            Some("[tools]\nrepair = false\n[repair]\nmax_compiles = 2\nwall_time_ms = 5_000\n"),
+            [("AGZ_RUST_CODER_REPAIR__MAX_CANDIDATES", "3")],
+            &cli,
+        )
+        .unwrap();
+        assert!(!config.tools.repair);
+        assert!(!config.enabled_tool_names().contains(&"repair"));
+        assert_eq!(config.repair.max_candidates, 1);
+        assert_eq!(config.repair.max_compiles, 2);
+        assert_eq!(config.repair.wall_time_ms, 5_000);
+
+        let defaults = Config::defaults_at("/workspace");
+        assert!(defaults.tools.repair);
+        let names = defaults.enabled_tool_names();
+        let change_index = names
+            .iter()
+            .position(|name| *name == "change")
+            .expect("change tool");
+        assert_eq!(names.get(change_index + 1), Some(&"repair"));
+
+        let mut change_disabled = defaults;
+        change_disabled.tools.change = false;
+        assert!(!change_disabled.enabled_tool_names().contains(&"repair"));
+
+        let out_of_range = Config::from_sources(
+            "/workspace",
+            Some("[repair]\nmax_candidates = 33\n"),
+            std::iter::empty::<(String, String)>(),
+            &plain_cli,
+        );
+        assert!(matches!(
+            out_of_range,
+            Err(ConfigError::InvalidField { .. })
+        ));
+
+        let environment_out_of_range = Config::from_sources(
+            "/workspace",
+            None,
+            [("AGZ_RUST_CODER_REPAIR__MAX_COMPILES", "0")],
+            &plain_cli,
+        );
+        assert!(matches!(
+            environment_out_of_range,
             Err(ConfigError::InvalidField { .. })
         ));
     }

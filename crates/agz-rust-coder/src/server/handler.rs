@@ -40,6 +40,10 @@ use crate::{
     },
     gate::{GateDetail, GateEvidence, GateRequest, GateStatus, GateTargetId},
     lsp::documents,
+    repair::{
+        RepairAction, RepairBudgetInput, RepairCandidateInput, RepairConstraintsInput,
+        RepairOutcome, RepairRequest, RepairService, RepairTarget,
+    },
     tools::{
         AuditCancellation, CompareRequest, ContextEnvironment,
         ContextRequest as DomainContextRequest, CrateLookupInput as DomainCrateLookupInput,
@@ -161,9 +165,32 @@ pub struct ChangeInput {
     pub detail: CheckDetail,
 }
 
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepairInput {
+    pub action: RepairAction,
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub dir: Option<String>,
+    #[schemars(length(min = 1, max = 128))]
+    pub change_id: String,
+    #[serde(default)]
+    #[schemars(length(max = 64))]
+    pub diagnostic_ids: Vec<String>,
+    #[serde(default)]
+    #[schemars(length(max = 16))]
+    pub candidates: Vec<RepairCandidateInput>,
+    #[serde(default)]
+    pub constraints: RepairConstraintsInput,
+    #[serde(default)]
+    pub budget: RepairBudgetInput,
+}
+
 pub type ChangeOutput = ToolOutput<ChangeData>;
+pub type RepairOutput = ToolOutput<RepairData>;
 
 pub use crate::change::ChangeData;
+pub use crate::repair::RepairData;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -884,6 +911,13 @@ pub fn tool_definitions(config: &Config) -> Vec<Tool> {
         tools.push(tool::<ChangeInput, ChangeData>(
             "change",
             "Create, stage, validate, export, and discard a revision-bound changeset in server-owned scratch.",
+            ToolAnnotations::new().destructive(true).open_world(true),
+        ));
+    }
+    if config.tools.repair && config.tools.change {
+        tools.push(tool::<RepairInput, RepairData>(
+            "repair",
+            "Analyze, try, and compare compiler-driven repair candidates for a failing change revision.",
             ToolAnnotations::new().destructive(true).open_world(true),
         ));
     }
@@ -2090,6 +2124,47 @@ impl ServerHandler for RustCoderServer {
                     &workspace.root,
                 )))
             }
+            "repair" => {
+                let input: RepairInput = parse_input(arguments)?;
+                validate_repair(&input)?;
+                let Ok(_permit) = self.state.try_admit() else {
+                    return Ok(CallToolResponse::Complete(resource_blocked_repair(
+                        &self.state,
+                    )));
+                };
+                if self.state.is_shutting_down() {
+                    return Ok(CallToolResponse::Complete(resource_blocked_repair(
+                        &self.state,
+                    )));
+                }
+                let workspace = match self.resolve_workspace(input.dir.as_deref(), &context).await {
+                    Ok(workspace) => workspace,
+                    Err(reason) => {
+                        return Ok(CallToolResponse::Complete(inconclusive_repair(
+                            &self.state,
+                            reason,
+                        )));
+                    }
+                };
+                let cancellation =
+                    workspace.cancellation(context.ct.clone(), self.state.shutdown_token());
+                let Some(service) = self.state.repair_service() else {
+                    return Err(McpError::method_not_found::<CallToolRequestMethod>());
+                };
+                let request = repair_request(&input, service);
+                let outcome = Box::pin(service.execute(
+                    request,
+                    &workspace.root,
+                    cancellation.token(),
+                    self.state.lsp_manager(),
+                ))
+                .await;
+                Ok(CallToolResponse::Complete(repair_result(
+                    &self.state,
+                    outcome,
+                    &workspace.root,
+                )))
+            }
             _ => Err(McpError::method_not_found::<CallToolRequestMethod>()),
         }
     }
@@ -2881,6 +2956,167 @@ fn inconclusive_change(state: &AppState, action: ChangeAction, reason: String) -
         "change",
         "INCONCLUSIVE",
         "The change workspace could not be resolved.",
+        data,
+    )
+    .into_call_tool_result(state.max_output_bytes(), true)
+}
+
+fn validate_repair(input: &RepairInput) -> Result<(), McpError> {
+    validate_dir(input.dir.as_deref())?;
+    validate_string(&input.change_id, "changeId")?;
+    if input.change_id.chars().count() > MAX_CHANGE_ID_CHARS {
+        return Err(McpError::invalid_params("changeId is too long", None));
+    }
+    if input.diagnostic_ids.len() > 64 {
+        return Err(McpError::invalid_params(
+            "diagnosticIds accepts at most 64 items",
+            None,
+        ));
+    }
+    for diagnostic_id in &input.diagnostic_ids {
+        validate_string(diagnostic_id, "diagnosticIds item")?;
+        if diagnostic_id.chars().count() > 160 {
+            return Err(McpError::invalid_params(
+                "diagnosticIds items are limited to 160 characters",
+                None,
+            ));
+        }
+    }
+    if input.candidates.len() > 16 {
+        return Err(McpError::invalid_params(
+            "candidates accepts at most 16 items",
+            None,
+        ));
+    }
+    if input.action == RepairAction::Analyze && !input.candidates.is_empty() {
+        return Err(McpError::invalid_params(
+            "candidates are accepted only for action=try or action=compare",
+            None,
+        ));
+    }
+    for candidate in &input.candidates {
+        if candidate.patches.is_empty() {
+            return Err(McpError::invalid_params(
+                "each candidate requires at least one patch",
+                None,
+            ));
+        }
+        if candidate.patches.len() > 64 {
+            return Err(McpError::invalid_params(
+                "a candidate accepts at most 64 patches",
+                None,
+            ));
+        }
+        if candidate
+            .id
+            .as_ref()
+            .is_some_and(|id| id.chars().count() > 64)
+        {
+            return Err(McpError::invalid_params(
+                "candidate ids are limited to 64 characters",
+                None,
+            ));
+        }
+        if candidate
+            .source
+            .as_ref()
+            .is_some_and(|source| source.chars().count() > 64)
+        {
+            return Err(McpError::invalid_params(
+                "candidate sources are limited to 64 characters",
+                None,
+            ));
+        }
+        for patch in &candidate.patches {
+            validate_string(&patch.file, "candidates.patches.file")?;
+            if patch.old_string.trim().is_empty() {
+                return Err(McpError::invalid_params(
+                    "candidate patches require a non-empty oldString",
+                    None,
+                ));
+            }
+        }
+    }
+    if let Some(value) = input.budget.max_candidates {
+        if !(1..=32).contains(&value) {
+            return Err(McpError::invalid_params(
+                "budget.maxCandidates must be between 1 and 32",
+                None,
+            ));
+        }
+    }
+    if let Some(value) = input.budget.max_compiles {
+        if !(1..=64).contains(&value) {
+            return Err(McpError::invalid_params(
+                "budget.maxCompiles must be between 1 and 64",
+                None,
+            ));
+        }
+    }
+    if let Some(value) = input.budget.wall_time_ms {
+        if !(1_000..=3_600_000).contains(&value) {
+            return Err(McpError::invalid_params(
+                "budget.wallTimeMs must be between 1000 and 3600000",
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn repair_request(input: &RepairInput, service: &RepairService) -> RepairRequest {
+    RepairRequest {
+        action: input.action,
+        change_id: input.change_id.clone(),
+        diagnostic_ids: input.diagnostic_ids.clone(),
+        candidates: input.candidates.clone(),
+        test_target: input
+            .constraints
+            .test_target
+            .map(RepairTarget::as_gate_target),
+        budget: service.effective_budget(&input.budget),
+    }
+}
+
+fn repair_result(state: &AppState, outcome: RepairOutcome, root: &WorkspaceRoot) -> CallToolResult {
+    ToolOutput::new("repair", outcome.status, outcome.summary, outcome.data)
+        .with_workspace(super::WorkspaceInfo {
+            requested_dir: root.path().display().to_string(),
+            package_root: root.path().display().to_string(),
+            workspace_root: root.authority_path().display().to_string(),
+            manifest_path: String::new(),
+        })
+        .with_untrusted_data()
+        .into_call_tool_result(state.max_output_bytes(), outcome.is_error)
+}
+
+fn empty_repair_data() -> RepairData {
+    RepairData {
+        usable: false,
+        reason: RESOURCE_BLOCKED_REASON.to_owned(),
+        stop_reason: "resourceBlocked".to_owned(),
+        ..RepairData::default()
+    }
+}
+
+fn resource_blocked_repair(state: &AppState) -> CallToolResult {
+    ToolOutput::new(
+        "repair",
+        "RESOURCE_BLOCKED",
+        "The repair request could not be admitted.",
+        empty_repair_data(),
+    )
+    .into_call_tool_result(state.max_output_bytes(), true)
+}
+
+fn inconclusive_repair(state: &AppState, reason: String) -> CallToolResult {
+    let mut data = empty_repair_data();
+    data.reason = reason;
+    data.stop_reason = "inconclusive".to_owned();
+    ToolOutput::new(
+        "repair",
+        "INCONCLUSIVE",
+        "The repair workspace could not be resolved.",
         data,
     )
     .into_call_tool_result(state.max_output_bytes(), true)
@@ -4731,6 +4967,91 @@ mod tests {
         let request = change_request(&validate_with_filter);
         assert_eq!(request.action, ChangeAction::Validate);
         assert_eq!(request.target, GateTargetId::Test);
+    }
+
+    #[test]
+    fn repair_input_validation_bounds_candidates_and_requires_patches() {
+        let base: RepairInput = serde_json::from_value(serde_json::json!({
+            "action": "analyze",
+            "changeId": "ch-1-1-1"
+        }))
+        .expect("repair input must deserialize");
+        assert!(validate_repair(&base).is_ok());
+
+        let candidate = || RepairCandidateInput {
+            id: Some("c1".to_owned()),
+            source: None,
+            patches: vec![PatchInput {
+                file: "src/lib.rs".to_owned(),
+                old_string: "a".to_owned(),
+                new_string: "b".to_owned(),
+            }],
+        };
+
+        let mut analyze_with_candidates = base.clone();
+        analyze_with_candidates.candidates = vec![candidate()];
+        assert!(
+            validate_repair(&analyze_with_candidates).is_err(),
+            "analyze must reject candidates"
+        );
+
+        let mut empty_candidate = base.clone();
+        empty_candidate.action = RepairAction::Try;
+        empty_candidate.candidates = vec![RepairCandidateInput {
+            id: None,
+            source: None,
+            patches: Vec::new(),
+        }];
+        assert!(validate_repair(&empty_candidate).is_err());
+
+        let mut valid = base.clone();
+        valid.action = RepairAction::Compare;
+        valid.candidates = vec![candidate()];
+        valid.constraints.test_target = Some(RepairTarget::Test);
+        valid.budget.max_candidates = Some(0);
+        assert!(validate_repair(&valid).is_err());
+        valid.budget.max_candidates = Some(4);
+        valid.budget.max_compiles = Some(65);
+        assert!(validate_repair(&valid).is_err());
+        valid.budget.max_compiles = Some(4);
+        valid.budget.wall_time_ms = Some(500);
+        assert!(validate_repair(&valid).is_err());
+        valid.budget.wall_time_ms = Some(60_000);
+        assert!(validate_repair(&valid).is_ok());
+        assert_eq!(RepairTarget::Test.as_gate_target(), GateTargetId::Test);
+    }
+
+    #[test]
+    fn repair_tool_is_catalogued_after_change_and_hidden_with_change() {
+        let config = Config::defaults_at("/workspace");
+        let names = tool_definitions(&config)
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        let change_index = names
+            .iter()
+            .position(|name| name == "change")
+            .expect("change tool");
+        assert_eq!(
+            names.get(change_index + 1).map(String::as_str),
+            Some("repair")
+        );
+
+        let mut repair_disabled = config.clone();
+        repair_disabled.tools.repair = false;
+        assert!(
+            !tool_definitions(&repair_disabled)
+                .iter()
+                .any(|tool| tool.name == "repair")
+        );
+
+        let mut change_disabled = config;
+        change_disabled.tools.change = false;
+        assert!(
+            !tool_definitions(&change_disabled)
+                .iter()
+                .any(|tool| tool.name == "repair")
+        );
     }
 
     #[test]

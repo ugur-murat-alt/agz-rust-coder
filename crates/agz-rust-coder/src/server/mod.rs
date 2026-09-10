@@ -13,9 +13,9 @@ pub use handler::{
     EditData, EditOutput, ExplainAction, ExplainAnchorInput, ExplainConfigurationData, ExplainData,
     ExplainInput, ExplainOutput, ExplainSourceBindingData, HierarchyDirection, HierarchyInput,
     ImplementationsInput, ProfileAction, ProfileBudgetInput, ProfileConfigurationInput,
-    ProfileData, ProfileInput, ProfileOutput, RefactorInput, RenameInput, RustCoderServer,
-    SemanticData, SemanticInput, SemanticOutput, SymbolInput, SymbolsInput, VerifyInput,
-    VerifyOutput, tool_definitions,
+    ProfileData, ProfileInput, ProfileOutput, RefactorInput, RenameInput, RepairData, RepairInput,
+    RepairOutput, RustCoderServer, SemanticData, SemanticInput, SemanticOutput, SymbolInput,
+    SymbolsInput, VerifyInput, VerifyOutput, tool_definitions,
 };
 pub use progress::ProgressReporter;
 pub use response::{ToolData, ToolOutput, WorkspaceInfo};
@@ -42,6 +42,7 @@ use crate::{
     docs::DocsResolver,
     lsp::RustAnalyzerManager,
     process::{ProcessJournal, ProcessSupervisor},
+    repair::RepairService,
     telemetry::ActivityLog,
     tools::{AuditLimits, AuditService, CheckService, ProfileService, VerifyService},
     workspace::{AuthorizedRoot, MetadataService, RootGuard},
@@ -60,6 +61,9 @@ pub struct AppState {
     /// Present only when `tools.change` is enabled so a disabled tool never
     /// validates, creates, or touches the scratch directory at startup.
     change: Option<Arc<ChangeService>>,
+    /// Present only when `tools.repair` and `tools.change` are both enabled;
+    /// `repair` always operates on server-owned change scratch.
+    repair: Option<Arc<RepairService>>,
     profile: ProfileService,
     verify: Arc<VerifyService>,
     audit: AuditService,
@@ -157,6 +161,13 @@ impl AppState {
         } else {
             None
         };
+        let repair = match (&change, config.tools.repair) {
+            (Some(change), true) => Some(Arc::new(RepairService::new(
+                config.clone(),
+                Arc::clone(change),
+            ))),
+            _ => None,
+        };
         let metadata = Arc::new(MetadataService::new(Arc::clone(&roots)));
         let capsules = Arc::new(CapsuleStore::new(
             usize::try_from(config.context.max_capsules).unwrap_or(usize::MAX),
@@ -189,6 +200,7 @@ impl AppState {
             processes: processes.clone(),
             check,
             change,
+            repair,
             profile,
             verify,
             audit,
@@ -315,6 +327,10 @@ impl AppState {
 
     pub(crate) fn change_service(&self) -> Option<&Arc<ChangeService>> {
         self.change.as_ref()
+    }
+
+    pub(crate) fn repair_service(&self) -> Option<&Arc<RepairService>> {
+        self.repair.as_ref()
     }
 
     pub(crate) fn profile_service(&self) -> &ProfileService {

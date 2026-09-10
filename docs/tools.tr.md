@@ -32,6 +32,7 @@ işaretini korur.
 | `rename` | Rust Analyzer | Kaynağa asla yazmaz | Doğrulanmış `old_string`/`new_string` edit paketi. |
 | `refactor` | Rust Analyzer | Kaynağa asla yazmaz | Doğrulanmış, yazmasız refactor paketi. |
 | `change` | Sunucuya ait scratch + aday doğrulaması için Cargo/rustc | Workspace'e asla yazmaz; yalnız aday kopyayı derler | Aday hash'leri, doğrulama kanıtı (taze `FAIL` için sınırlı tanılar ve yazmasız öneriler) ve doğrulanmış/doğrulanmamış export paketi içeren revizyona bağlı change kaydı. |
+| `repair` | Sunucuya ait scratch + aday doğrulaması için Cargo/rustc | Workspace'e asla yazmaz; yalnız geçici aday kopyaları oluşturup derler | Gerekçeli kök-neden hipotezleri ve kaynak alıntılı ownership kanıtıyla gruplanmış tanılar, aday başına ölçülmüş derleme/test sonucu, davranış/performans koruyucuları ve kalan risklerle ölçülmüş seçim. |
 
 `check` hedefleri `check`, `clippy`, `test`, `doc`, `fmt` ve `all` değerleridir.
 Biçimlendirme yalnız kontrol kipinde çalışır. Tamamlanmış açık bir doğrulama daha
@@ -120,6 +121,36 @@ byte doğrulaması geçmiş satırlarda bulunur: sonraki bir `stage` önceki sat
 geçersiz kılar ve bu geri bildirimi kaldırır. Derleyici metni güvenilmez kanıt
 olarak kalır ve tüm sonuç `limits.tool_output_bytes` içinde görünür kırpmayla
 sınırlanır.
+
+## Onarım Adayları
+
+`repair`, mevcut bir `change` kaydının güncel revizyonundaki taze `FAIL`
+kanıtıyla çalışır. `analyze`, sınırlı tanıları hata kodu ve dosyaya göre
+primary/secondary span'larla gruplar, kök-neden bağlarını kanıtlanmış gerçek
+değil gerekçeli hipotez olarak etiketler ve ownership ile trait
+yükümlülüklerini revizyona bağlı aday kopyadan okunan kaynak alıntılarıyla
+açıklar. Aday kaynakları machine-applicable öneri paketi (düzleştirilmiş paket
+öneri gruplamasını korumadığı için tek atomik aday olarak yeniden oynatılır),
+doğrulanabilen Rust Analyzer quick fix'leri ve birkaç açık mekanik dönüşümdür
+(move noktasında clone, yerel tipe derive, bilinen standart kütüphane importu).
+Her aday yazmasız bir `oldString`/`newString` paketidir.
+
+`try`, her aday için kendi change kaydını yeniden oluşturur (`create`, önceki
+yamaların yeniden oynatılması, ardından aday yamalarının tek atomik stage
+olarak uygulanması) ve `change` ile aynı izole Cargo yolundan doğrular. Stale
+veya örtüşen bir parça adayın tamamını kısmi uygulama olmadan reddeder, aynı
+aday hash'i tekrar denenmez ve `maxCandidates`, `maxCompiles` ile `wallTimeMs`
+açık durma nedeniyle durur. `compare`; ölçülmüş derleme durumunu, tanı farkını,
+değişen satırları, public API farkını ve verildiyse `constraints.testTarget`
+kapı sonucunu ekler. Derlenemeyen, davranış/performans etkisi ekleyen (test
+silme veya `#[ignore]`, assert kaldırma, lint kapatma, yeni
+`todo!`/`unimplemented!`/`panic!`/`unwrap`, gereksiz clone, `unsafe`, hatayı
+yutan dönüşüm, blok silme veya public API değişimi) ya da istenen test kapısını
+geçemeyen aday asla seçilmez; test kapısı verilmediyse karşılaştırma yalnız
+`compileVerified` etiketlidir. Mevcut kodda zaten bulunan etkiler, adayın
+eklediği etkilerden ayrı raporlanır. İptal edilen, zaman aşımına uğrayan, eksik
+veya cleanup hatası olan koşular kullanılabilir onarım kanıtı yayınlamaz.
+
 ## Bağlam Kapsülleri
 
 `context` yalnız tipli çıpalarla çalışır: `{kind:"file",file,range?}` ve
@@ -197,6 +228,7 @@ platformun path-list ayırıcısını kullanır.
 | `tools.rename` | `true` | LSP açıksa `rename` kaydı. |
 | `tools.refactor` | `true` | LSP açıksa `refactor` kaydı. |
 | `tools.change` | `true` | `change` kaydı. |
+| `tools.repair` | `true` | `change` etkinken `repair` kaydı. |
 | `cargo.path` | PATH `cargo` | İsteğe bağlı Cargo binary değişimi. |
 | `gate.hard_timeout_ms` | `600000` | Tek Cargo işlemi son süresi. |
 | `gate.debounce_ms` | `500` | Kararlı girdi bekleme süresi. |
@@ -227,6 +259,9 @@ platformun path-list ayırıcısını kullanır.
 | `change.max_bytes` | `268435456` | Change başına yakalanan aday byte. |
 | `change.ttl_ms` | `86400000` | Açılış taramasından önce orphan ve discarded scratch saklama süresi. |
 | `change.max_revisions` | `32` | Change başına stage revizyonu. |
+| `repair.max_candidates` | `4` | `repair` işlemi başına aday denemesi; istekler yalnız daraltabilir. |
+| `repair.max_compiles` | `4` | `repair` işlemi başına Cargo doğrulaması; istekler yalnız daraltabilir. |
+| `repair.wall_time_ms` | `120000` | `repair` işlemi başına duvar saati bütçesi; istekler yalnız daraltabilir. |
 | `context.max_capsules` | `32` | Bellek içi kapsül ring kapasitesi. |
 | `context.capsule_ttl_ms` | `900000` | Kapsül TTL süresi; root epoch değişimi de geçersiz kılar. |
 | `context.max_items` | `64` | Bir kapsüle seçilen öğe sayısı. |
