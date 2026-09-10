@@ -6,7 +6,7 @@
 
 ## Context
 
-The `agz-rust-coder` product guarantee is a bounded, source-write-free Rust
+The `agz-rust-mcp` product guarantee is a bounded, source-write-free Rust
 correctness MCP server. Issue #20 proposed an opt-in capability that would write
 validated candidate changes into the operator workspace, with per-file safe
 replace, a durable journal, recovery, mutation leases, and cross-platform

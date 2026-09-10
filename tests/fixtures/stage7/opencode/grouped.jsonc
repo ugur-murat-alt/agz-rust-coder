@@ -4,7 +4,7 @@
     "servers": {
       "rust": {
         "type": "local",
-        "command": ["<agz-rust-coder>"],
+        "command": ["<agz-rust-mcp>"],
         "cwd": ".",
         "codemode": true,
         "timeout": {

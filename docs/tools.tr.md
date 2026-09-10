@@ -1,6 +1,6 @@
 # Araç ve Yapılandırma Referansı
 
-Bu belge `agz-rust-coder` `0.2.0` sürümünün açık araç ve yapılandırma yüzeyini
+Bu belge `agz-rust-mcp` `0.2.0` sürümünün açık araç ve yapılandırma yüzeyini
 tanımlar.
 
 İstek zaman aşımı ve iptal denetimleri, Cargo öncesi ve sonrasındaki Git
@@ -373,12 +373,12 @@ doğrulamayı iptal eder.
 
 ## Yapılandırma Kaynakları
 
-Öncelik CLI, `AGZ_RUST_CODER_*` ortamı, açık TOML ve varsayılanlardır. Listeler
+Öncelik CLI, `AGZ_RUST_MCP_*` ortamı, açık TOML ve varsayılanlardır. Listeler
 alt öncelikli değerleri eklemek yerine değiştirir. Bilinmeyen TOML veya ortam
 anahtarı başlangıcı reddeder.
 
 Ortam değişkenleri alanı büyük harfe çevirir ve bölümler arasında `__` kullanır:
-`gate.hard_timeout_ms`, `AGZ_RUST_CODER_GATE__HARD_TIMEOUT_MS` olur. Root listeleri
+`gate.hard_timeout_ms`, `AGZ_RUST_MCP_GATE__HARD_TIMEOUT_MS` olur. Root listeleri
 platformun path-list ayırıcısını kullanır.
 
 ## Yapılandırma Referansı
@@ -410,8 +410,8 @@ platformun path-list ayırıcısını kullanır.
 | `gate.cache` | `auto` | `auto`, `project` veya `isolated`. |
 | `gate.min_free_disk_mb` | `1024` | Ön kontrol disk tabanı. |
 | `gate.min_available_memory_mb` | `512` | İşletim sistemi güvenilir kullanılabilir bellek ölçümü sağladığında uygulanan ön kontrol tabanı (şu anda Linux). |
-| `gate.cache_dir` | platform `agz-rust-coder/state/gate` | Sunucuya ait Cargo cache. |
-| `gate.lease_dir` | platform `agz-rust-coder/state/leases` | Host lease ve süreç journal'ı. |
+| `gate.cache_dir` | platform `agz-rust-mcp/state/gate` | Sunucuya ait Cargo cache. |
+| `gate.lease_dir` | platform `agz-rust-mcp/state/leases` | Host lease ve süreç journal'ı. |
 | `profile.max_report_bytes` | `4194304` | Tek Cargo zamanlama artifact'ı için sınırlı okuma/saklama üst sınırı. |
 | `profile.max_runs` | `4` | Bir `profile` çağrısında kullanılabilen taze Cargo koşusu. |
 | `profile.compare_samples` | `3` | Hız iddiası öncesi her taraf için gereken örnek sayısı. |
@@ -432,8 +432,8 @@ platformun path-list ayırıcısını kullanır.
 | `rust_analyzer.workspace_code` | `deny` | `deny` veya açık `allow`. |
 | `docs.timeout_ms` | `300000` | Belge çözümleme son süresi. |
 | `docs.fallback` | `auto` | `auto`, `local`, `network` veya `off`. |
-| `docs.cache_dir` | platform `agz-rust-coder/docs` | Sunucuya ait docs cache. |
-| `change.scratch_dir` | platform `agz-rust-coder/state/change` | Yetkili köklerin dışındaki sunucuya ait changeset scratch alanı. |
+| `docs.cache_dir` | platform `agz-rust-mcp/docs` | Sunucuya ait docs cache. |
+| `change.scratch_dir` | platform `agz-rust-mcp/state/change` | Yetkili köklerin dışındaki sunucuya ait changeset scratch alanı. |
 | `change.max_active` | `4` | Sunucu başına eşzamanlı etkin change. |
 | `change.max_files` | `20000` | Change başına yakalanan dosya. |
 | `change.max_bytes` | `268435456` | Change başına yakalanan aday byte. |
@@ -474,7 +474,7 @@ platformun path-list ayırıcısını kullanır.
 | `limits.audit_total_bytes` | `67108864` | Toplam audit byte sınırı. |
 | `limits.audit_findings` | `200` | Audit bulgu sınırı. |
 | `telemetry.enabled` | `true` | Yerel etkinlik kaydını açar. |
-| `telemetry.path` | platform `agz-rust-coder/state/activity.jsonl` | Sunucuya ait JSONL yolu. |
+| `telemetry.path` | platform `agz-rust-mcp/state/activity.jsonl` | Sunucuya ait JSONL yolu. |
 | `telemetry.retention_bytes` | `8388608` | Döndürme eşiği. |
 | `telemetry.retention_days` | `7` | Gün cinsinden saklama. |
 | `telemetry.max_archives` | `3` | Arşiv sınırı. |

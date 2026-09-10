@@ -24,7 +24,7 @@ participation, or permanently ban accounts according to severity and history.
 Enforcement decisions should minimize disclosure and conflicts of interest.
 
 Report conduct incidents privately through the repository maintainer contact or
-the [GitHub private advisory form](https://github.com/ugur-murat-alt/rust-code-mcp/security/advisories/new)
+the [GitHub private advisory form](https://github.com/ugur-murat-alt/agz-rust-mcp/security/advisories/new)
 when no separate private channel is available. Do not include vulnerability
 details in a conduct report unless needed for immediate safety.
 

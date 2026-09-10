@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Report a security vulnerability privately
-    url: https://github.com/ugur-murat-alt/rust-code-mcp/security/advisories/new
+    url: https://github.com/ugur-murat-alt/agz-rust-mcp/security/advisories/new
     about: Do not disclose an unpatched vulnerability in a public issue or pull request.
   - name: Ask a usage question
-    url: https://github.com/ugur-murat-alt/rust-code-mcp/discussions
+    url: https://github.com/ugur-murat-alt/agz-rust-mcp/discussions
     about: Use Discussions for setup and usage questions that are not security reports.

@@ -2,12 +2,26 @@
 
 set -euo pipefail
 
-readonly REPOSITORY="ugur-murat-alt/rust-code-mcp"
-readonly BINARY_NAME="agz-rust-coder"
-readonly VERSION="${AGZ_RUST_CODER_VERSION:-0.2.0}"
+readonly REPOSITORY="ugur-murat-alt/agz-rust-mcp"
+readonly BINARY_NAME="agz-rust-mcp"
+readonly VERSION="${AGZ_RUST_MCP_VERSION:-0.2.0}"
+
+# Transitional release identity.
+#
+# Releases up to and including 0.2.0 were published under the former product
+# name: their tags are `agz-rust-coder-v<version>`, their archives are
+# `agz-rust-coder-<platform>-<arch>.tar.gz`, and the archived executable is
+# `agz-rust-coder`. Releases from 0.3.0 onward use `agz-rust-mcp` for the tag,
+# the archive, and the archived executable. The installed executable is always
+# `agz-rust-mcp`; a legacy archive executable is renamed during installation,
+# so this installer keeps working against the published 0.2.0 assets.
+case "$VERSION" in
+  0.1.0 | 0.1.1 | 0.2.0) readonly RELEASE_PREFIX="agz-rust-coder" ;;
+  *) readonly RELEASE_PREFIX="agz-rust-mcp" ;;
+esac
 
 die() {
-  printf 'agz-rust-coder installer: %s\n' "$*" >&2
+  printf 'agz-rust-mcp installer: %s\n' "$*" >&2
   exit 1
 }
 
@@ -42,7 +56,7 @@ case "$(uname -m)" in
 esac
 
 [[ -n "${HOME:-}" ]] || die "HOME is not set"
-readonly INSTALL_DIR="${AGZ_RUST_CODER_INSTALL_DIR:-$HOME/.local/bin}"
+readonly INSTALL_DIR="${AGZ_RUST_MCP_INSTALL_DIR:-$HOME/.local/bin}"
 [[ "$INSTALL_DIR" = /* ]] || die "install directory must be absolute: $INSTALL_DIR"
 
 require_command curl
@@ -51,8 +65,8 @@ require_command mktemp
 require_command tar
 require_command awk
 
-readonly ASSET="${BINARY_NAME}-${PLATFORM}-${ARCHITECTURE}.tar.gz"
-readonly TAG="${BINARY_NAME}-v${VERSION}"
+readonly ASSET="${RELEASE_PREFIX}-${PLATFORM}-${ARCHITECTURE}.tar.gz"
+readonly TAG="${RELEASE_PREFIX}-v${VERSION}"
 readonly BASE_URL="https://github.com/${REPOSITORY}/releases/download/${TAG}"
 
 temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/${BINARY_NAME}.install.XXXXXX")"
@@ -85,16 +99,16 @@ tar -tzf "$temp_dir/$ASSET" > "$temp_dir/archive-entries" \
   || die "could not list release archive"
 mapfile -t archive_entries < "$temp_dir/archive-entries"
 [[ "${#archive_entries[@]}" -eq 1 ]] || die "release archive must contain exactly one file"
-[[ "${archive_entries[0]#./}" = "$BINARY_NAME" ]] \
+[[ "${archive_entries[0]#./}" = "$RELEASE_PREFIX" ]] \
   || die "release archive contains an unexpected path: ${archive_entries[0]}"
 
 mkdir "$temp_dir/extracted"
 tar -xzf "$temp_dir/$ASSET" -C "$temp_dir/extracted"
-extracted_binary="$temp_dir/extracted/$BINARY_NAME"
+extracted_binary="$temp_dir/extracted/$RELEASE_PREFIX"
 [[ -f "$extracted_binary" && ! -L "$extracted_binary" ]] \
   || die "release archive did not contain a regular binary"
 chmod 0755 "$extracted_binary"
-[[ "$("$extracted_binary" --version)" = "$BINARY_NAME $VERSION" ]] \
+[[ "$("$extracted_binary" --version)" = "$RELEASE_PREFIX $VERSION" ]] \
   || die "downloaded binary reported an unexpected version"
 
 mkdir -p -- "$INSTALL_DIR"
@@ -107,7 +121,7 @@ destination="$INSTALL_DIR/$BINARY_NAME"
 
 staged_binary="$(mktemp "$INSTALL_DIR/.${BINARY_NAME}.tmp.XXXXXX")"
 install -m 0755 -- "$extracted_binary" "$staged_binary"
-[[ "$("$staged_binary" --version)" = "$BINARY_NAME $VERSION" ]] \
+[[ "$("$staged_binary" --version)" = "$RELEASE_PREFIX $VERSION" ]] \
   || die "staged binary failed its version check"
 mv -f -- "$staged_binary" "$destination"
 staged_binary=""

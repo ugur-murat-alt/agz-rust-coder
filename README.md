@@ -1,12 +1,12 @@
-# agz-rust-coder
+# agz-rust-mcp
 
-[![CI](https://github.com/ugur-murat-alt/rust-code-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ugur-murat-alt/rust-code-mcp/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/agz-rust-coder.svg)](https://crates.io/crates/agz-rust-coder)
+[![CI](https://github.com/ugur-murat-alt/agz-rust-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ugur-murat-alt/agz-rust-mcp/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/agz-rust-mcp.svg)](https://crates.io/crates/agz-rust-mcp)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 English | [Turkce](README.tr.md)
 
-`agz-rust-coder` is a standalone stdio MCP server for compiler-grounded Rust
+`agz-rust-mcp` is a standalone stdio MCP server for compiler-grounded Rust
 work. It runs bounded Cargo validation, audits source, resolves exact-version
 crate documentation, provides Rust Analyzer navigation, and returns write-free
 rename/refactor packages.
@@ -15,22 +15,22 @@ rename/refactor packages.
 
 | Contract | Value |
 | --- | --- |
-| Crate, binary, server | `agz-rust-coder` |
-| MCP Registry | `io.github.ugur-murat-alt/agz-rust-coder` |
+| Crate, binary, server | `agz-rust-mcp` |
+| MCP Registry | `io.github.ugur-murat-alt/agz-rust-mcp` |
 | Current release | `0.2.0` |
 | First release | `0.1.0` |
-| Release tag | `agz-rust-coder-v<version>` |
+| Release tag | `agz-rust-mcp-v<version>` |
 | Rust edition / MSRV | `2024` / `1.88.0` |
 | Rust MCP SDK | `rmcp` `3.1.4` |
 | Default / discovered protocol | `2025-11-25` / `2026-07-28` |
 
-MCP package ownership marker: `mcp-name: io.github.ugur-murat-alt/agz-rust-coder`.
+MCP package ownership marker: `mcp-name: io.github.ugur-murat-alt/agz-rust-mcp`.
 
 ## Install
 
 ```bash
-cargo install agz-rust-coder --locked
-agz-rust-coder --version
+cargo install agz-rust-mcp --locked
+agz-rust-mcp --version
 ```
 
 The package is source-distributed through crates.io. Release pages also provide
@@ -38,7 +38,7 @@ prebuilt archives and SHA-256 checksums.
 
 ## MCP client setup (OpenCode2 example)
 
-`agz-rust-coder` is a standalone stdio MCP server; any MCP-capable client can
+`agz-rust-mcp` is a standalone stdio MCP server; any MCP-capable client can
 run it. The pinned OpenCode2 host is exercised by the repository's
 compatibility smoke.
 
@@ -51,7 +51,7 @@ OpenCode2 example configuration (`opencode.jsonc`):
     "servers": {
       "rust": {
         "type": "local",
-        "command": ["agz-rust-coder"],
+        "command": ["agz-rust-mcp"],
         "cwd": ".",
         "codemode": false,
         "timeout": {
@@ -104,9 +104,9 @@ semantic infrastructure are protocol errors.
 
 ## Configuration
 
-Precedence is CLI, then `AGZ_RUST_CODER_*` environment variables, then the
+Precedence is CLI, then `AGZ_RUST_MCP_*` environment variables, then the
 explicit `--config` TOML file, then defaults. Environment keys use `__` between
-sections, for example `AGZ_RUST_CODER_GATE__HARD_TIMEOUT_MS=600000`.
+sections, for example `AGZ_RUST_MCP_GATE__HARD_TIMEOUT_MS=600000`.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -137,7 +137,7 @@ persisted timing artifacts under the server-owned `profile-evidence` directory
 are pruned after 24 hours or beyond 64 files. The `profile` result reports this
 retention policy, so expired evidence is visible instead of silently reused.
 
-Run `agz-rust-coder --help` for every CLI field. The complete behavior and
+Run `agz-rust-mcp --help` for every CLI field. The complete behavior and
 default table is in [docs/tools.md](docs/tools.md).
 
 ## Security
@@ -176,8 +176,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), [architecture](docs/architecture.md),
 
 ## Canonical Links
 
-- Repository: https://github.com/ugur-murat-alt/rust-code-mcp
-- Crate: https://crates.io/crates/agz-rust-coder
+- Repository: https://github.com/ugur-murat-alt/agz-rust-mcp
+- Crate: https://crates.io/crates/agz-rust-mcp
 - SDK docs: https://docs.rs/rmcp/3.1.4/rmcp/
 - MCP `2025-11-25`: https://modelcontextprotocol.io/specification/2025-11-25
 - MCP `2026-07-28`: https://modelcontextprotocol.io/specification/2026-07-28

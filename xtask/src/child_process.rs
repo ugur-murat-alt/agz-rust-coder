@@ -171,7 +171,7 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "agz-rust-coder-xtask-timeout-{}-{stamp}",
+            "agz-rust-mcp-xtask-timeout-{}-{stamp}",
             std::process::id()
         ));
         fs::create_dir(&root).expect("create timeout fixture");
