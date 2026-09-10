@@ -3,6 +3,7 @@
 
 pub mod audit;
 pub mod check;
+pub mod context;
 pub mod crate_lookup;
 pub mod edits;
 pub mod navigation;
@@ -13,6 +14,7 @@ pub use audit::{
     AuditRequest, AuditService, AuditSkip, AuditSkipReason, AuditSummary,
 };
 pub use check::CheckService;
+pub use context::{ContextEnvironment, ContextRequest, execute_context};
 pub use crate_lookup::{
     CrateLookupInput, CrateLookupResult, CrateLookupStatus, CratesIoClient, CratesIoError,
     CratesIoRequest, CratesIoResponse, OfflineCratesIoClient, ReqwestCratesIoClient,

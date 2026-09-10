@@ -8,6 +8,7 @@ const ARCHITECTURE_ENGLISH: &str = include_str!("../../../docs/architecture.md")
 const ARCHITECTURE_TURKISH: &str = include_str!("../../../docs/architecture.tr.md");
 const BENCHMARK_ENGLISH: &str = include_str!("../../../docs/benchmark.md");
 const BENCHMARK_TURKISH: &str = include_str!("../../../docs/benchmark.tr.md");
+const PACKAGE_README: &str = include_str!("../README.md");
 
 #[test]
 fn bilingual_public_contract_is_in_sync() {
@@ -102,6 +103,37 @@ fn paired_public_docs_preserve_machine_readable_contracts() {
             "`non_inferiority_margin`",
         ],
     );
+}
+
+#[test]
+fn public_docs_list_the_context_tool_and_configuration() {
+    for document in [ENGLISH, TURKISH, TOOLS_ENGLISH, TOOLS_TURKISH] {
+        assert!(
+            document.contains("`context`"),
+            "missing context tool listing"
+        );
+    }
+    for document in [ENGLISH, TURKISH] {
+        assert!(
+            document.contains("`rust_context`"),
+            "missing rust_context direct-name listing"
+        );
+    }
+    assert!(PACKAGE_README.contains("`context`"));
+    for document in [TOOLS_ENGLISH, TOOLS_TURKISH] {
+        assert!(
+            document.contains("`context.max_capsules`"),
+            "missing context.max_capsules configuration listing"
+        );
+        assert!(
+            document.contains("`context.capsule_ttl_ms`"),
+            "missing context.capsule_ttl_ms configuration listing"
+        );
+        assert!(
+            document.contains("`context.max_items`"),
+            "missing context.max_items configuration listing"
+        );
+    }
 }
 
 fn assert_shared_markers(english: &str, turkish: &str, markers: &[&str]) {

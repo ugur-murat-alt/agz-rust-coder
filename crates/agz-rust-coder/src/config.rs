@@ -48,6 +48,7 @@ pub struct Config {
     pub gate: GateConfig,
     pub rust_analyzer: RustAnalyzerConfig,
     pub docs: DocsConfig,
+    pub context: ContextConfig,
     pub limits: LimitsConfig,
     pub telemetry: TelemetryConfig,
 }
@@ -65,6 +66,7 @@ pub struct ToolConfig {
     pub audit: bool,
     pub crate_lookup: bool,
     pub docs: bool,
+    pub context: bool,
     pub lsp: bool,
     pub rename: bool,
     pub refactor: bool,
@@ -138,6 +140,13 @@ pub enum DocsFallback {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextConfig {
+    pub max_capsules: u64,
+    pub capsule_ttl_ms: u64,
+    pub max_items: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LimitsConfig {
     pub max_rename_edits: u64,
     pub max_refactor_edits: u64,
@@ -184,6 +193,7 @@ impl Config {
                 audit: true,
                 crate_lookup: true,
                 docs: true,
+                context: true,
                 lsp: true,
                 rename: true,
                 refactor: true,
@@ -212,6 +222,11 @@ impl Config {
                 timeout_ms: 300_000,
                 fallback: DocsFallback::Auto,
                 cache_dir: docs_dir,
+            },
+            context: ContextConfig {
+                max_capsules: 32,
+                capsule_ttl_ms: 900_000,
+                max_items: 64,
             },
             limits: LimitsConfig {
                 max_rename_edits: 200,
@@ -341,6 +356,14 @@ impl Config {
             16,
         )?;
         check_range("docs.timeout_ms", self.docs.timeout_ms, 1, 3_600_000)?;
+        check_range("context.max_capsules", self.context.max_capsules, 1, 1_024)?;
+        check_range(
+            "context.capsule_ttl_ms",
+            self.context.capsule_ttl_ms,
+            1_000,
+            86_400_000,
+        )?;
+        check_range("context.max_items", self.context.max_items, 1, 256)?;
         check_range(
             "limits.tool_output_bytes",
             self.limits.tool_output_bytes,
@@ -447,6 +470,9 @@ impl Config {
         if self.tools.docs {
             names.push("docs");
         }
+        if self.tools.context {
+            names.push("context");
+        }
         if self.tools.lsp {
             names.extend([
                 "symbol",
@@ -495,6 +521,8 @@ pub struct CliOptions {
     pub tools_crate_lookup: Option<bool>,
     #[arg(long = "tools-docs")]
     pub tools_docs: Option<bool>,
+    #[arg(long = "tools-context")]
+    pub tools_context: Option<bool>,
     #[arg(long = "tools-lsp")]
     pub tools_lsp: Option<bool>,
     #[arg(long = "tools-rename")]
@@ -539,6 +567,12 @@ pub struct CliOptions {
     pub docs_fallback: Option<String>,
     #[arg(long = "docs-cache-dir")]
     pub docs_cache_dir: Option<PathBuf>,
+    #[arg(long = "context-max-capsules")]
+    pub context_max_capsules: Option<u64>,
+    #[arg(long = "context-capsule-ttl-ms")]
+    pub context_capsule_ttl_ms: Option<u64>,
+    #[arg(long = "context-max-items")]
+    pub context_max_items: Option<u64>,
     #[arg(long = "max-rename-edits")]
     pub max_rename_edits: Option<u64>,
     #[arg(long = "max-refactor-edits")]
@@ -594,6 +628,7 @@ struct FileConfig {
     gate: Option<FileGateConfig>,
     rust_analyzer: Option<FileRustAnalyzerConfig>,
     docs: Option<FileDocsConfig>,
+    context: Option<FileContextConfig>,
     limits: Option<FileLimitsConfig>,
     telemetry: Option<FileTelemetryConfig>,
 }
@@ -612,6 +647,7 @@ struct FileToolConfig {
     audit: Option<bool>,
     crate_lookup: Option<bool>,
     docs: Option<bool>,
+    context: Option<bool>,
     lsp: Option<bool>,
     rename: Option<bool>,
     refactor: Option<bool>,
@@ -690,6 +726,14 @@ enum DocsFallbackFile {
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
+struct FileContextConfig {
+    max_capsules: Option<u64>,
+    capsule_ttl_ms: Option<u64>,
+    max_items: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct FileLimitsConfig {
     max_rename_edits: Option<u64>,
     max_refactor_edits: Option<u64>,
@@ -745,6 +789,7 @@ fn apply_file(config: &mut Config, file: FileConfig) {
         apply_opt(&mut config.tools.audit, tools.audit);
         apply_opt(&mut config.tools.crate_lookup, tools.crate_lookup);
         apply_opt(&mut config.tools.docs, tools.docs);
+        apply_opt(&mut config.tools.context, tools.context);
         apply_opt(&mut config.tools.lsp, tools.lsp);
         apply_opt(&mut config.tools.rename, tools.rename);
         apply_opt(&mut config.tools.refactor, tools.refactor);
@@ -790,6 +835,11 @@ fn apply_file(config: &mut Config, file: FileConfig) {
             config.docs.fallback = value.into();
         }
         apply_opt(&mut config.docs.cache_dir, docs.cache_dir);
+    }
+    if let Some(context) = file.context {
+        apply_opt(&mut config.context.max_capsules, context.max_capsules);
+        apply_opt(&mut config.context.capsule_ttl_ms, context.capsule_ttl_ms);
+        apply_opt(&mut config.context.max_items, context.max_items);
     }
     if let Some(limits) = file.limits {
         apply_opt(&mut config.limits.max_rename_edits, limits.max_rename_edits);
@@ -867,6 +917,7 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
         "TOOLS__AUDIT" => config.tools.audit = parse_bool(value).map_err(invalid)?,
         "TOOLS__CRATE_LOOKUP" => config.tools.crate_lookup = parse_bool(value).map_err(invalid)?,
         "TOOLS__DOCS" => config.tools.docs = parse_bool(value).map_err(invalid)?,
+        "TOOLS__CONTEXT" => config.tools.context = parse_bool(value).map_err(invalid)?,
         "TOOLS__LSP" => config.tools.lsp = parse_bool(value).map_err(invalid)?,
         "TOOLS__RENAME" => config.tools.rename = parse_bool(value).map_err(invalid)?,
         "TOOLS__REFACTOR" => config.tools.refactor = parse_bool(value).map_err(invalid)?,
@@ -909,6 +960,15 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
         "DOCS__TIMEOUT_MS" => config.docs.timeout_ms = parse_u64(value).map_err(invalid)?,
         "DOCS__FALLBACK" => config.docs.fallback = parse_fallback(value).map_err(invalid)?,
         "DOCS__CACHE_DIR" => config.docs.cache_dir = nonempty_path(value).map_err(invalid)?,
+        "CONTEXT__MAX_CAPSULES" => {
+            config.context.max_capsules = parse_u64(value).map_err(invalid)?;
+        }
+        "CONTEXT__CAPSULE_TTL_MS" => {
+            config.context.capsule_ttl_ms = parse_u64(value).map_err(invalid)?;
+        }
+        "CONTEXT__MAX_ITEMS" => {
+            config.context.max_items = parse_u64(value).map_err(invalid)?;
+        }
         "LIMITS__MAX_RENAME_EDITS" => {
             config.limits.max_rename_edits = parse_u64(value).map_err(invalid)?;
         }
@@ -988,6 +1048,7 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
     apply_opt(&mut config.tools.audit, cli.tools_audit);
     apply_opt(&mut config.tools.crate_lookup, cli.tools_crate_lookup);
     apply_opt(&mut config.tools.docs, cli.tools_docs);
+    apply_opt(&mut config.tools.context, cli.tools_context);
     apply_opt(&mut config.tools.lsp, cli.tools_lsp);
     apply_opt(&mut config.tools.rename, cli.tools_rename);
     apply_opt(&mut config.tools.refactor, cli.tools_refactor);
@@ -1036,6 +1097,12 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
             parse_fallback(value).map_err(|message| invalid("docs.fallback", message))?;
     }
     apply_opt(&mut config.docs.cache_dir, cli.docs_cache_dir.clone());
+    apply_opt(&mut config.context.max_capsules, cli.context_max_capsules);
+    apply_opt(
+        &mut config.context.capsule_ttl_ms,
+        cli.context_capsule_ttl_ms,
+    );
+    apply_opt(&mut config.context.max_items, cli.context_max_items);
     apply_opt(&mut config.limits.max_rename_edits, cli.max_rename_edits);
     apply_opt(
         &mut config.limits.max_refactor_edits,
@@ -1611,6 +1678,64 @@ mod tests {
         fs::remove_dir_all(&base).expect("remove canonical missing test root");
 
         assert_invalid_field(result, "gate.cache_dir");
+    }
+
+    #[test]
+    fn context_configuration_wires_toml_environment_and_cli() {
+        let mut cli = cli();
+        cli.tools_context = Some(false);
+        cli.context_max_capsules = Some(8);
+        cli.context_capsule_ttl_ms = Some(9_000);
+        let config = Config::from_sources(
+            "/workspace",
+            Some("[context]\nmax_capsules = 4\ncapsule_ttl_ms = 5000\nmax_items = 8\n"),
+            [
+                ("AGZ_RUST_CODER_CONTEXT__MAX_CAPSULES", "6"),
+                ("AGZ_RUST_CODER_CONTEXT__MAX_ITEMS", "12"),
+                ("AGZ_RUST_CODER_CONTEXT__CAPSULE_TTL_MS", "7000"),
+            ],
+            &cli,
+        )
+        .expect("context configuration layers resolve");
+        assert!(!config.tools.context);
+        assert_eq!(config.context.max_capsules, 8);
+        assert_eq!(config.context.capsule_ttl_ms, 9_000);
+        assert_eq!(config.context.max_items, 12);
+        assert!(
+            !config.enabled_tool_names().contains(&"context"),
+            "tools.context=false must remove the tool from the catalog"
+        );
+
+        // Without the CLI layer, environment beats TOML for the TTL.
+        let env_ttl = Config::from_sources(
+            "/workspace",
+            Some("[context]\ncapsule_ttl_ms = 5000\n"),
+            [("AGZ_RUST_CODER_CONTEXT__CAPSULE_TTL_MS", "7000")],
+            &cli_without_context(),
+        )
+        .expect("context environment TTL resolves");
+        assert_eq!(env_ttl.context.capsule_ttl_ms, 7_000);
+
+        let mut invalid = config;
+        invalid.context.capsule_ttl_ms = 10;
+        assert_invalid_field(invalid.validate(), "context.capsule_ttl_ms");
+
+        let mut invalid_capsules = Config::defaults_at(test_path("context-defaults"));
+        invalid_capsules.context.max_capsules = 0;
+        assert_invalid_field(invalid_capsules.validate(), "context.max_capsules");
+
+        let mut invalid_items = Config::defaults_at(test_path("context-items"));
+        invalid_items.context.max_items = 257;
+        assert_invalid_field(invalid_items.validate(), "context.max_items");
+    }
+
+    fn cli_without_context() -> CliOptions {
+        let mut cli = cli();
+        cli.tools_context = None;
+        cli.context_max_capsules = None;
+        cli.context_capsule_ttl_ms = None;
+        cli.context_max_items = None;
+        cli
     }
 
     #[cfg(unix)]

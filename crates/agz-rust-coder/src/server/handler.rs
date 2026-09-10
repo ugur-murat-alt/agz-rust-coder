@@ -2,7 +2,7 @@ use std::{
     borrow::Cow,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use rmcp::{
@@ -29,16 +29,21 @@ use super::{
 };
 use crate::{
     config::{Config, ConfigError, DocsFallback as ConfigDocsFallback, WorkspaceCode},
+    context::{
+        ContextAction, ContextAnchor, ContextData, MAX_ANCHORS, MAX_CHANGE_ID_CHARS,
+        MAX_PURPOSE_CHARS, MIN_BYTE_BUDGET,
+    },
     docs::{
         DocsFallback as DomainDocsFallback, DocsInput as DomainDocsInput, DocsOptions,
         DocsProvider, DocsStatus,
     },
     gate::{GateDetail, GateEvidence, GateRequest, GateStatus, GateTargetId},
     tools::{
-        AuditCancellation, CrateLookupInput as DomainCrateLookupInput,
-        ToolError as SemanticToolError, document_symbols, semantic_refactor, semantic_rename,
-        symbol_definition, symbol_hierarchy, symbol_hover, symbol_implementations,
-        symbol_references, with_lsp_authority, with_lsp_cancellation,
+        AuditCancellation, ContextEnvironment, ContextRequest as DomainContextRequest,
+        CrateLookupInput as DomainCrateLookupInput, ToolError as SemanticToolError,
+        document_symbols, execute_context, semantic_refactor, semantic_rename, symbol_definition,
+        symbol_hierarchy, symbol_hover, symbol_implementations, symbol_references,
+        with_lsp_authority, with_lsp_cancellation,
     },
     workspace::{ClientRoots, WorkspaceRoot, select_in_root},
 };
@@ -47,6 +52,10 @@ pub const WORKFLOW_RESOURCE_URI: &str = "rust-coder://workflow";
 pub const BORROW_ERRORS_RESOURCE_URI: &str = "rust-coder://borrow-errors";
 pub const PITFALLS_RESOURCE_URI: &str = "rust-coder://pitfalls";
 pub const ICED_RESOURCE_URI: &str = "rust-coder://iced";
+
+/// Bounded upper limit for the `context` metadata sub-step. The gate hard
+/// timeout still caps it when configured lower.
+const CONTEXT_METADATA_TIMEOUT_MS: u64 = 120_000;
 
 const WORKFLOW_RESOURCE: &str = "# Rust Coder workflow\n\nCompiler output is authoritative. Start with ownership and borrowing, verify external crates before adding dependencies, and use semantic results as advisory evidence. Run `check` with `target=all` before delivery. Rename and refactor results are write-free patches.\n";
 const BORROW_ERRORS_RESOURCE: &str = "# Borrowing errors\n\nRead the full compiler diagnostic first. Prefer changing ownership boundaries, borrowing from the caller, or moving a value deliberately before adding clones. A borrow checker error is evidence about a lifetime or aliasing contract, not a request to silence the compiler.\n";
@@ -176,6 +185,40 @@ pub struct SemanticInput {
 }
 
 pub type SymbolInput = SemanticInput;
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContextInput {
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub dir: Option<String>,
+    pub action: ContextAction,
+    #[serde(default)]
+    #[schemars(length(max = 8))]
+    pub anchors: Vec<ContextAnchor>,
+    #[serde(default)]
+    #[schemars(length(min = 1, max = 512))]
+    pub purpose: Option<String>,
+    #[serde(default)]
+    #[schemars(length(min = 1, max = 256))]
+    pub change_id: Option<String>,
+    #[serde(default)]
+    pub byte_budget: Option<u64>,
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub capsule_id: Option<String>,
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub previous_capsule_id: Option<String>,
+    #[serde(default)]
+    #[schemars(length(max = 64), inner(length(min = 1)))]
+    pub item_ids: Vec<String>,
+    #[serde(default)]
+    pub cursor: Option<u32>,
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 32))]
+    pub page_size: Option<u32>,
+}
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -471,6 +514,7 @@ pub type CheckOutput = ToolOutput<CheckData>;
 pub type AuditOutput = ToolOutput<AuditData>;
 pub type CrateLookupOutput = ToolOutput<CrateLookupData>;
 pub type DocsOutput = ToolOutput<DocsData>;
+pub type ContextOutput = ToolOutput<ContextData>;
 pub type SemanticOutput = ToolOutput<SemanticData>;
 pub type EditOutput = ToolOutput<EditData>;
 
@@ -510,6 +554,16 @@ pub fn tool_definitions(config: &Config) -> Vec<Tool> {
             "docs",
             "Resolve bounded, exact-version Rust documentation from configured sources.",
             ToolAnnotations::new().destructive(true).open_world(true),
+        ));
+    }
+    if config.tools.context {
+        tools.push(tool::<ContextInput, ContextData>(
+            "context",
+            "Prepare, expand, or delta a task-focused, revision-bound semantic context capsule.",
+            ToolAnnotations::new()
+                .read_only(true)
+                .idempotent(true)
+                .open_world(true),
         ));
     }
     if config.tools.lsp {
@@ -887,6 +941,115 @@ impl RustCoderServer {
         edit_result(&self.state, "refactor", result)
     }
 
+    async fn context(
+        &self,
+        input: ContextInput,
+        workspace: WorkspaceRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> CallToolResult {
+        let request = DomainContextRequest {
+            action: input.action,
+            anchors: input.anchors.clone(),
+            purpose: input.purpose.clone(),
+            change_id: input.change_id.clone(),
+            byte_budget: input.byte_budget,
+            capsule_id: input.capsule_id.clone(),
+            previous_capsule_id: input.previous_capsule_id.clone(),
+            item_ids: input.item_ids.clone(),
+            cursor: input.cursor,
+            page_size: input.page_size,
+        };
+        if cancellation.is_cancelled() {
+            return context_cancelled(&self.state, &input);
+        }
+        let (snapshot, snapshot_error) =
+            if matches!(input.action, ContextAction::Prepare | ContextAction::Delta) {
+                self.context_snapshot(&workspace.root, cancellation.clone())
+                    .await
+            } else {
+                (None, None)
+            };
+        if cancellation.is_cancelled() {
+            return context_cancelled(&self.state, &input);
+        }
+        let manager = self.state.lsp_manager().cloned();
+        let timeout = Duration::from_millis(self.state.config().rust_analyzer.timeout_ms);
+        let env = ContextEnvironment {
+            manager: manager.as_deref(),
+            root: &workspace.root,
+            snapshot: snapshot.as_deref(),
+            snapshot_error,
+            store: self.state.capsule_store(),
+            timeout,
+            max_items: usize::try_from(self.state.config().context.max_items).unwrap_or(usize::MAX),
+            tool_output_bytes: self.state.max_output_bytes(),
+        };
+        let data = if manager.is_some() {
+            Box::pin(with_lsp_authority(
+                workspace.root.requested_authority().clone(),
+                execute_context(request, env),
+            ))
+            .await
+        } else {
+            Box::pin(execute_context(request, env)).await
+        };
+        context_result(&self.state, data)
+    }
+
+    /// Controlled metadata acquisition for `context`, mirroring the check
+    /// preflight: bounded deadline, request/shutdown-aware cancellation, and
+    /// supervised authorized execution instead of the uncancellable runner.
+    async fn context_snapshot(
+        &self,
+        root: &WorkspaceRoot,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> (
+        Option<Arc<crate::workspace::WorkspaceSnapshot>>,
+        Option<String>,
+    ) {
+        if cancellation.is_cancelled() {
+            return (None, Some("cargo metadata was cancelled".to_owned()));
+        }
+        let selection = match select_in_root(root) {
+            Ok(selection) => selection,
+            Err(_) => {
+                return (
+                    None,
+                    Some(
+                        "workspace selection failed inside the authorized roots; dependency and feature evidence is omitted"
+                            .to_owned(),
+                    ),
+                );
+            }
+        };
+        let cargo = crate::tools::check::resolve_cargo(self.state.config().cargo.path.as_deref());
+        let deadline_ms = self
+            .state
+            .config()
+            .gate
+            .hard_timeout_ms
+            .min(CONTEXT_METADATA_TIMEOUT_MS);
+        let control = crate::workspace::metadata::MetadataControl::new(
+            Instant::now() + Duration::from_millis(deadline_ms),
+            cancellation,
+            self.state.processes.clone(),
+            tokio::runtime::Handle::current(),
+        );
+        let metadata = Arc::clone(self.state.metadata_service());
+        match tokio::task::spawn_blocking(move || {
+            metadata.acquire_controlled(&selection, cargo, &control)
+        })
+        .await
+        {
+            Ok(Ok(load)) => (Some(load.snapshot), None),
+            Ok(Err(error)) => (None, Some(metadata_failure_label(&error))),
+            Err(_) => (
+                None,
+                Some("cargo metadata worker did not complete".to_owned()),
+            ),
+        }
+    }
+
     async fn resolve_workspace(
         &self,
         directory: Option<&str>,
@@ -1168,6 +1331,36 @@ impl ServerHandler for RustCoderServer {
                 Ok(CallToolResponse::Complete(
                     self.docs(input, workspace, context.ct.clone(), permit)
                         .await,
+                ))
+            }
+            "context" => {
+                let input: ContextInput = parse_input(arguments)?;
+                validate_context(&input)?;
+                let Ok(_permit) = self.state.try_admit() else {
+                    return Ok(CallToolResponse::Complete(resource_blocked_context(
+                        &self.state,
+                        &input,
+                    )));
+                };
+                let workspace = match self.resolve_workspace(input.dir.as_deref(), &context).await {
+                    Ok(workspace) => workspace,
+                    Err(reason) => {
+                        return Ok(CallToolResponse::Complete(inconclusive_context(
+                            &self.state,
+                            &input,
+                            reason,
+                        )));
+                    }
+                };
+                let cancellation =
+                    workspace.cancellation(context.ct.clone(), self.state.shutdown_token());
+                let token = cancellation.token();
+                Ok(CallToolResponse::Complete(
+                    Box::pin(with_lsp_cancellation(
+                        token.clone(),
+                        self.context(input, workspace, token),
+                    ))
+                    .await,
                 ))
             }
             "symbol" | "references" | "definition" => {
@@ -1594,6 +1787,112 @@ fn validate_docs(input: &DocsInput) -> Result<(), McpError> {
     }
     if let Some(source) = input.source.as_deref() {
         validate_string(source, "source")?;
+    }
+    Ok(())
+}
+
+fn validate_context(input: &ContextInput) -> Result<(), McpError> {
+    validate_dir(input.dir.as_deref())?;
+    if input.anchors.len() > MAX_ANCHORS {
+        return Err(McpError::invalid_params(
+            format!("anchors accepts at most {MAX_ANCHORS} items"),
+            None,
+        ));
+    }
+    if let Some(purpose) = input.purpose.as_deref() {
+        validate_string(purpose, "purpose")?;
+        if purpose.chars().count() > MAX_PURPOSE_CHARS {
+            return Err(McpError::invalid_params(
+                format!("purpose accepts at most {MAX_PURPOSE_CHARS} characters"),
+                None,
+            ));
+        }
+    }
+    if let Some(change_id) = input.change_id.as_deref() {
+        validate_string(change_id, "changeId")?;
+        if change_id.chars().count() > MAX_CHANGE_ID_CHARS {
+            return Err(McpError::invalid_params(
+                format!("changeId accepts at most {MAX_CHANGE_ID_CHARS} characters"),
+                None,
+            ));
+        }
+    }
+    if let Some(byte_budget) = input.byte_budget
+        && byte_budget < MIN_BYTE_BUDGET
+    {
+        return Err(McpError::invalid_params(
+            format!("byteBudget must be at least {MIN_BYTE_BUDGET}"),
+            None,
+        ));
+    }
+    if input.item_ids.len() > 64 {
+        return Err(McpError::invalid_params(
+            "itemIds accepts at most 64 items",
+            None,
+        ));
+    }
+    if let Some(page_size) = input.page_size
+        && !(1..=32).contains(&page_size)
+    {
+        return Err(McpError::invalid_params(
+            "pageSize must be between 1 and 32",
+            None,
+        ));
+    }
+    for anchor in &input.anchors {
+        match anchor {
+            ContextAnchor::File { file, range } => {
+                validate_string(file, "anchors[].file")?;
+                if let Some(range) = range
+                    && (range.start_line == 0 || range.end_line == 0)
+                {
+                    return Err(McpError::invalid_params(
+                        "anchor range lines must be at least 1",
+                        None,
+                    ));
+                }
+            }
+            ContextAnchor::Symbol { symbol, file, line } => {
+                validate_string(symbol, "anchors[].symbol")?;
+                if let Some(file) = file.as_deref() {
+                    validate_string(file, "anchors[].file")?;
+                }
+                validate_line(*line)?;
+            }
+        }
+    }
+    match input.action {
+        ContextAction::Prepare => {
+            if input.anchors.is_empty() {
+                return Err(McpError::invalid_params(
+                    "prepare requires at least one anchor",
+                    None,
+                ));
+            }
+        }
+        ContextAction::Expand => {
+            if input.capsule_id.as_deref().is_none_or(str::is_empty) {
+                return Err(McpError::invalid_params("expand requires capsuleId", None));
+            }
+        }
+        ContextAction::Delta => {
+            if input
+                .previous_capsule_id
+                .as_deref()
+                .is_none_or(str::is_empty)
+            {
+                return Err(McpError::invalid_params(
+                    "delta requires previousCapsuleId",
+                    None,
+                ));
+            }
+            if input.anchors.is_empty() {
+                return Err(McpError::invalid_params(
+                    "delta requires the current anchors",
+                    None,
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -2415,6 +2714,111 @@ fn inconclusive_docs(state: &AppState, input: DocsInput, reason: String) -> Call
     .into_call_tool_result(state.max_output_bytes(), true)
 }
 
+fn resource_blocked_context(state: &AppState, input: &ContextInput) -> CallToolResult {
+    let mut data = ContextData::failure(input.action, "RESOURCE_BLOCKED", RESOURCE_BLOCKED_REASON);
+    data.anchors = input.anchors.clone();
+    context_result(state, data)
+}
+
+fn context_cancelled(state: &AppState, input: &ContextInput) -> CallToolResult {
+    let mut data = ContextData::failure(
+        input.action,
+        "CANCELLED",
+        "the context request was cancelled before or during bounded metadata acquisition",
+    );
+    data.anchors = input.anchors.clone();
+    context_result(state, data)
+}
+
+fn inconclusive_context(state: &AppState, input: &ContextInput, _reason: String) -> CallToolResult {
+    // Workspace-resolution errors can carry canonical server paths; the context
+    // payload keeps a bounded label instead.
+    let mut data = ContextData::failure(
+        input.action,
+        "INCONCLUSIVE",
+        "the context workspace could not be resolved inside the configured roots",
+    );
+    data.anchors = input.anchors.clone();
+    context_result(state, data)
+}
+
+fn metadata_failure_label(error: &crate::workspace::MetadataError) -> String {
+    use crate::workspace::MetadataError;
+    match error {
+        MetadataError::Cancelled => "cargo metadata was cancelled".to_owned(),
+        MetadataError::TimedOut => "cargo metadata exceeded its bounded deadline".to_owned(),
+        MetadataError::LockedRequired => {
+            "cargo metadata requires an up-to-date Cargo.lock".to_owned()
+        }
+        MetadataError::RootEpochChanged { .. } => {
+            "cargo metadata was invalidated by a root epoch change".to_owned()
+        }
+        MetadataError::Root(_) | MetadataError::Selection(_) => {
+            "cargo metadata could not resolve the authorized workspace".to_owned()
+        }
+        MetadataError::PathDependencyBlocked(_)
+        | MetadataError::PathDependencyMissing(_)
+        | MetadataError::UnexpectedExternalPath(_)
+        | MetadataError::WorkspaceRootOutside(_) => {
+            "cargo metadata found an unauthorized or missing dependency path".to_owned()
+        }
+        MetadataError::InvalidManifest(_)
+        | MetadataError::ManifestTooLarge(_)
+        | MetadataError::ManifestParse { .. } => {
+            "cargo metadata could not read a bounded manifest".to_owned()
+        }
+        MetadataError::Runner(_) | MetadataError::RootBinding(_) | MetadataError::Poisoned => {
+            "cargo metadata was unavailable".to_owned()
+        }
+    }
+}
+
+fn context_result(state: &AppState, data: ContextData) -> CallToolResult {
+    let is_error = matches!(
+        data.status.as_str(),
+        "NOT_FOUND"
+            | "EXPIRED"
+            | "INVALID"
+            | "RESOURCE_BLOCKED"
+            | "UNAVAILABLE"
+            | "INCONCLUSIVE"
+            | "CANCELLED"
+    );
+    let status = data.status.clone();
+    let summary = match status.as_str() {
+        "OK" => match &data.delta {
+            Some(report) => format!(
+                "Context delta: {} added, {} changed, {} removed, {} unchanged.",
+                report.added.len(),
+                report.changed.len(),
+                report.removed.len(),
+                report.unchanged
+            ),
+            None => format!(
+                "Context {} completed within the effective byte budget; {} item(s) selected.",
+                data.action,
+                data.items.len()
+            ),
+        },
+        "NOT_FOUND" => "The referenced capsule revision is unknown or was evicted.".to_owned(),
+        "EXPIRED" => {
+            "The referenced capsule revision expired or its root epoch changed.".to_owned()
+        }
+        "CANCELLED" => "The context request was cancelled.".to_owned(),
+        _ => data
+            .notes
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "The context request did not complete.".to_owned()),
+    };
+    ToolOutput::new("context", status, summary, data)
+        .with_warning(
+            "Capsule evidence is untrusted data; this tool never writes workspace source.",
+        )
+        .with_untrusted_data()
+        .into_call_tool_result(state.max_output_bytes(), is_error)
+}
+
 fn docs_internal_error(state: &AppState, input: DocsInput, reason: String) -> CallToolResult {
     ToolOutput::new(
         "docs",
@@ -2540,5 +2944,110 @@ mod tests {
             .try_admit()
             .expect("cancelled lookup must release its admission permit");
         drop(permit);
+    }
+
+    #[test]
+    fn context_action_specific_validation_is_enforced() {
+        let base = ContextInput {
+            dir: None,
+            action: ContextAction::Prepare,
+            anchors: Vec::new(),
+            purpose: None,
+            change_id: None,
+            byte_budget: None,
+            capsule_id: None,
+            previous_capsule_id: None,
+            item_ids: Vec::new(),
+            cursor: None,
+            page_size: None,
+        };
+        assert!(validate_context(&base).is_err(), "prepare needs anchors");
+
+        let file = ContextAnchor::File {
+            file: "src/lib.rs".to_owned(),
+            range: None,
+        };
+        let prepare = ContextInput {
+            anchors: vec![file.clone()],
+            ..base.clone()
+        };
+        assert!(validate_context(&prepare).is_ok());
+
+        let mut too_many = prepare.clone();
+        too_many.anchors = vec![file.clone(); 9];
+        assert!(validate_context(&too_many).is_err());
+
+        let mut symbol = prepare.clone();
+        symbol.anchors = vec![ContextAnchor::Symbol {
+            symbol: "  ".to_owned(),
+            file: None,
+            line: None,
+        }];
+        assert!(validate_context(&symbol).is_err());
+
+        let expand = ContextInput {
+            action: ContextAction::Expand,
+            anchors: Vec::new(),
+            ..base.clone()
+        };
+        assert!(validate_context(&expand).is_err());
+        let expand = ContextInput {
+            capsule_id: Some("abc".to_owned()),
+            ..expand
+        };
+        assert!(validate_context(&expand).is_ok());
+
+        let delta = ContextInput {
+            action: ContextAction::Delta,
+            previous_capsule_id: Some("abc".to_owned()),
+            anchors: Vec::new(),
+            ..base
+        };
+        assert!(validate_context(&delta).is_err());
+        let delta = ContextInput {
+            anchors: vec![file],
+            ..delta
+        };
+        assert!(validate_context(&delta).is_ok());
+    }
+
+    #[tokio::test]
+    async fn context_failures_render_typed_untrusted_statuses() {
+        let root = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR"))
+            .expect("canonical crate root for test state");
+        let mut config = Config::defaults_at(root);
+        config.telemetry.enabled = false;
+        let state = AppState::new(config).expect("create test state");
+        let result = context_result(
+            &state,
+            ContextData::failure(ContextAction::Expand, "EXPIRED", "capsule TTL elapsed"),
+        );
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.expect("structured result");
+        assert_eq!(structured["status"], "EXPIRED");
+        assert_eq!(structured["untrustedData"], true);
+        assert_eq!(structured["tool"], "context");
+    }
+
+    #[tokio::test]
+    async fn context_snapshot_honors_a_pre_cancelled_token() {
+        let root = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR"))
+            .expect("canonical crate root for test state");
+        let mut config = Config::defaults_at(root.clone());
+        config.telemetry.enabled = false;
+        let state = Arc::new(AppState::new(config).expect("create test state"));
+        let server = RustCoderServer::from_state(state);
+        let guard = crate::workspace::RootGuard::new([root], std::iter::empty())
+            .expect("authorize test root");
+        let snapshot = guard
+            .snapshot(ClientRoots::unsupported())
+            .expect("snapshot test root");
+        let workspace = snapshot.select(None).expect("select test root");
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+
+        let (snapshot, error) = server.context_snapshot(&workspace, token).await;
+        assert!(snapshot.is_none());
+        assert_eq!(error.as_deref(), Some("cargo metadata was cancelled"));
     }
 }

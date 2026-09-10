@@ -5,12 +5,13 @@ mod progress;
 mod response;
 mod tasks;
 
+pub use crate::context::ContextData;
 pub use handler::{
     AuditData, AuditInput, AuditOutput, CheckData, CheckDetail, CheckInput, CheckOutput,
-    CheckTarget, CrateLookupData, CrateLookupInput, CrateLookupOutput, DocsData, DocsInput,
-    DocsOutput, EditData, EditOutput, HierarchyDirection, HierarchyInput, ImplementationsInput,
-    RefactorInput, RenameInput, RustCoderServer, SemanticData, SemanticInput, SemanticOutput,
-    SymbolInput, SymbolsInput, tool_definitions,
+    CheckTarget, ContextInput, ContextOutput, CrateLookupData, CrateLookupInput, CrateLookupOutput,
+    DocsData, DocsInput, DocsOutput, EditData, EditOutput, HierarchyDirection, HierarchyInput,
+    ImplementationsInput, RefactorInput, RenameInput, RustCoderServer, SemanticData, SemanticInput,
+    SemanticOutput, SymbolInput, SymbolsInput, tool_definitions,
 };
 pub use progress::ProgressReporter;
 pub use response::{ToolData, ToolOutput, WorkspaceInfo};
@@ -23,6 +24,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 use futures::future::{BoxFuture, FutureExt, Shared};
@@ -31,12 +33,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::{Config, ConfigError},
+    context::CapsuleStore,
     docs::DocsResolver,
     lsp::RustAnalyzerManager,
     process::{ProcessJournal, ProcessSupervisor},
     telemetry::ActivityLog,
     tools::{AuditLimits, AuditService, CheckService},
-    workspace::{AuthorizedRoot, RootGuard},
+    workspace::{AuthorizedRoot, MetadataService, RootGuard},
 };
 use admission::AdmissionController;
 use client_roots::ClientRootsCoordinator;
@@ -51,6 +54,8 @@ pub struct AppState {
     check: Arc<CheckService>,
     audit: AuditService,
     docs: Arc<DocsResolver>,
+    metadata: Arc<MetadataService>,
+    capsules: Arc<CapsuleStore>,
     cargo_home: Option<Arc<AuthorizedRoot>>,
     lsp: Option<Arc<RustAnalyzerManager>>,
     admission: AdmissionController,
@@ -128,6 +133,11 @@ impl AppState {
             Arc::clone(&roots),
             processes.clone(),
         ));
+        let metadata = Arc::new(MetadataService::new(Arc::clone(&roots)));
+        let capsules = Arc::new(CapsuleStore::new(
+            usize::try_from(config.context.max_capsules).unwrap_or(usize::MAX),
+            Duration::from_millis(config.context.capsule_ttl_ms),
+        ));
         let audit = AuditService::new(AuditLimits::from_u64(
             config.limits.audit_files,
             config.limits.audit_file_bytes,
@@ -151,6 +161,8 @@ impl AppState {
             check,
             audit,
             docs: Arc::new(DocsResolver::with_authorized_supervisor(processes)),
+            metadata,
+            capsules,
             cargo_home,
             lsp,
             admission,
@@ -275,6 +287,14 @@ impl AppState {
 
     pub(crate) fn docs_service(&self) -> &Arc<DocsResolver> {
         &self.docs
+    }
+
+    pub(crate) fn metadata_service(&self) -> &Arc<MetadataService> {
+        &self.metadata
+    }
+
+    pub(crate) fn capsule_store(&self) -> &Arc<CapsuleStore> {
+        &self.capsules
     }
 
     pub(crate) fn cargo_home(&self) -> Option<&Arc<AuthorizedRoot>> {

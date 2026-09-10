@@ -2,6 +2,7 @@
 
 pub mod cache;
 pub mod config;
+pub mod context;
 pub mod diagnostics;
 pub mod docs;
 pub mod gate;
