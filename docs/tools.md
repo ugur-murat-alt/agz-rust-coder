@@ -7,7 +7,7 @@ and operate it. [Architecture](architecture.md) explains the process model
 behind these tools.
 
 This document defines the public tool and configuration surface of
-`agz-rust-mcp` `0.2.0`.
+`agz-rust-mcp` `0.3.0`.
 
 Request deadlines and cancellation also cover Git probes and input-identity
 collection before and after Cargo. Git subprocesses use the shared process

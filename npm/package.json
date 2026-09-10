@@ -1,6 +1,6 @@
 {
   "name": "@agz-yazilim/agz-rust-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Standalone stdio MCP server for Rust correctness: compiler-backed check, test, docs, audit, and semantic tooling for MCP clients. An AGZ Yazılım product.",
   "type": "module",
   "bin": {

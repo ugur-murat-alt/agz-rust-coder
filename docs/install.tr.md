@@ -60,7 +60,7 @@ yeniden indirin. Ortam değişkenleri:
 | `AGZ_RUST_MCP_INSTALL_DIR` | `$HOME/.local/bin` | Mutlak kurulum dizini. |
 
 ```bash
-AGZ_RUST_MCP_VERSION=0.2.0 AGZ_RUST_MCP_INSTALL_DIR="$HOME/.local/bin" bash install.sh
+AGZ_RUST_MCP_VERSION=0.3.0 AGZ_RUST_MCP_INSTALL_DIR="$HOME/.local/bin" bash install.sh
 ```
 
 Betik ayrıca arşiv düzenini ve çıkarılan binary'nin `--version` çıktısını
@@ -122,7 +122,7 @@ agz-rust-mcp --version
 ```
 
 `--locked`, `Cargo.lock` içinde kayıtlı tam bağımlılık sürümleriyle derler.
-Belirli bir sürüm için `cargo install agz-rust-mcp --version 0.2.0 --locked`
+Belirli bir sürüm için `cargo install agz-rust-mcp --version 0.3.0 --locked`
 kullanın. Cargo `$HOME/.cargo/bin` (Windows'ta `%USERPROFILE%\.cargo\bin`)
 dizinine kurar; bu dizinin `PATH` içinde olduğundan emin olun.
 
