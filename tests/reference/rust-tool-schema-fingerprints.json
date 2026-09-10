@@ -139,5 +139,13 @@
     },
     "inputSchemaHash": "fnv1a64:707bec7ec26c5fc8",
     "outputSchemaHash": "fnv1a64:eeaf84b47f98d84f"
+  },
+  "verify": {
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": true
+    },
+    "inputSchemaHash": "fnv1a64:bee12c0df6519d01",
+    "outputSchemaHash": "fnv1a64:9ae61f0d8d4e055b"
   }
 }

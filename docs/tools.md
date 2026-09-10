@@ -21,6 +21,7 @@ Failed compilations are revalidated before offering edit/context evidence. Trunc
 | `docs` | rustdoc/docs.rs | May use cache, network, or local `cargo doc` | Exact-version excerpt and provenance or typed unavailability. |
 | `context` | Rust Analyzer, workspace source, cargo metadata | Never writes source | Revision-bound capsule of definitions, consumers, tests, signatures, dependency/feature evidence, and bounded excerpts with per-item reasons. |
 | `explain` | rustc/Cargo plus advisory Rust Analyzer | Runs a bounded Cargo check for `macro`/`trait`; metadata-only for `cfg` | Provenance-labelled fragments; missing expansion mapping is `unknown`, never guessed. |
+| `verify` | Cargo/rustc | May build bounded matrix cells | Cell plan or bounded matrix run with per-cell typed status, evidence, and coverage limits. |
 | `symbol` | Rust Analyzer | Depends on workspace-code policy | Hover text and selected location. |
 | `references` | Rust Analyzer | Depends on workspace-code policy | Bounded reference locations. |
 | `definition` | Rust Analyzer | Depends on workspace-code policy | Selected definition location. |
@@ -182,6 +183,7 @@ use the platform path-list separator.
 | `tools.docs` | `true` | Register `docs`. |
 | `tools.context` | `true` | Register `context`. |
 | `tools.explain` | `true` | Register `explain`. |
+| `tools.verify` | `true` | Register `verify`. |
 | `tools.lsp` | `true` | Register semantic navigation tools. |
 | `tools.rename` | `true` | Register `rename` when LSP is enabled. |
 | `tools.refactor` | `true` | Register `refactor` when LSP is enabled. |
@@ -199,6 +201,8 @@ use the platform path-list separator.
 | `profile.max_report_bytes` | `4194304` | Bounded read/store cap for one Cargo timing artifact. |
 | `profile.max_runs` | `4` | Fresh Cargo runs available to one `profile` call. |
 | `profile.compare_samples` | `3` | Required samples per side before any speed claim. |
+| `verify.max_cells` | `8` | Hard ceiling for matrix cells planned or executed per request. |
+| `verify.max_wall_ms` | `120000` | Hard wall-clock ceiling for one matrix run. |
 | `rust_analyzer.path` | PATH or rustup | Optional binary override. |
 | `rust_analyzer.timeout_ms` | `30000` | Semantic request deadline. |
 | `rust_analyzer.idle_ms` | `900000` | Idle process lifetime. |
@@ -257,6 +261,44 @@ the process. `allow` is an explicit opt-in to workspace code execution.
 - [Architecture](architecture.md)
 - [Benchmark protocol](benchmark.md)
 - [Security policy](../SECURITY.md)
+
+## Configuration Matrix (`verify`)
+
+`verify` plans (`action=matrix_plan`) or executes (`action=matrix_run`) a bounded
+matrix over features, targets, toolchains, and development stages. Each cell
+records package scope, features/default-features, target triple, toolchain/MSRV,
+profile, stage (`check`, `clippy`, `test`, `doc`), and runner.
+
+Planning derives candidates from `cargo metadata` plus explicit project policy
+under `[workspace.metadata.agz-verify]` (or the first workspace member's
+`[package.metadata.agz-verify]`):
+
+- `feature-groups`: arrays of explicitly supported feature names;
+- `mutually-exclusive-features`: groups whose members must not be enabled
+  together;
+- `targets`: supported built-in target triples, planned only when installed;
+- `msrv`: a rustup toolchain selector overriding the package `rust-version`;
+- `stages`: default stages when the request omits them.
+
+CI workflow files under `.github/workflows` are read as literal configuration
+input only and are never executed as shell. Unsupported combinations are
+reported as `UNSUPPORTED_CONFIGURATION`; they are not product regressions, and
+`--all-features` is never merged blindly.
+
+Every runnable cell executes through the bounded `CheckService` gate. Cell
+statuses are `PASS`, `FAIL`, `NOT_INSTALLED`, `RUNNER_UNAVAILABLE`,
+`SKIPPED_BUDGET`, `UNSUPPORTED_CONFIGURATION`, `TIMEOUT`, `CANCELLED`,
+`INCONCLUSIVE`, and `RESOURCE_BLOCKED`; skipped or incomplete cells are never
+green. `FULL_REQUESTED_MATRIX` is returned only when every requested cell
+completed; budget exhaustion returns completed and missing cell ids separately.
+Non-host targets are compile-only and never claim test execution on that
+platform. The MSRV cell runs the installed toolchain's own `cargo`, so the
+command hash binds the actually selected compiler. No toolchain, target, or
+dependency is downloaded, and the existing network policy is preserved.
+
+The planner is a bounded enumerator and marks its output `NOT exhaustive`.
+Each result binds source/lock/config/toolchain through the gate identity and
+command hashes; a completed `PASS` is never reused for a new explicit run.
 
 ## Explicit validation options
 

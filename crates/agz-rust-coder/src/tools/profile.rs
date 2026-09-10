@@ -391,6 +391,7 @@ impl ProfileService {
         let gate_request = GateRequest {
             options: request.options.clone(),
             directory: request.directory.clone(),
+            toolchain: None,
             target: request.target,
             timings: true,
             detail: GateDetail::Standard,

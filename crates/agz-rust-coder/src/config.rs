@@ -47,6 +47,7 @@ pub struct Config {
     pub cargo: CargoConfig,
     pub gate: GateConfig,
     pub change: ChangeConfig,
+    pub verify: VerifyConfig,
     pub rust_analyzer: RustAnalyzerConfig,
     pub docs: DocsConfig,
     pub context: ContextConfig,
@@ -70,6 +71,7 @@ pub struct ToolConfig {
     pub crate_lookup: bool,
     pub docs: bool,
     pub context: bool,
+    pub verify: bool,
     pub lsp: bool,
     pub explain: bool,
     pub rename: bool,
@@ -93,6 +95,12 @@ pub struct GateConfig {
     pub min_available_memory_mb: u64,
     pub cache_dir: PathBuf,
     pub lease_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifyConfig {
+    pub max_cells: u64,
+    pub max_wall_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -218,6 +226,7 @@ impl Config {
                 crate_lookup: true,
                 docs: true,
                 context: true,
+                verify: true,
                 lsp: true,
                 explain: true,
                 rename: true,
@@ -243,6 +252,10 @@ impl Config {
                 max_bytes: 268_435_456,
                 ttl_ms: 86_400_000,
                 max_revisions: 32,
+            },
+            verify: VerifyConfig {
+                max_cells: 8,
+                max_wall_ms: 120_000,
             },
             rust_analyzer: RustAnalyzerConfig {
                 path: None,
@@ -376,6 +389,13 @@ impl Config {
         )?;
         check_range("gate.debounce_ms", self.gate.debounce_ms, 0, 5_000)?;
         check_range("gate.host_concurrency", self.gate.host_concurrency, 1, 64)?;
+        check_range("verify.max_cells", self.verify.max_cells, 1, 64)?;
+        check_range(
+            "verify.max_wall_ms",
+            self.verify.max_wall_ms,
+            1_000,
+            3_600_000,
+        )?;
         check_range(
             "rust_analyzer.timeout_ms",
             self.rust_analyzer.timeout_ms,
@@ -541,6 +561,9 @@ impl Config {
         if self.tools.explain {
             names.push("explain");
         }
+        if self.tools.verify {
+            names.push("verify");
+        }
         if self.tools.lsp {
             names.extend([
                 "symbol",
@@ -596,6 +619,8 @@ pub struct CliOptions {
     pub tools_docs: Option<bool>,
     #[arg(long = "tools-context")]
     pub tools_context: Option<bool>,
+    #[arg(long = "tools-verify")]
+    pub tools_verify: Option<bool>,
     #[arg(long = "tools-lsp")]
     pub tools_lsp: Option<bool>,
     #[arg(long = "tools-explain")]
@@ -638,6 +663,10 @@ pub struct CliOptions {
     pub change_ttl_ms: Option<u64>,
     #[arg(long = "change-max-revisions")]
     pub change_max_revisions: Option<u64>,
+    #[arg(long = "verify-max-cells")]
+    pub verify_max_cells: Option<u64>,
+    #[arg(long = "verify-max-wall-ms")]
+    pub verify_max_wall_ms: Option<u64>,
     #[arg(long = "rust-analyzer-path")]
     pub rust_analyzer_path: Option<PathBuf>,
     #[arg(long = "rust-analyzer-timeout-ms")]
@@ -722,6 +751,7 @@ struct FileConfig {
     cargo: Option<FileCargoConfig>,
     gate: Option<FileGateConfig>,
     change: Option<FileChangeConfig>,
+    verify: Option<FileVerifyConfig>,
     rust_analyzer: Option<FileRustAnalyzerConfig>,
     docs: Option<FileDocsConfig>,
     context: Option<FileContextConfig>,
@@ -746,6 +776,7 @@ struct FileToolConfig {
     crate_lookup: Option<bool>,
     docs: Option<bool>,
     context: Option<bool>,
+    verify: Option<bool>,
     lsp: Option<bool>,
     explain: Option<bool>,
     rename: Option<bool>,
@@ -779,6 +810,13 @@ enum GateScopeFile {
     Workspace,
     Shadow,
     Affected,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct FileVerifyConfig {
+    max_cells: Option<u64>,
+    max_wall_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -910,6 +948,7 @@ fn apply_file(config: &mut Config, file: FileConfig) {
         apply_opt(&mut config.tools.crate_lookup, tools.crate_lookup);
         apply_opt(&mut config.tools.docs, tools.docs);
         apply_opt(&mut config.tools.context, tools.context);
+        apply_opt(&mut config.tools.verify, tools.verify);
         apply_opt(&mut config.tools.lsp, tools.lsp);
         apply_opt(&mut config.tools.explain, tools.explain);
         apply_opt(&mut config.tools.rename, tools.rename);
@@ -946,6 +985,10 @@ fn apply_file(config: &mut Config, file: FileConfig) {
         apply_opt(&mut config.change.max_bytes, change.max_bytes);
         apply_opt(&mut config.change.ttl_ms, change.ttl_ms);
         apply_opt(&mut config.change.max_revisions, change.max_revisions);
+    }
+    if let Some(verify) = file.verify {
+        apply_opt(&mut config.verify.max_cells, verify.max_cells);
+        apply_opt(&mut config.verify.max_wall_ms, verify.max_wall_ms);
     }
     if let Some(ra) = file.rust_analyzer {
         if let Some(path) = ra.path {
@@ -1057,6 +1100,7 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
         "TOOLS__CRATE_LOOKUP" => config.tools.crate_lookup = parse_bool(value).map_err(invalid)?,
         "TOOLS__DOCS" => config.tools.docs = parse_bool(value).map_err(invalid)?,
         "TOOLS__CONTEXT" => config.tools.context = parse_bool(value).map_err(invalid)?,
+        "TOOLS__VERIFY" => config.tools.verify = parse_bool(value).map_err(invalid)?,
         "TOOLS__LSP" => config.tools.lsp = parse_bool(value).map_err(invalid)?,
         "TOOLS__EXPLAIN" => config.tools.explain = parse_bool(value).map_err(invalid)?,
         "TOOLS__RENAME" => config.tools.rename = parse_bool(value).map_err(invalid)?,
@@ -1098,6 +1142,8 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
         "CHANGE__MAX_REVISIONS" => {
             config.change.max_revisions = parse_u64(value).map_err(invalid)?;
         }
+        "VERIFY__MAX_CELLS" => config.verify.max_cells = parse_u64(value).map_err(invalid)?,
+        "VERIFY__MAX_WALL_MS" => config.verify.max_wall_ms = parse_u64(value).map_err(invalid)?,
         "RUST_ANALYZER__PATH" => {
             config.rust_analyzer.path = Some(nonempty_path(value).map_err(invalid)?);
         }
@@ -1216,6 +1262,7 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
     apply_opt(&mut config.tools.crate_lookup, cli.tools_crate_lookup);
     apply_opt(&mut config.tools.docs, cli.tools_docs);
     apply_opt(&mut config.tools.context, cli.tools_context);
+    apply_opt(&mut config.tools.verify, cli.tools_verify);
     apply_opt(&mut config.tools.lsp, cli.tools_lsp);
     apply_opt(&mut config.tools.explain, cli.tools_explain);
     apply_opt(&mut config.tools.rename, cli.tools_rename);
@@ -1249,6 +1296,8 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
     apply_opt(&mut config.change.max_bytes, cli.change_max_bytes);
     apply_opt(&mut config.change.ttl_ms, cli.change_ttl_ms);
     apply_opt(&mut config.change.max_revisions, cli.change_max_revisions);
+    apply_opt(&mut config.verify.max_cells, cli.verify_max_cells);
+    apply_opt(&mut config.verify.max_wall_ms, cli.verify_max_wall_ms);
     if let Some(path) = cli.rust_analyzer_path.clone() {
         config.rust_analyzer.path = Some(path);
     }
@@ -1738,6 +1787,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.server.allow_roots, vec![env_a, env_b]);
+    }
+
+    #[test]
+    fn verify_configuration_uses_the_declared_precedence() {
+        let mut cli = cli();
+        cli.verify_max_cells = Some(3);
+        cli.tools_verify = Some(false);
+        let config = Config::from_sources(
+            "/workspace",
+            Some("[verify]\nmax_cells = 2\nmax_wall_ms = 5000\n"),
+            [
+                ("AGZ_RUST_CODER_VERIFY__MAX_CELLS", "4"),
+                ("AGZ_RUST_CODER_TOOLS__VERIFY", "true"),
+            ],
+            &cli,
+        )
+        .expect("verify configuration is valid");
+        assert_eq!(config.verify.max_cells, 3);
+        assert_eq!(config.verify.max_wall_ms, 5_000);
+        assert!(!config.tools.verify);
+        assert!(!config.enabled_tool_names().contains(&"verify"));
+    }
+
+    #[test]
+    fn verify_configuration_ranges_fail_closed() {
+        for toml in [
+            "[verify]\nmax_cells = 0\n",
+            "[verify]\nmax_cells = 65\n",
+            "[verify]\nmax_wall_ms = 999\n",
+            "[verify]\nmax_wall_ms = 3600001\n",
+        ] {
+            let config = Config::from_sources(
+                "/workspace",
+                Some(toml),
+                std::iter::empty::<(String, String)>(),
+                &cli(),
+            );
+            assert!(
+                matches!(config, Err(ConfigError::InvalidField { .. })),
+                "expected rejection for {toml}"
+            );
+        }
     }
 
     #[test]

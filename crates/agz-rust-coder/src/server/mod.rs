@@ -14,7 +14,8 @@ pub use handler::{
     ExplainInput, ExplainOutput, ExplainSourceBindingData, HierarchyDirection, HierarchyInput,
     ImplementationsInput, ProfileAction, ProfileBudgetInput, ProfileConfigurationInput,
     ProfileData, ProfileInput, ProfileOutput, RefactorInput, RenameInput, RustCoderServer,
-    SemanticData, SemanticInput, SemanticOutput, SymbolInput, SymbolsInput, tool_definitions,
+    SemanticData, SemanticInput, SemanticOutput, SymbolInput, SymbolsInput, VerifyInput,
+    VerifyOutput, tool_definitions,
 };
 pub use progress::ProgressReporter;
 pub use response::{ToolData, ToolOutput, WorkspaceInfo};
@@ -42,7 +43,7 @@ use crate::{
     lsp::RustAnalyzerManager,
     process::{ProcessJournal, ProcessSupervisor},
     telemetry::ActivityLog,
-    tools::{AuditLimits, AuditService, CheckService, ProfileService},
+    tools::{AuditLimits, AuditService, CheckService, ProfileService, VerifyService},
     workspace::{AuthorizedRoot, MetadataService, RootGuard},
 };
 use admission::AdmissionController;
@@ -60,6 +61,7 @@ pub struct AppState {
     /// validates, creates, or touches the scratch directory at startup.
     change: Option<Arc<ChangeService>>,
     profile: ProfileService,
+    verify: Arc<VerifyService>,
     audit: AuditService,
     docs: Arc<DocsResolver>,
     metadata: Arc<MetadataService>,
@@ -84,6 +86,7 @@ impl fmt::Debug for AppState {
             .field("processes", &self.processes)
             .field("check", &self.check)
             .field("change", &self.change)
+            .field("verify", &self.verify)
             .field("lsp_available", &self.lsp.is_some())
             .field("tasks", &self.tasks)
             .field("shutting_down", &self.is_shutting_down())
@@ -160,6 +163,10 @@ impl AppState {
             Duration::from_millis(config.context.capsule_ttl_ms),
         ));
         let profile = ProfileService::new(config.clone(), Arc::clone(&check), processes.clone());
+        let verify = Arc::new(VerifyService::new(
+            Arc::clone(&check),
+            config.verify.clone(),
+        ));
         let audit = AuditService::new(AuditLimits::from_u64(
             config.limits.audit_files,
             config.limits.audit_file_bytes,
@@ -183,6 +190,7 @@ impl AppState {
             check,
             change,
             profile,
+            verify,
             audit,
             docs: Arc::new(DocsResolver::with_authorized_supervisor(processes)),
             metadata,
@@ -311,6 +319,10 @@ impl AppState {
 
     pub(crate) fn profile_service(&self) -> &ProfileService {
         &self.profile
+    }
+
+    pub(crate) fn verify_service(&self) -> &Arc<VerifyService> {
+        &self.verify
     }
 
     pub(crate) fn audit_service(&self) -> &AuditService {

@@ -109,6 +109,7 @@ async fn initialize_lists_the_static_surface_and_guidance() -> Result<()> {
             "docs",
             "context",
             "explain",
+            "verify",
             "symbol",
             "references",
             "definition",

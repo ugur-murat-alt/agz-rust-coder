@@ -22,6 +22,7 @@ işaretini korur.
 | `docs` | rustdoc/docs.rs | Cache, ağ veya yerel `cargo doc` kullanabilir | Tam sürüm alıntısı ve kaynak bilgisi ya da tipli erişilememe. |
 | `context` | Rust Analyzer, workspace kaynağı, cargo metadata | Kaynağa asla yazmaz | Tanım, tüketici, test, imza, bağımlılık/feature kanıtı ve sınırlı alıntıları öğe başına nedeniyle birlikte revizyona bağlı kapsül olarak döndürür. |
 | `explain` | rustc/Cargo ve advisory Rust Analyzer | `macro`/`trait` için sınırlı Cargo check çalıştırır; `cfg` yalnız metadata kullanır | Kaynak nitelikli parçalar; eksik açılım eşlemesi `unknown` kalır, tahmin edilmez. |
+| `verify` | Cargo/rustc | Sınırlı matris hücrelerinde derleme yapabilir | Hücre planı veya hücre başına tipli durum, kanıt ve kapsam sınırları içeren sınırlı matris çalıştırması. |
 | `symbol` | Rust Analyzer | Workspace-code politikasına bağlı | Hover metni ve seçilen konum. |
 | `references` | Rust Analyzer | Workspace-code politikasına bağlı | Sınırlı referans konumları. |
 | `definition` | Rust Analyzer | Workspace-code politikasına bağlı | Seçilen tanım konumu. |
@@ -181,6 +182,7 @@ platformun path-list ayırıcısını kullanır.
 | `tools.docs` | `true` | `docs` kaydı. |
 | `tools.context` | `true` | `context` kaydı. |
 | `tools.explain` | `true` | `explain` kaydı. |
+| `tools.verify` | `true` | `verify` kaydı. |
 | `tools.lsp` | `true` | Semantik gezinme araçları kaydı. |
 | `tools.rename` | `true` | LSP açıksa `rename` kaydı. |
 | `tools.refactor` | `true` | LSP açıksa `refactor` kaydı. |
@@ -198,6 +200,8 @@ platformun path-list ayırıcısını kullanır.
 | `profile.max_report_bytes` | `4194304` | Tek Cargo zamanlama artifact'ı için sınırlı okuma/saklama üst sınırı. |
 | `profile.max_runs` | `4` | Bir `profile` çağrısında kullanılabilen taze Cargo koşusu. |
 | `profile.compare_samples` | `3` | Hız iddiası öncesi her taraf için gereken örnek sayısı. |
+| `verify.max_cells` | `8` | İstek başına planlanan veya çalıştırılan matris hücresi için kesin üst sınır. |
+| `verify.max_wall_ms` | `120000` | Tek matris çalıştırması için kesin duvar saati üst sınırı. |
 | `rust_analyzer.path` | PATH or rustup | İsteğe bağlı binary değişimi. |
 | `rust_analyzer.timeout_ms` | `30000` | Semantik istek son süresi. |
 | `rust_analyzer.idle_ms` | `900000` | Boş süreç ömrü. |
@@ -256,6 +260,46 @@ Bu doğrulanamazsa semantik araçlar süreci başlatmadan erişilememe döndür�
 - [Mimari](architecture.tr.md)
 - [Benchmark protokolü](benchmark.tr.md)
 - [Güvenlik politikası](../SECURITY.md)
+
+## Yapılandırma Matrisi (`verify`)
+
+`verify`, feature, hedef, toolchain ve geliştirme aşamaları üzerinde sınırlı bir
+matrisi planlar (`action=matrix_plan`) veya çalıştırır (`action=matrix_run`).
+Her hücre paket kapsamını, feature/default-feature seçimini, hedef üçlüsünü,
+toolchain/MSRV değerini, profili, aşamayı (`check`, `clippy`, `test`, `doc`) ve
+runner'ı kaydeder.
+
+Planlama adayları `cargo metadata` ile `[workspace.metadata.agz-verify]` (veya
+ilk workspace üyesinin `[package.metadata.agz-verify]`) altındaki açık proje
+politikasından türetir:
+
+- `feature-groups`: açıkça desteklenen feature adı dizileri;
+- `mutually-exclusive-features`: birlikte etkinleştirilmemesi gereken gruplar;
+- `targets`: desteklenen yerleşik hedef üçlüleri; yalnız kurulu olanlar planlanır;
+- `msrv`: paket `rust-version` değerini geçersiz kılan rustup toolchain seçici;
+- `stages`: istek aşama belirtmezse kullanılacak varsayılan aşamalar.
+
+`.github/workflows` altındaki CI dosyaları yalnız düz metin yapılandırma girdisi
+olarak okunur ve kabuk komutu olarak asla yürütülmez. Desteklenmeyen
+kombinasyonlar `UNSUPPORTED_CONFIGURATION` olarak bildirilir; bunlar ürün
+regresyonu sayılmaz ve `--all-features` kör biçimde birleştirilmez.
+
+Çalıştırılabilir her hücre sınırlı `CheckService` kapısından geçer. Hücre
+durumları `PASS`, `FAIL`, `NOT_INSTALLED`, `RUNNER_UNAVAILABLE`,
+`SKIPPED_BUDGET`, `UNSUPPORTED_CONFIGURATION`, `TIMEOUT`, `CANCELLED`,
+`INCONCLUSIVE` ve `RESOURCE_BLOCKED` değerleridir; atlanan veya tamamlanmayan
+hücre asla yeşil değildir. `FULL_REQUESTED_MATRIX` yalnız istenen her hücre
+tamamlandığında döner; bütçe aşımında tamamlanan ve eksik hücre kimlikleri ayrı
+verilir. Yerel olmayan hedefler yalnız derleme amaçlıdır ve o platformda test
+çalıştığını iddia etmez. MSRV hücresi kurulu toolchain'in kendi `cargo`
+binary'sini çalıştırır; böylece komut hash'i gerçekten seçilen derleyiciyi
+bağlar. Hiçbir toolchain, hedef veya bağımlılık indirilmez; mevcut ağ politikası
+korunur.
+
+Planlayıcı sınırlı bir numaralandırıcıdır ve çıktısını `NOT exhaustive` olarak
+işaretler. Her sonuç kaynak/lock/yapılandırma/toolchain bağını kapı kimliği ve
+komut hash'leri üzerinden kurar; tamamlanmış bir `PASS` yeni açık çalıştırma için
+yeniden kullanılmaz.
 
 ## Açık doğrulama seçenekleri
 

@@ -20,7 +20,7 @@ pub use types::{
     GateDiagnostic, GateEvidence, GateMode, GateRequest, GateScope, GateScopeStrategy, GateSource,
     GateStatus, GateStepResult, GateTarget, GateTargetId, MacroExpansion, ProgressCallback,
     ProgressEvent, ProgressStage, SuggestionApplicability, SuggestionEdit, SuggestionPackage,
-    SuggestionPatch, ValidationProfile,
+    SuggestionPatch, ValidationProfile, validate_toolchain_name,
 };
 
 pub use crate::tools::CheckService;

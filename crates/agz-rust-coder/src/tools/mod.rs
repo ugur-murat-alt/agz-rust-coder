@@ -10,6 +10,7 @@ pub mod explain;
 pub mod navigation;
 pub mod profile;
 pub mod symbol;
+pub mod verify;
 
 pub use audit::{
     AuditCancellation, AuditCancellationReason, AuditError, AuditFinding, AuditLimits,
@@ -53,4 +54,8 @@ pub use symbol::{
     read_workspace_file, read_workspace_file_with_hook, resolve_asset_path, snapshot_rust_files,
     symbol_definition, symbol_hover, symbol_hover_at_position, symbol_references,
     with_lsp_authority, with_lsp_cancellation, with_rust_document, with_symbol_position,
+};
+pub use verify::{
+    BudgetOutcome, CellOutcome, RequiredConfigurations, SkippedCellData, VerifyAction,
+    VerifyBudget, VerifyOutcome, VerifyRequest, VerifyRunner, VerifyService, VerifyStage,
 };
