@@ -10,6 +10,7 @@ pub mod gate;
 pub mod knowledge;
 pub mod lsp;
 pub mod process;
+pub mod repair;
 pub mod server;
 pub mod telemetry;
 pub mod tools;

@@ -156,6 +156,42 @@ impl ChangeService {
         self.store.root()
     }
 
+    /// Reads one candidate-relative regular source file after verifying that
+    /// every recorded candidate byte still matches the current revision.
+    ///
+    /// This is a read-only helper for tools that need revision-bound candidate
+    /// evidence (`repair`). The returned errors never include server-owned
+    /// absolute paths.
+    pub fn read_candidate_source(&self, id: &str, file: &str) -> Result<String, String> {
+        if !is_valid_change_id(id) {
+            return Err("changeId is not a valid server-issued id".to_owned());
+        }
+        let record = match self.store.load(id) {
+            Ok(Some(record)) => record,
+            Ok(None) => return Err("no change record exists".to_owned()),
+            Err(_) => return Err("the change record could not be read".to_owned()),
+        };
+        if record.state != RecordState::Ready {
+            return Err("the change is not ready".to_owned());
+        }
+        let relative = super::patch::normalize_relative(file)
+            .map_err(|_| "the requested source path is not a valid candidate path".to_owned())?;
+        verify_candidate_bytes(&self.store, id, &record)
+            .map_err(|_| "the candidate bytes no longer match the recorded revision".to_owned())?;
+        let path = self.store.candidate_dir(id).join(&relative);
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|_| "the requested candidate file is unavailable".to_owned())?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("the requested candidate path is not a regular file".to_owned());
+        }
+        let bytes = fs::read(&path)
+            .map_err(|_| "the requested candidate file could not be read".to_owned())?;
+        if bytes.len() as u64 > crate::diagnostics::MAX_SOURCE_SNAPSHOT_BYTES {
+            return Err("the requested candidate file exceeds the bounded snapshot".to_owned());
+        }
+        String::from_utf8(bytes).map_err(|_| "the candidate source is not valid UTF-8".to_owned())
+    }
+
     /// Executes one change action. `workspace` is the request-authorized root
     /// used only to capture the original or to compare the authorization epoch.
     pub async fn execute(

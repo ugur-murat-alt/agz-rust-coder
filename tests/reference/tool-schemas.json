@@ -437,5 +437,186 @@
       "anchor"
     ],
     "type": "object"
+  },
+  "repair": {
+    "$defs": {
+      "PatchInput": {
+        "additionalProperties": false,
+        "description": "One `oldString`/`newString` patch applied to the candidate copy only.",
+        "properties": {
+          "file": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "newString": {
+            "type": "string"
+          },
+          "oldString": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "file",
+          "oldString",
+          "newString"
+        ],
+        "type": "object"
+      },
+      "RepairAction": {
+        "description": "Supported lifecycle actions for the `repair` tool.",
+        "enum": [
+          "analyze",
+          "try",
+          "compare"
+        ],
+        "type": "string"
+      },
+      "RepairBudgetInput": {
+        "additionalProperties": false,
+        "description": "Optional narrowing budget from the request. Omitted values inherit the\nconfigured `[repair]` limits; supplied values may only narrow, never widen.",
+        "properties": {
+          "maxCandidates": {
+            "default": null,
+            "format": "uint32",
+            "maximum": 32,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "maxCompiles": {
+            "default": null,
+            "format": "uint32",
+            "maximum": 64,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "wallTimeMs": {
+            "default": null,
+            "format": "uint64",
+            "maximum": 3600000,
+            "minimum": 1000,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "RepairCandidateInput": {
+        "additionalProperties": false,
+        "description": "One host-supplied or generated candidate. A candidate's patches are always\napplied as one atomic unit; a stale or overlapping part rejects the whole\ncandidate.",
+        "properties": {
+          "id": {
+            "default": null,
+            "maxLength": 64,
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "patches": {
+            "items": {
+              "$ref": "#/$defs/PatchInput"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "source": {
+            "default": null,
+            "maxLength": 64,
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "RepairConstraintsInput": {
+        "additionalProperties": false,
+        "description": "Explicit constraints for candidate generation and comparison.",
+        "properties": {
+          "testTarget": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RepairTarget"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional Cargo gate run for every tried candidate. Without it a\ncomparison is `compileVerified` only."
+          }
+        },
+        "type": "object"
+      },
+      "RepairTarget": {
+        "description": "Cargo gate requested by `constraints.testTarget`.",
+        "enum": [
+          "check",
+          "clippy",
+          "test",
+          "doc",
+          "fmt",
+          "all"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "action": {
+        "$ref": "#/$defs/RepairAction"
+      },
+      "budget": {
+        "$ref": "#/$defs/RepairBudgetInput"
+      },
+      "candidates": {
+        "items": {
+          "$ref": "#/$defs/RepairCandidateInput"
+        },
+        "maxItems": 16,
+        "type": "array"
+      },
+      "changeId": {
+        "maxLength": 128,
+        "minLength": 1,
+        "type": "string"
+      },
+      "constraints": {
+        "$ref": "#/$defs/RepairConstraintsInput"
+      },
+      "diagnosticIds": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 64,
+        "type": "array"
+      },
+      "dir": {
+        "default": null,
+        "minLength": 1,
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "action",
+      "changeId"
+    ],
+    "type": "object"
   }
 }
