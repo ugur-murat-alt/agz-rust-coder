@@ -58,7 +58,7 @@ release page instead. Environment overrides:
 | `AGZ_RUST_MCP_INSTALL_DIR` | `$HOME/.local/bin` | Absolute install directory. |
 
 ```bash
-AGZ_RUST_MCP_VERSION=0.2.0 AGZ_RUST_MCP_INSTALL_DIR="$HOME/.local/bin" bash install.sh
+AGZ_RUST_MCP_VERSION=0.3.0 AGZ_RUST_MCP_INSTALL_DIR="$HOME/.local/bin" bash install.sh
 ```
 
 The installer also verifies the archive layout and the extracted binary's
@@ -118,7 +118,7 @@ agz-rust-mcp --version
 ```
 
 `--locked` builds with the exact dependency versions recorded in `Cargo.lock`.
-Pin a release with `cargo install agz-rust-mcp --version 0.2.0 --locked`.
+Pin a release with `cargo install agz-rust-mcp --version 0.3.0 --locked`.
 Cargo installs to `$HOME/.cargo/bin` (`%USERPROFILE%\.cargo\bin` on Windows);
 ensure that directory is on `PATH`.
 

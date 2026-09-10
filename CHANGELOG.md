@@ -8,6 +8,27 @@ Changelog structure.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-11
+
+### Added
+
+- npm wrapper `@agz-yazilim/agz-rust-mcp`, which resolves, verifies, and caches
+  the matching release binary instead of building from source.
+- crates.io distribution under the renamed `agz-rust-mcp` package.
+
+### Changed
+
+- Renamed the product identity to `agz-rust-mcp`: the crate, library,
+  executable, MCP server name, and `AGZ_RUST_MCP_*` configuration use the new
+  name, the MCP Registry package is
+  `io.github.ugur-murat-alt/agz-rust-mcp`, and release tags use the
+  `agz-rust-mcp-v*` scheme.
+- Published release assets under `agz-rust-mcp-<platform>` names; releases up
+  to and including 0.2.0 remain published as legacy `agz-rust-coder-*` assets,
+  which `install.sh` still maps automatically.
+- Removed residual internal resources and identity references that still used
+  the former product name.
+
 ## [0.2.0] - 2026-09-05
 
 ### Added
@@ -106,7 +127,8 @@ Changelog structure.
 - Cargo distribution through crates.io and discovery metadata for the official
   MCP Registry.
 
-[Unreleased]: https://github.com/ugur-murat-alt/rust-code-mcp/compare/agz-rust-coder-v0.2.0...HEAD
+[Unreleased]: https://github.com/ugur-murat-alt/agz-rust-mcp/compare/agz-rust-mcp-v0.3.0...HEAD
+[0.3.0]: https://github.com/ugur-murat-alt/agz-rust-mcp/compare/agz-rust-coder-v0.2.0...agz-rust-mcp-v0.3.0
 [0.2.0]: https://github.com/ugur-murat-alt/rust-code-mcp/compare/agz-rust-coder-v0.1.1...agz-rust-coder-v0.2.0
 [0.1.1]: https://github.com/ugur-murat-alt/rust-code-mcp/compare/agz-rust-coder-v0.1.0...agz-rust-coder-v0.1.1
 [0.1.0]: https://github.com/ugur-murat-alt/rust-code-mcp/releases/tag/agz-rust-coder-v0.1.0

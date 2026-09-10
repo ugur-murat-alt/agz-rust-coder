@@ -97,7 +97,7 @@ The bilingual index with the full reading path is
 | --- | --- |
 | Crate, binary, server | `agz-rust-mcp` |
 | MCP Registry | `io.github.ugur-murat-alt/agz-rust-mcp` |
-| Current release | `0.2.0` |
+| Current release | `0.3.0` |
 | First release | `0.1.0` |
 | Release tag | `agz-rust-mcp-v<version>` |
 | Rust edition / MSRV | `2024` / `1.88.0` |

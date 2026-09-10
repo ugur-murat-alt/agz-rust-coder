@@ -7,13 +7,13 @@
     "url": "https://github.com/ugur-murat-alt/agz-rust-mcp",
     "source": "github"
   },
-  "version": "0.2.0",
+  "version": "0.3.0",
   "packages": [
     {
       "registryType": "cargo",
       "registryBaseUrl": "https://crates.io",
       "identifier": "agz-rust-mcp",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "transport": {
         "type": "stdio"
       }

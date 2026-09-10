@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Exact tag to create, for example agz-rust-mcp-v0.2.0"
+        description: "Exact tag to create, for example agz-rust-mcp-v0.3.0"
         required: true
         type: string
       publish:
