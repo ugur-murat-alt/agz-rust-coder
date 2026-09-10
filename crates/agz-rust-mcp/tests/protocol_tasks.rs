@@ -1,4 +1,4 @@
-use agz_rust_mcp::{Config, RustCoderServer};
+use agz_rust_mcp::{Config, RustMcpServer};
 use anyhow::{Context, Result};
 use rmcp::{
     ClientLifecycleMode, ClientServiceExt, ServiceExt,
@@ -66,7 +66,7 @@ fn spawn_configured_server(
     let (server_transport, client_transport) = tokio::io::duplex(1 << 20);
     let task = tokio::spawn(async move {
         let _state = state;
-        let service = Box::pin(RustCoderServer::new(config)?.serve(server_transport)).await?;
+        let service = Box::pin(RustMcpServer::new(config)?.serve(server_transport)).await?;
         service.waiting().await?;
         Ok(())
     });
@@ -84,7 +84,7 @@ fn spawn_local_docs_server(
         config.docs.fallback = agz_rust_mcp::config::DocsFallback::Local;
         config.docs.cache_dir = cache;
         config.docs.timeout_ms = 60_000;
-        let service = Box::pin(RustCoderServer::new(config)?.serve(server_transport)).await?;
+        let service = Box::pin(RustMcpServer::new(config)?.serve(server_transport)).await?;
         service.waiting().await?;
         Ok(())
     });

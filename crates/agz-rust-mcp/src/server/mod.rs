@@ -15,9 +15,9 @@ pub use handler::{
     ExplainConfigurationData, ExplainData, ExplainInput, ExplainOutput, ExplainSourceBindingData,
     HierarchyDirection, HierarchyInput, ImplementationsInput, ProfileAction, ProfileBudgetInput,
     ProfileConfigurationInput, ProfileData, ProfileInput, ProfileOutput, RefactorInput,
-    RenameInput, RepairData, RepairInput, RepairOutput, RustCoderServer, SemanticData,
-    SemanticInput, SemanticOutput, SymbolInput, SymbolsInput, VerifyInput, VerifyOutput, WorkData,
-    WorkInput, WorkOutput, tool_definitions,
+    RenameInput, RepairData, RepairInput, RepairOutput, RustMcpServer, SemanticData, SemanticInput,
+    SemanticOutput, SymbolInput, SymbolsInput, VerifyInput, VerifyOutput, WorkData, WorkInput,
+    WorkOutput, tool_definitions,
 };
 pub use progress::ProgressReporter;
 pub use response::{ToolData, ToolOutput, WorkspaceInfo};

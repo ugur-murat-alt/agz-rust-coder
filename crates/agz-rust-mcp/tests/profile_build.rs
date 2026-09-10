@@ -10,7 +10,7 @@ use std::{
 };
 
 use agz_rust_mcp::{
-    Config, RustCoderServer,
+    Config, RustMcpServer,
     gate::GateTargetId,
     process::ProcessSupervisor,
     tools::{
@@ -650,7 +650,7 @@ fn spawn_mcp_server(
 ) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<Result<()>>) {
     let (server_transport, client_transport) = tokio::io::duplex(1 << 20);
     let task = tokio::spawn(async move {
-        let service = Box::pin(RustCoderServer::new(config)?.serve(server_transport)).await?;
+        let service = Box::pin(RustMcpServer::new(config)?.serve(server_transport)).await?;
         service.waiting().await?;
         Ok(())
     });

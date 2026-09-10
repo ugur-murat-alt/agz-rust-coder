@@ -2,7 +2,7 @@
 
 use std::{error::Error, time::Duration};
 
-use agz_rust_mcp::{Config, ConfigError, RustCoderServer};
+use agz_rust_mcp::{Config, ConfigError, RustMcpServer};
 use clap::error::ErrorKind;
 use rmcp::{ServiceExt, transport::stdio};
 use tracing_subscriber::EnvFilter;
@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
         Err(error) => return Err(error.into()),
     };
-    let server = RustCoderServer::new(config)?;
+    let server = RustMcpServer::new(config)?;
     let state = server.state().clone();
     let service = Box::pin(server.serve(stdio())).await?;
     let transport_cancellation = service.cancellation_token();

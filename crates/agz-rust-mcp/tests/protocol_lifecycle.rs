@@ -8,7 +8,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use agz_rust_mcp::{Config, RustCoderServer};
+use agz_rust_mcp::{Config, RustMcpServer};
 use anyhow::{Context, Result};
 use rmcp::{
     ClientLifecycleMode, ClientServiceExt, ServiceError, ServiceExt,
@@ -57,7 +57,7 @@ fn fixture_config() -> (Config, IsolatedState) {
 fn spawn_server(config: Config) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<Result<()>>) {
     let (server_transport, client_transport) = tokio::io::duplex(1 << 20);
     let task = tokio::spawn(async move {
-        let service = Box::pin(RustCoderServer::new(config)?.serve(server_transport)).await?;
+        let service = Box::pin(RustMcpServer::new(config)?.serve(server_transport)).await?;
         service.waiting().await?;
         Ok(())
     });
@@ -136,7 +136,7 @@ async fn initialize_lists_the_static_surface_and_guidance() -> Result<()> {
     assert_eq!(resources.resources.len(), 4);
     let resource = client
         .peer()
-        .read_resource_once(ReadResourceRequestParams::new("rust-coder://workflow"))
+        .read_resource_once(ReadResourceRequestParams::new("agz-rust-mcp://workflow"))
         .await?;
     assert!(matches!(resource, ReadResourceResponse::Complete(_)));
 
@@ -201,7 +201,7 @@ async fn missing_resource_code_tracks_the_negotiated_protocol() -> Result<()> {
         .await?;
     let legacy_error = legacy
         .peer()
-        .read_resource(ReadResourceRequestParams::new("rust-coder://missing"))
+        .read_resource(ReadResourceRequestParams::new("agz-rust-mcp://missing"))
         .await
         .expect_err("missing legacy resource");
     assert_eq!(mcp_error_code(legacy_error), ErrorCode::RESOURCE_NOT_FOUND);
@@ -220,7 +220,7 @@ async fn missing_resource_code_tracks_the_negotiated_protocol() -> Result<()> {
         .await?;
     let modern_error = modern
         .peer()
-        .read_resource(ReadResourceRequestParams::new("rust-coder://missing"))
+        .read_resource(ReadResourceRequestParams::new("agz-rust-mcp://missing"))
         .await
         .expect_err("missing modern resource");
     assert_eq!(mcp_error_code(modern_error), ErrorCode::INVALID_PARAMS);
@@ -239,7 +239,7 @@ fn mcp_error_code(error: ServiceError) -> ErrorCode {
 #[tokio::test]
 async fn shutdown_continues_after_a_waiter_is_cancelled_and_is_reusable() -> Result<()> {
     let (config, _state) = fixture_config();
-    let server = RustCoderServer::new(config)?;
+    let server = RustMcpServer::new(config)?;
     let state = Arc::clone(server.state());
     let first_state = Arc::clone(&state);
     let first = tokio::spawn(async move { first_state.shutdown_async().await });

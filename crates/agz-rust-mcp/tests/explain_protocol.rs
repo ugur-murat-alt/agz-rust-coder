@@ -10,7 +10,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use agz_rust_mcp::{Config, RustCoderServer, config::WorkspaceCode};
+use agz_rust_mcp::{Config, RustMcpServer, config::WorkspaceCode};
 use anyhow::{Context, Result};
 use rmcp::{
     ServiceExt,
@@ -112,7 +112,7 @@ impl Drop for TestWorkspace {
 fn spawn_server(config: Config) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<Result<()>>) {
     let (server_transport, client_transport) = tokio::io::duplex(1 << 20);
     let task = tokio::spawn(async move {
-        let service = Box::pin(RustCoderServer::new(config)?.serve(server_transport)).await?;
+        let service = Box::pin(RustMcpServer::new(config)?.serve(server_transport)).await?;
         service.waiting().await?;
         Ok(())
     });
