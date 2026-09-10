@@ -87,7 +87,7 @@ OpenCode commonly exposes grouped MCP tools as `rust_*`.
 | `rename` | `rust_rename` | `enabled` | Produce a verified rename edit package without applying it. |
 | `refactor` | `rust_refactor` | `enabled` | Produce a verified refactor edit package without applying it. |
 | `change` | `rust_change` | `enabled` | Create, stage, and validate a revision-bound changeset in server-owned scratch without writing the workspace. |
-| `repair` | `rust_repair` | `enabled` | Analyze, try, and compare compiler-driven repair candidates for a failing change revision without writing the workspace. |
+| `repair` | `rust_repair` | `enabled` | Analyze, try, compare, and minimize compiler-driven repair candidates for a failing change revision without writing the workspace. |
 
 Every tool returns deterministic structured data plus an equivalent bounded text
 fallback. External data stays under `untrustedData`. Expected domain outcomes
@@ -118,6 +118,8 @@ sections, for example `AGZ_RUST_CODER_GATE__HARD_TIMEOUT_MS=600000`.
 | `repair.max_candidates` | `4` | Candidates one `repair` action may try. |
 | `repair.max_compiles` | `4` | Cargo validations one `repair` action may run. |
 | `repair.wall_time_ms` | `120000` | Wall-clock budget for one `repair` action. |
+| `repair.minimize_max_candidates` | `32` | Compile-evaluated reduction attempts one `repair(action=minimize)` may try. |
+| `repair.minimize_max_compiles` | `16` | Cargo runs one `repair(action=minimize)` may execute, including reproduction and export verification. |
 | `profile.max_report_bytes` | `4194304` | Bounded read/store cap for one Cargo timing artifact. |
 | `profile.max_runs` | `4` | Fresh Cargo runs available to one `profile` call. |
 | `profile.compare_samples` | `3` | Required samples per side before any speed claim. |

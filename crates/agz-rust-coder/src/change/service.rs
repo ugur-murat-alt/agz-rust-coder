@@ -8,7 +8,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt, fs,
+    fmt, fs, io,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -83,6 +83,90 @@ impl ChangeFailure {
             warnings: Vec::new(),
         }
     }
+}
+
+/// Bounded, read-only text snapshot of one revision-bound candidate copy.
+///
+/// Files are candidate-relative, deterministic, and only drawn from the
+/// portable inclusion set. `truncated` is true whenever a file was left out for
+/// a bound or safety reason; `skipped` records a bounded sample of those
+/// decisions so a caller can surface the portability limit instead of guessing.
+#[derive(Debug, Clone, Default)]
+pub struct CandidateTree {
+    pub files: BTreeMap<String, String>,
+    pub skipped: Vec<CandidateTreeSkip>,
+    pub total_bytes: u64,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateTreeSkip {
+    pub file: String,
+    pub reason: String,
+}
+
+const MAX_TREE_FILES: usize = 2_048;
+const MAX_TREE_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_TREE_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_TREE_DIR_ENTRIES: usize = 20_000;
+const MAX_TREE_SKIPS: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TreeFileDecision {
+    Include,
+    Sensitive,
+    Ignore,
+}
+
+fn tree_file_decision(relative: &str) -> TreeFileDecision {
+    let normalized = relative.replace('\\', "/");
+    let name = normalized.rsplit('/').next().unwrap_or(&normalized);
+    let lower = name.to_ascii_lowercase();
+    if normalized == ".cargo/credentials"
+        || normalized == ".cargo/credentials.toml"
+        || lower == ".env"
+        || lower == ".envrc"
+        || has_extension(&lower, "pem")
+        || has_extension(&lower, "key")
+    {
+        return TreeFileDecision::Sensitive;
+    }
+    if matches!(normalized.as_str(), ".cargo/config" | ".cargo/config.toml")
+        || matches!(
+            name,
+            "Cargo.toml" | "Cargo.lock" | "rust-toolchain" | "rust-toolchain.toml"
+        )
+        || lower.starts_with("license")
+        || lower.starts_with("copying")
+        || lower.starts_with("notice")
+    {
+        return TreeFileDecision::Include;
+    }
+    if has_extension(&normalized, "rs") {
+        return TreeFileDecision::Include;
+    }
+    TreeFileDecision::Ignore
+}
+
+fn has_extension(path: &str, expected: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(expected))
+}
+
+fn push_tree_skip(tree: &mut CandidateTree, file: String, reason: &str) {
+    if tree.skipped.len() < MAX_TREE_SKIPS {
+        tree.skipped.push(CandidateTreeSkip {
+            file,
+            reason: reason.to_owned(),
+        });
+    }
+}
+
+fn relative_display(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"))
 }
 
 pub struct ChangeService {
@@ -190,6 +274,137 @@ impl ChangeService {
             return Err("the requested candidate file exceeds the bounded snapshot".to_owned());
         }
         String::from_utf8(bytes).map_err(|_| "the candidate source is not valid UTF-8".to_owned())
+    }
+
+    /// Read-only, bounded snapshot of the revision-bound candidate copy.
+    ///
+    /// Only files a portable reproducer can need are returned: Rust sources,
+    /// Cargo manifests and lockfile, toolchain pins, `.cargo` configuration, and
+    /// provenance files. Credential, environment, version-control, and build
+    /// output is never read. The snapshot is verified against the recorded
+    /// revision before any byte is read, so it can never describe a different
+    /// candidate than the one the failure evidence belongs to.
+    #[allow(clippy::too_many_lines)]
+    pub fn read_candidate_tree(&self, id: &str) -> Result<CandidateTree, String> {
+        if !is_valid_change_id(id) {
+            return Err("changeId is not a valid server-issued id".to_owned());
+        }
+        let record = match self.store.load(id) {
+            Ok(Some(record)) => record,
+            Ok(None) => return Err("no change record exists".to_owned()),
+            Err(_) => return Err("the change record could not be read".to_owned()),
+        };
+        if record.state != RecordState::Ready {
+            return Err("the change is not ready".to_owned());
+        }
+        verify_candidate_bytes(&self.store, id, &record)
+            .map_err(|_| "the candidate bytes no longer match the recorded revision".to_owned())?;
+        let candidate_root = self.store.candidate_dir(id);
+        if fs::symlink_metadata(&candidate_root)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err("the candidate copy is a symlink and will not be read".to_owned());
+        }
+        let mut tree = CandidateTree::default();
+        let mut stack = vec![candidate_root.clone()];
+        let mut visited = 0usize;
+        while let Some(directory) = stack.pop() {
+            let entries = match fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(_) => {
+                    tree.truncated = true;
+                    push_tree_skip(
+                        &mut tree,
+                        relative_display(&candidate_root, &directory),
+                        "the candidate directory could not be listed",
+                    );
+                    continue;
+                }
+            };
+            for entry in entries.flatten() {
+                visited = visited.saturating_add(1);
+                if visited > MAX_TREE_DIR_ENTRIES {
+                    tree.truncated = true;
+                    return Ok(tree);
+                }
+                let path = entry.path();
+                let metadata = match fs::symlink_metadata(&path) {
+                    Ok(metadata) => metadata,
+                    Err(_) => continue,
+                };
+                if metadata.file_type().is_symlink() {
+                    tree.truncated = true;
+                    push_tree_skip(
+                        &mut tree,
+                        relative_display(&candidate_root, &path),
+                        "symlinked entries are never captured",
+                    );
+                    continue;
+                }
+                if metadata.is_dir() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name == ".git" || name == "target" {
+                        continue;
+                    }
+                    stack.push(path);
+                    continue;
+                }
+                if !metadata.is_file() {
+                    continue;
+                }
+                let relative = relative_display(&candidate_root, &path);
+                match tree_file_decision(&relative) {
+                    TreeFileDecision::Ignore => {}
+                    TreeFileDecision::Sensitive => {
+                        push_tree_skip(
+                            &mut tree,
+                            relative,
+                            "credential or environment files are never captured",
+                        );
+                    }
+                    TreeFileDecision::Include => {
+                        if tree.files.len() >= MAX_TREE_FILES {
+                            tree.truncated = true;
+                            push_tree_skip(&mut tree, relative, "file count bound was reached");
+                            continue;
+                        }
+                        if metadata.len() > MAX_TREE_FILE_BYTES {
+                            tree.truncated = true;
+                            push_tree_skip(&mut tree, relative, "file exceeds the per-file bound");
+                            continue;
+                        }
+                        if tree.total_bytes.saturating_add(metadata.len()) > MAX_TREE_TOTAL_BYTES {
+                            tree.truncated = true;
+                            push_tree_skip(
+                                &mut tree,
+                                relative,
+                                "snapshot total byte bound was reached",
+                            );
+                            continue;
+                        }
+                        match fs::read(&path).and_then(|bytes| {
+                            String::from_utf8(bytes)
+                                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+                        }) {
+                            Ok(text) => {
+                                tree.total_bytes = tree.total_bytes.saturating_add(metadata.len());
+                                tree.files.insert(relative, text);
+                            }
+                            Err(_) => {
+                                tree.truncated = true;
+                                push_tree_skip(
+                                    &mut tree,
+                                    relative,
+                                    "the file is not valid UTF-8 text",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(tree)
     }
 
     /// Executes one change action. `workspace` is the request-authorized root

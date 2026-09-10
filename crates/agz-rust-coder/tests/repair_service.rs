@@ -19,8 +19,8 @@ use agz_rust_coder::{
     gate::{GateDetail, GateTargetId, ValidationOptions},
     process::ProcessSupervisor,
     repair::{
-        RepairAction, RepairBudget, RepairBudgetInput, RepairCandidateInput, RepairRequest,
-        RepairService,
+        RepairAction, RepairBudget, RepairBudgetInput, RepairCandidateInput, RepairReductionScope,
+        RepairRequest, RepairService,
     },
     workspace::{ClientRoots, RootGuard, WorkspaceRoot},
 };
@@ -209,6 +209,8 @@ fn repair_request(action: RepairAction, id: &str) -> RepairRequest {
             max_compiles: 4,
             wall_time_ms: 120_000,
         },
+        reduction_scope: RepairReductionScope::default(),
+        failure_predicate: None,
     }
 }
 
@@ -615,6 +617,18 @@ async fn effective_budget_only_narrows_the_configured_caps() {
     });
     assert_eq!(widened.max_candidates, 1);
     assert_eq!(widened.max_compiles, fixture.config.repair.max_compiles);
+
+    let minimize = service.effective_minimize_budget(&RepairBudgetInput {
+        max_candidates: Some(4),
+        max_compiles: Some(32),
+        wall_time_ms: Some(1_000),
+    });
+    assert_eq!(minimize.max_candidates, 4);
+    assert_eq!(
+        minimize.max_compiles,
+        fixture.config.repair.minimize_max_compiles
+    );
+    assert_eq!(minimize.wall_time_ms, 1_000);
 }
 
 #[tokio::test]

@@ -30,7 +30,7 @@ Failed compilations are revalidated before offering edit/context evidence. Trunc
 | `rename` | Rust Analyzer | Never writes source | Verified `old_string`/`new_string` edit package. |
 | `refactor` | Rust Analyzer | Never writes source | Verified write-free refactor package. |
 | `change` | Server-owned scratch + Cargo/rustc for candidate validation | Never writes the workspace; compiles only the candidate copy | Revision-bound change record with candidate hashes, validation evidence (bounded diagnostics and write-free suggestions for a fresh `FAIL`), and a verified/unverified export package. |
-| `repair` | Server-owned scratch + Cargo/rustc for candidate validation | Never writes the workspace; creates and compiles only temporary candidate copies | Grouped diagnostics with reasoned root-cause hypotheses and source-backed ownership evidence, per-candidate measured compile/test results, behavior/performance guards, and a measured selection with residual risks. |
+| `repair` | Server-owned scratch + Cargo/rustc for candidate validation and bounded minimization | Never writes the workspace; creates and compiles only temporary candidate copies | Grouped diagnostics with reasoned root-cause hypotheses and source-backed ownership evidence, per-candidate measured compile/test results, behavior/performance guards, a measured selection with residual risks, and an export-verified minimized reproducer with pinned configuration. |
 
 `check` targets are `check`, `clippy`, `test`, `doc`, `fmt`, and `all`. Formatting
 uses check-only behavior. A completed explicit validation is never reused as
@@ -141,6 +141,48 @@ the comparison is `compileVerified` only. Pre-existing impacts are reported
 separately from candidate-added impacts. Cancelled, timed-out, incomplete, or
 cleanup-failed runs publish no usable repair evidence.
 
+## Failure Minimization
+
+`repair(action=minimize)` reduces a failing change revision to a small,
+portable reproducer. It first builds a failure predicate from a real diagnostic
+of the current-revision fresh `FAIL` evidence: the error code plus the
+normalized message structure, including trait and type names. The error code
+alone is never a predicate, and `failurePredicate` may only narrow the identity
+(code, `messageContains`, `file`). The unchanged candidate snapshot must
+reproduce the predicate on a first fresh Cargo run and again on a second
+unchanged confirmation run; a run that does not match, times out, or exceeds
+the compile budget before confirmation stops visibly as `NOT_REPRODUCED`
+instead of being minimized.
+
+The reduction search then tries permitted `reductionScope` axes (`files`,
+`items`, `modules`, or all) on the revision-bound candidate copy: whole
+unreferenced files, syntactically complete items and `use` items, `mod`
+declarations with their module files, and inline `mod` blocks. Names that are
+still referenced elsewhere and module paths that are still used (`name::`) are
+not offered, so a reduction cannot silently delete code the failure depends on.
+Each trial is a real Cargo run; a reduction is only accepted when the same
+predicate is produced and the trial introduces no new error signature. An
+irrelevant diagnostic with the same error code, a wrong syntax error, a newly
+missing dependency, and a timeout are all rejected and recorded with their
+failure match and reason. Accepted reductions are recorded with their selection
+reason; `remainingRisks` states the unsearched scope.
+
+The result is a proof package: minimum source with SHA-256 content hashes and
+inline content, pinned toolchain file, edition, target, features, Cargo.toml
+and Cargo.lock hashes, the reproduction command, and the verification evidence.
+Before `REPRODUCED` is claimed the exact minimized source is materialized in a
+clean temporary directory and compiled again; only a matching predicate with no
+new signatures there sets `exportVerified: true`. A budget stop publishes
+`BEST_KNOWN_REPRODUCER` with `verification: trialVerified` and the remaining
+scope instead. No global minimality is claimed, no automatic upload or issue
+creation happens, and the original workspace is never written. The export never
+copies Cargo home, credentials, environment secrets, version-control data, or
+unrelated repository files; only Rust sources, manifests, the lockfile,
+toolchain pins, `.cargo` configuration, and provenance files are captured, and
+anything left out is listed in `omitted`. Candidate items are also capped per
+file, plan, snapshot byte total, and wall clock, and cancellation is forwarded
+to every Cargo child.
+
 ## Context Capsules
 
 `context` works from typed anchors only: `{kind:"file",file,range?}` and
@@ -249,6 +291,8 @@ use the platform path-list separator.
 | `repair.max_candidates` | `4` | Candidate attempts per `repair` action; requests may only narrow. |
 | `repair.max_compiles` | `4` | Cargo validations per `repair` action; requests may only narrow. |
 | `repair.wall_time_ms` | `120000` | Wall-clock budget per `repair` action; requests may only narrow. |
+| `repair.minimize_max_candidates` | `32` | Compile-evaluated reduction attempts per `repair(action=minimize)`; requests may only narrow. |
+| `repair.minimize_max_compiles` | `16` | Cargo runs per `repair(action=minimize)`, including reproduction and export verification; requests may only narrow. |
 | `context.max_capsules` | `32` | In-memory capsule ring capacity. |
 | `context.capsule_ttl_ms` | `900000` | Capsule TTL; root-epoch changes also invalidate. |
 | `context.max_items` | `64` | Items selected into one capsule. |

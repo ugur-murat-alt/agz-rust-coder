@@ -28,10 +28,10 @@ use crate::{
 };
 
 use super::{
-    analysis, guards,
+    analysis, guards, minimize,
     model::{
         MAX_ANALYZED_DIAGNOSTICS, MAX_CANDIDATE_DIAGNOSTICS, MAX_IMPACTS, MAX_LISTED_CANDIDATES,
-        MAX_REMAINING_RISKS, RepairAnalysisData, RepairBudget, RepairBudgetData,
+        MAX_REMAINING_RISKS, RepairAnalysisData, RepairBudget, RepairBudgetData, RepairBudgetInput,
         RepairCandidateData, RepairCandidateInput, RepairCandidateSourceData,
         RepairConfigurationData, RepairData, RepairGateData, RepairOutcome, RepairPatchData,
         RepairRequest,
@@ -61,7 +61,7 @@ impl RepairService {
     }
 
     /// Effective budget: the request may only narrow the configured limits.
-    pub fn effective_budget(&self, input: &super::model::RepairBudgetInput) -> RepairBudget {
+    pub fn effective_budget(&self, input: &RepairBudgetInput) -> RepairBudget {
         let config = &self.config.repair;
         RepairBudget {
             max_candidates: input.max_candidates.map_or(config.max_candidates, |value| {
@@ -70,6 +70,27 @@ impl RepairService {
             max_compiles: input
                 .max_compiles
                 .map_or(config.max_compiles, |value| value.min(config.max_compiles)),
+            wall_time_ms: input
+                .wall_time_ms
+                .map_or(config.wall_time_ms, |value| value.min(config.wall_time_ms)),
+        }
+    }
+
+    /// Effective minimization budget: a request may only narrow the dedicated
+    /// `[repair]` minimization caps.
+    pub fn effective_minimize_budget(&self, input: &RepairBudgetInput) -> RepairBudget {
+        let config = &self.config.repair;
+        RepairBudget {
+            max_candidates: input
+                .max_candidates
+                .map_or(config.minimize_max_candidates, |value| {
+                    value.min(config.minimize_max_candidates)
+                }),
+            max_compiles: input
+                .max_compiles
+                .map_or(config.minimize_max_compiles, |value| {
+                    value.min(config.minimize_max_compiles)
+                }),
             wall_time_ms: input
                 .wall_time_ms
                 .map_or(config.wall_time_ms, |value| value.min(config.wall_time_ms)),
@@ -91,7 +112,71 @@ impl RepairService {
                 self.run_candidates(request, workspace, cancellation, lsp)
                     .await
             }
+            super::model::RepairAction::Minimize => {
+                self.minimize(request, workspace, cancellation).await
+            }
         }
+    }
+
+    async fn minimize(
+        &self,
+        request: RepairRequest,
+        workspace: &WorkspaceRoot,
+        cancellation: CancellationToken,
+    ) -> RepairOutcome {
+        if cancellation.is_cancelled() {
+            return self.cancelled(RepairActionKind::Minimize, &request.change_id);
+        }
+        let id = request.change_id.clone();
+        let data = match self
+            .inspect_change(RepairActionKind::Minimize, &id, workspace, &cancellation)
+            .await
+        {
+            Ok(data) => data,
+            Err(outcome) => return outcome,
+        };
+        let evidence = match base_evidence(&data) {
+            BaseEvidence::Fail(evidence) => evidence.clone(),
+            BaseEvidence::Clean => {
+                return self.outcome(
+                    "CLEAN",
+                    "The current revision has no fresh compile failure to minimize.",
+                    false,
+                    RepairData {
+                        action: "minimize".to_owned(),
+                        usable: false,
+                        change_id: Some(id),
+                        base_identity: data.base_identity.clone(),
+                        revision: Some(data.revision),
+                        reason: "current revision already passes; nothing to minimize".to_owned(),
+                        stop_reason: "noFailure".to_owned(),
+                        ..RepairData::default()
+                    },
+                );
+            }
+            BaseEvidence::Missing(reason) => {
+                return self.no_evidence("minimize".to_owned(), &id, &data, reason);
+            }
+        };
+        let target = parse_gate_target(&evidence.target);
+        let minimize_request = minimize::MinimizeRequest {
+            change_id: id,
+            diagnostic_ids: request.diagnostic_ids,
+            failure_predicate: request.failure_predicate,
+            reduction_scope: request.reduction_scope,
+            budget: request.budget,
+            base: data,
+            evidence,
+            target,
+        };
+        let outcome =
+            minimize::minimize(&self.change, &self.config, minimize_request, cancellation).await;
+        self.outcome(
+            outcome.status,
+            outcome.summary,
+            outcome.is_error,
+            outcome.data,
+        )
     }
 
     async fn inspect_change(
@@ -1205,6 +1290,7 @@ enum RepairActionKind {
     Analyze,
     Try,
     Compare,
+    Minimize,
 }
 
 impl RepairActionKind {
@@ -1213,6 +1299,7 @@ impl RepairActionKind {
             Self::Analyze => "ANALYZED",
             Self::Try => "TRIED",
             Self::Compare => "COMPARED",
+            Self::Minimize => "INCONCLUSIVE",
         }
     }
 
@@ -1221,6 +1308,7 @@ impl RepairActionKind {
             Self::Analyze => "analyze",
             Self::Try => "try",
             Self::Compare => "compare",
+            Self::Minimize => "minimize",
         }
     }
 }

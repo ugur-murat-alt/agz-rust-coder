@@ -87,7 +87,7 @@ OpenCode gruplanmış MCP araçlarını çoğunlukla `rust_*` adıyla gösterir.
 | `rename` | `rust_rename` | `enabled` | Uygulamadan doğrulanmış yeniden adlandırma paketi üretir. |
 | `refactor` | `rust_refactor` | `enabled` | Uygulamadan doğrulanmış refactor paketi üretir. |
 | `change` | `rust_change` | `enabled` | Workspace'e yazmadan sunucuya ait scratch alanında revizyona bağlı changeset oluşturur, uygular ve doğrular. |
-| `repair` | `rust_repair` | `enabled` | Başarısız bir change revizyonu için derleyici güdümlü onarım adaylarını analiz eder, dener ve karşılaştırır; workspace'e yazmaz. |
+| `repair` | `rust_repair` | `enabled` | Başarısız bir change revizyonu için derleyici güdümlü onarım adaylarını analiz eder, dener, karşılaştırır ve küçültür; workspace'e yazmaz. |
 
 Her araç belirli yapıda veri ve ona eşdeğer, boyutu sınırlı metin döndürür. Dış
 veri `untrustedData` altında tutulur. Derleme hatası, bulunamayan crate veya
@@ -117,6 +117,8 @@ dosyası ve varsayılanlardır. Ortam anahtarları bölümler arasında `__` kul
 | `repair.max_candidates` | `4` | Bir `repair` işleminin deneyebileceği aday sayısı. |
 | `repair.max_compiles` | `4` | Bir `repair` işleminin çalıştırabileceği Cargo doğrulaması. |
 | `repair.wall_time_ms` | `120000` | Bir `repair` işlemi için duvar saati bütçesi. |
+| `repair.minimize_max_candidates` | `32` | Bir `repair(action=minimize)` işleminin derlemeyle değerlendirebileceği küçültme denemesi. |
+| `repair.minimize_max_compiles` | `16` | Bir `repair(action=minimize)` işleminin yeniden üretim ve dışa aktarma doğrulaması dahil çalıştırabileceği Cargo koşusu. |
 | `profile.max_report_bytes` | `4194304` | Tek Cargo zamanlama artifact'ı için sınırlı okuma/saklama üst sınırı. |
 | `profile.max_runs` | `4` | Bir `profile` çağrısında kullanılabilen taze Cargo koşusu. |
 | `profile.compare_samples` | `3` | Hız iddiası öncesi her taraf için gereken örnek sayısı. |

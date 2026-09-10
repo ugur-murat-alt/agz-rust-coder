@@ -17,6 +17,7 @@ pub enum RepairAction {
     Analyze,
     Try,
     Compare,
+    Minimize,
 }
 
 impl RepairAction {
@@ -25,8 +26,66 @@ impl RepairAction {
             Self::Analyze => "analyze",
             Self::Try => "try",
             Self::Compare => "compare",
+            Self::Minimize => "minimize",
         }
     }
+}
+
+/// Permitted reduction axes for `action=minimize`. Omitted defaults to `all`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum RepairReductionScope {
+    /// Whole removable files only.
+    Files,
+    /// Non-module items only (`fn`, `struct`, `impl`, `use`, ...).
+    Items,
+    /// `mod` declarations, inline `mod` blocks, and their files.
+    Modules,
+    /// Every permitted axis.
+    #[default]
+    All,
+}
+
+impl RepairReductionScope {
+    pub const fn includes_files(self) -> bool {
+        matches!(self, Self::Files | Self::All)
+    }
+
+    pub const fn includes_items(self) -> bool {
+        matches!(self, Self::Items | Self::All)
+    }
+
+    pub const fn includes_modules(self) -> bool {
+        matches!(self, Self::Modules | Self::All)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Files => "files",
+            Self::Items => "items",
+            Self::Modules => "modules",
+            Self::All => "all",
+        }
+    }
+}
+
+/// Optional host narrowing of the failure identity. When omitted the identity
+/// is derived from the selected fresh evidence diagnostic: the error code plus
+/// the normalized message (including trait/type names), never the code alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepairFailurePredicateInput {
+    #[serde(default)]
+    #[schemars(length(min = 1, max = 64))]
+    pub code: Option<String>,
+    /// Case-insensitive message fragments that must all be present. Supplying
+    /// fragments relaxes the exact-message check; the code still has to match.
+    #[serde(default)]
+    #[schemars(length(max = 8))]
+    pub message_contains: Vec<String>,
+    #[serde(default)]
+    #[schemars(length(min = 1, max = 512))]
+    pub file: Option<String>,
 }
 
 /// Cargo gate requested by `constraints.testTarget`.
@@ -118,6 +177,8 @@ pub struct RepairRequest {
     pub candidates: Vec<RepairCandidateInput>,
     pub test_target: Option<GateTargetId>,
     pub budget: RepairBudget,
+    pub reduction_scope: RepairReductionScope,
+    pub failure_predicate: Option<RepairFailurePredicateInput>,
 }
 
 /// Terminal result of one `repair` action.
@@ -402,6 +463,80 @@ pub struct RepairBudgetData {
     pub elapsed_ms: u64,
 }
 
+/// The exact failure identity a minimized reproducer must keep producing.
+/// Derived from a real diagnostic: code plus normalized message structure
+/// (including trait/type names), never the error code alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepairPredicateData {
+    pub diagnostic_id: String,
+    pub code: String,
+    pub level: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    pub message: String,
+    pub message_tokens: Vec<String>,
+    pub source: String,
+}
+
+/// One compile-evaluated reduction attempt with its recorded failure match and
+/// selection reason. Accepted attempts are the actually applied reductions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepairReductionData {
+    pub id: String,
+    pub kind: String,
+    pub files: Vec<String>,
+    pub items: u64,
+    pub lines_removed: u64,
+    pub status: String,
+    pub failure_match: String,
+    pub reason: String,
+    pub total_ms: u64,
+}
+
+/// One file of the portable proof package. `content` is inline when it fits the
+/// bounded proof budget; omitted content is visible through `contentOmitted`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepairProofFileData {
+    pub file: String,
+    pub sha256: String,
+    pub bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    pub content_omitted: bool,
+}
+
+/// A portable, self-contained reproducer: minimized source, pinned
+/// configuration, real verification evidence, and a reproduction command.
+/// It is never uploaded and never written back to the original workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepairProofData {
+    pub files: Vec<RepairProofFileData>,
+    pub files_total: u64,
+    pub total_bytes: u64,
+    pub package_complete: bool,
+    pub omitted: Vec<String>,
+    pub source_sha256: String,
+    pub configuration_sha256: String,
+    pub evidence_sha256: String,
+    pub reproduction_command: String,
+    pub toolchain: String,
+    pub edition: String,
+    pub target: String,
+    pub features: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cargo_toml_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lockfile_sha256: Option<String>,
+    pub lockfile_preserved: bool,
+    pub export_verified: bool,
+    pub initial_reproduction: String,
+    pub export_verification: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RepairData {
@@ -426,11 +561,28 @@ pub struct RepairData {
     pub configuration: Option<RepairConfigurationData>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub budget: Option<RepairBudgetData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub predicate: Option<RepairPredicateData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof: Option<RepairProofData>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reductions: Vec<RepairReductionData>,
+    #[serde(default)]
+    pub reductions_total: u64,
+    #[serde(default)]
+    pub reductions_omitted: u64,
+    #[serde(default)]
+    pub reproduced: bool,
     pub stop_reason: String,
     pub remaining_risks: Vec<String>,
     pub reason: String,
 }
 
+pub(crate) const MAX_REDUCTIONS: usize = 64;
+pub(crate) const MAX_PROOF_FILES: usize = 64;
+pub(crate) const MAX_PROOF_FILE_BYTES: u64 = 64 * 1024;
+pub(crate) const MAX_PROOF_TOTAL_BYTES: u64 = 256 * 1024;
+pub(crate) const MAX_MINIMIZE_ITEMS_PER_FILE: usize = 512;
 pub(crate) const MAX_ANALYZED_DIAGNOSTICS: usize = 128;
 pub(crate) const MAX_GROUPS: usize = 32;
 pub(crate) const MAX_RELATIONS: usize = 48;

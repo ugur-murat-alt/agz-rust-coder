@@ -16,4 +16,4 @@ pub use model::{
     ChangeNewFileData, ChangeOutcome, ChangePatchData, ChangeRequest, ChangeSourceHashData,
     ChangeSuggestionPackageData, ChangeSuggestionPatchData, NewFileInput, PatchInput,
 };
-pub use service::ChangeService;
+pub use service::{CandidateTree, CandidateTreeSkip, ChangeService};
