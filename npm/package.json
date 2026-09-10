@@ -1,0 +1,44 @@
+{
+  "name": "@agz-yazilim/agz-rust-mcp",
+  "version": "0.2.0",
+  "description": "Standalone stdio MCP server for Rust correctness: compiler-backed check, test, docs, audit, and semantic tooling for MCP clients. An AGZ Yazılım product.",
+  "type": "module",
+  "bin": {
+    "agz-rust-mcp": "bin/agz-rust-mcp.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin/",
+    "README.md"
+  ],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "rust",
+    "cargo",
+    "clippy",
+    "rust-analyzer",
+    "stdio",
+    "developer-tools",
+    "ai",
+    "agz-yazilim"
+  ],
+  "author": "AGZ Yazılım",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ugur-murat-alt/agz-rust-mcp"
+  },
+  "homepage": "https://github.com/ugur-murat-alt/agz-rust-mcp",
+  "bugs": {
+    "url": "https://github.com/ugur-murat-alt/agz-rust-mcp/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}
