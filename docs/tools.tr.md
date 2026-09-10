@@ -31,6 +31,7 @@ işaretini korur.
 | `rename` | Rust Analyzer | Kaynağa asla yazmaz | Doğrulanmış `old_string`/`new_string` edit paketi. |
 | `refactor` | Rust Analyzer | Kaynağa asla yazmaz | Doğrulanmış, yazmasız refactor paketi. |
 | `change` | Sunucuya ait scratch + aday doğrulaması için Cargo/rustc | Workspace'e asla yazmaz; yalnız aday kopyayı derler | Aday hash'leri, doğrulama kanıtı (taze `FAIL` için sınırlı tanılar ve yazmasız öneriler) ve doğrulanmış/doğrulanmamış export paketi içeren revizyona bağlı change kaydı. |
+| `work` | change/validate üzerinde sunucuya ait work kaydı | Workspace'e asla yazmaz; yalnız bağlı aday kopyayı derler | Açık kapılar ve bütçelerle tipli intent yürütmesi: dürüst `READY` istenen-kapı kanıtı, tek kullanımlık revizyona bağlı token içeren sınırlı `NEEDS_MODEL` handoff veya tipli `BLOCKED`/`FAILED`/`CANCELLED` durma nedeni. |
 
 `check` hedefleri `check`, `clippy`, `test`, `doc`, `fmt` ve `all` değerleridir.
 Biçimlendirme yalnız kontrol kipinde çalışır. Tamamlanmış açık bir doğrulama daha
@@ -109,6 +110,51 @@ byte doğrulaması geçmiş satırlarda bulunur: sonraki bir `stage` önceki sat
 geçersiz kılar ve bu geri bildirimi kaldırır. Derleyici metni güvenilmez kanıt
 olarak kalır ve tüm sonuç `limits.tool_output_bytes` içinde görünür kırpmayla
 sınırlanır.
+## Work Yürütücüsü
+
+`work`, tek bir sınırlı intent'i mevcut doğrulanmış domain API'leri üzerinden
+yürütür; plan düğümü olarak keyfi bir kabuk komutu asla eklenmez. Eylemler
+`start`, `resume`, `inspect` ve `cancel`'dır. Yaşam döngüsü
+`PLANNED → COLLECTING → STAGING → VALIDATING → NEEDS_MODEL / READY / BLOCKED /
+FAILED / CANCELLED` şeklindedir. Her `intent` tipli ve açıktır: bir `template`
+(`implement_with_contract`, `repair_compile_failure` veya `refactor_and_verify`),
+`scopePaths`, sınırlı `contract` ve `stopCondition`, tipli `acceptanceGates`
+(`check` ile aynı Cargo hedefleri) ve aday başına `changeBudget`. `scopePaths`
+dışındaki aday yamaları plan sessizce genişletilmeden `BLOCKED` olarak reddedilir.
+
+`start`, change'i oluşturur (`change(action=create)`) veya devralır, host adayını
+stage eder (`change(action=stage)`) ve istenen her kapıyı
+`change(action=validate)` olarak çalıştırır. `READY` yalnız güncel revizyonda
+istenen tüm kapılar taze ve otoriter biçimde geçtiğinde döner; bu, o revizyonda
+istenen kapıların kanıtıdır; davranış sözleşmesinin genel olarak sağlandığının
+veya kaynağın uygulandığının kanıtı değildir.
+
+Kapı hatası, sınırlı bir karar paketiyle `NEEDS_MODEL` döndürür: `changeId`,
+`revision`, `patchHash`, sınırlı `diagnostics`, machine-applicable
+`suggestionPackage`, çözülmemiş yükümlülükler ve tipli aday girdi şeması ile
+birlikte **work, revizyon ve patch hash'ine bağlı tek kullanımlık bir devam
+token'ı**. `resume`, `workId` ve `continuationToken` alanlarını zorunlu tutar;
+token'ın kullanılmadığını ve süresinin dolmadığını, bağlı change'in hâlâ aynı
+revizyon ve patch hash'ini bildirdiğini doğrular, token'ı tüketir, host adayını
+stage eder ve istenen kapıları yineler. Bayat, tekrar kullanılmış, süresi dolmuş
+veya yanlış revizyona ait token `STALE` olarak reddedilir; daha önce denenmiş
+özdeş aday `BLOCKED` ("ilerleme yok") olarak reddedilir; tanıları önceki handoff
+ile birebir aynı olan aday da aynı şekilde durdurulur. Bütçeler (`maxCompiles`,
+`maxCandidates`, `maxHandoffs`, `wallTimeMs`) stage öncesinde ve her derleme
+öncesinde denetlenir; tükenme, tam bütçe adı ve bildirilen durma koşuluyla
+`BLOCKED` döner. `inspect`, sınırlı kaydı döndürür (`workId` ile veya ona bağlı
+en güncel work için `changeId` ile). `cancel`, work'ü `CANCELLED` işaretler ve
+kayıtlı iptal token'ı üzerinden bağlı change doğrulamasını iptal eder; change
+scratch alanı kendi TTL temizliğine bırakılır.
+
+Gerekli bir araç kapalıysa, offline kısıt ağ tabanlı bir gerekli araçla
+çelişiyorsa veya change servisi yoksa da `BLOCKED` döner; yürütücü sessizce
+başka bir plana geçmez. Work kayıtları bu sürümde bellek içidir ve sunucu
+yeniden başlatıldığında korunmaz; bağlı change scratch alanı kendi TTL
+temizliğini kullanır. Derleyici metni ve host aday metni,
+`limits.tool_output_bytes` içinde görünür kırpmayla güvenilmez kanıt olarak
+kalır.
+
 ## Bağlam Kapsülleri
 
 `context` yalnız tipli çıpalarla çalışır: `{kind:"file",file,range?}` ve
@@ -158,6 +204,12 @@ bildirir, `tasks/cancel` kabul eder; istek, root-epoch ve kapanma iptallerini
 aktarır; terminal task durumunu sınırlı saklama sonrasında kaldırır. Task
 desteklemeyen istemciler için eşzamanlı fallback korunur.
 
+`work` bu sürümde `change` ve `context` gibi eşzamanlıdır: MCP task desteği olan
+ve olmayan istemciler aynı tipli eylem sonucunu alır. İstek iptali ve kapanma
+yine iptal köprüsü üzerinden bağlı change doğrulamasına aktarılır ve
+`work(action=cancel)`, work kaydının iptal token'ı üzerinden çalışmakta olan
+doğrulamayı iptal eder.
+
 ## Yapılandırma Kaynakları
 
 Öncelik CLI, `AGZ_RUST_CODER_*` ortamı, açık TOML ve varsayılanlardır. Listeler
@@ -185,6 +237,7 @@ platformun path-list ayırıcısını kullanır.
 | `tools.rename` | `true` | LSP açıksa `rename` kaydı. |
 | `tools.refactor` | `true` | LSP açıksa `refactor` kaydı. |
 | `tools.change` | `true` | `change` kaydı. |
+| `tools.work` | `true` | `work` kaydı. |
 | `cargo.path` | PATH `cargo` | İsteğe bağlı Cargo binary değişimi. |
 | `gate.hard_timeout_ms` | `600000` | Tek Cargo işlemi son süresi. |
 | `gate.debounce_ms` | `500` | Kararlı girdi bekleme süresi. |
@@ -213,6 +266,12 @@ platformun path-list ayırıcısını kullanır.
 | `change.max_bytes` | `268435456` | Change başına yakalanan aday byte. |
 | `change.ttl_ms` | `86400000` | Açılış taramasından önce orphan ve discarded scratch saklama süresi. |
 | `change.max_revisions` | `32` | Change başına stage revizyonu. |
+| `work.max_active` | `4` | Sunucu başına eşzamanlı, terminal olmayan work öğesi. |
+| `work.max_compiles` | `12` | Bir work öğesinin çalıştırabileceği kapı doğrulaması. |
+| `work.max_candidates` | `4` | Bir work öğesinin stage edebileceği host aday revizyonu. |
+| `work.max_handoffs` | `3` | Bir work öğesinin verebileceği sınırlı `NEEDS_MODEL` handoff sayısı. |
+| `work.wall_time_ms` | `600000` | Bir work öğesi için duvar saati bütçesi. |
+| `work.continuation_ttl_ms` | `900000` | Tek kullanımlık handoff token'ının geçerlilik süresi. |
 | `context.max_capsules` | `32` | Bellek içi kapsül ring kapasitesi. |
 | `context.capsule_ttl_ms` | `900000` | Kapsül TTL süresi; root epoch değişimi de geçersiz kılar. |
 | `context.max_items` | `64` | Bir kapsüle seçilen öğe sayısı. |

@@ -87,6 +87,7 @@ OpenCode commonly exposes grouped MCP tools as `rust_*`.
 | `rename` | `rust_rename` | `enabled` | Produce a verified rename edit package without applying it. |
 | `refactor` | `rust_refactor` | `enabled` | Produce a verified refactor edit package without applying it. |
 | `change` | `rust_change` | `enabled` | Create, stage, and validate a revision-bound changeset in server-owned scratch without writing the workspace. |
+| `work` | `rust_work` | `enabled` | Drive a typed intent through change/validate with explicit gates and budgets, returning honest gate evidence or a bounded single-use handoff. |
 
 Every tool returns deterministic structured data plus an equivalent bounded text
 fallback. External data stays under `untrustedData`. Expected domain outcomes

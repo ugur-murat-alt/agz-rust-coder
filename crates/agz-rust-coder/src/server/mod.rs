@@ -14,7 +14,8 @@ pub use handler::{
     ExplainInput, ExplainOutput, ExplainSourceBindingData, HierarchyDirection, HierarchyInput,
     ImplementationsInput, ProfileAction, ProfileBudgetInput, ProfileConfigurationInput,
     ProfileData, ProfileInput, ProfileOutput, RefactorInput, RenameInput, RustCoderServer,
-    SemanticData, SemanticInput, SemanticOutput, SymbolInput, SymbolsInput, tool_definitions,
+    SemanticData, SemanticInput, SemanticOutput, SymbolInput, SymbolsInput, WorkData, WorkInput,
+    WorkOutput, tool_definitions,
 };
 pub use progress::ProgressReporter;
 pub use response::{ToolData, ToolOutput, WorkspaceInfo};
@@ -43,6 +44,7 @@ use crate::{
     process::{ProcessJournal, ProcessSupervisor},
     telemetry::ActivityLog,
     tools::{AuditLimits, AuditService, CheckService, ProfileService},
+    work::WorkService,
     workspace::{AuthorizedRoot, MetadataService, RootGuard},
 };
 use admission::AdmissionController;
@@ -59,6 +61,9 @@ pub struct AppState {
     /// Present only when `tools.change` is enabled so a disabled tool never
     /// validates, creates, or touches the scratch directory at startup.
     change: Option<Arc<ChangeService>>,
+    /// Bounded work executor. It is always constructed; when `tools.change` is
+    /// disabled it fails every action closed as `BLOCKED`.
+    work: WorkService,
     profile: ProfileService,
     audit: AuditService,
     docs: Arc<DocsResolver>,
@@ -84,6 +89,7 @@ impl fmt::Debug for AppState {
             .field("processes", &self.processes)
             .field("check", &self.check)
             .field("change", &self.change)
+            .field("work", &self.work)
             .field("lsp_available", &self.lsp.is_some())
             .field("tasks", &self.tasks)
             .field("shutting_down", &self.is_shutting_down())
@@ -154,6 +160,7 @@ impl AppState {
         } else {
             None
         };
+        let work = WorkService::new(&config, change.clone());
         let metadata = Arc::new(MetadataService::new(Arc::clone(&roots)));
         let capsules = Arc::new(CapsuleStore::new(
             usize::try_from(config.context.max_capsules).unwrap_or(usize::MAX),
@@ -182,6 +189,7 @@ impl AppState {
             processes: processes.clone(),
             check,
             change,
+            work,
             profile,
             audit,
             docs: Arc::new(DocsResolver::with_authorized_supervisor(processes)),
@@ -307,6 +315,10 @@ impl AppState {
 
     pub(crate) fn change_service(&self) -> Option<&Arc<ChangeService>> {
         self.change.as_ref()
+    }
+
+    pub(crate) fn work_service(&self) -> &WorkService {
+        &self.work
     }
 
     pub(crate) fn profile_service(&self) -> &ProfileService {

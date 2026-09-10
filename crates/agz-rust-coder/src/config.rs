@@ -47,6 +47,7 @@ pub struct Config {
     pub cargo: CargoConfig,
     pub gate: GateConfig,
     pub change: ChangeConfig,
+    pub work: WorkConfig,
     pub rust_analyzer: RustAnalyzerConfig,
     pub docs: DocsConfig,
     pub context: ContextConfig,
@@ -75,6 +76,7 @@ pub struct ToolConfig {
     pub rename: bool,
     pub refactor: bool,
     pub change: bool,
+    pub work: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +122,19 @@ pub struct ChangeConfig {
     pub max_bytes: u64,
     pub ttl_ms: u64,
     pub max_revisions: u64,
+}
+
+/// Bounds for the bounded work executor. `wall_time_ms` is the per-work wall
+/// budget; `continuation_ttl_ms` bounds how long a single-use host handoff token
+/// stays valid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkConfig {
+    pub max_active: u64,
+    pub max_compiles: u64,
+    pub max_candidates: u64,
+    pub max_handoffs: u64,
+    pub wall_time_ms: u64,
+    pub continuation_ttl_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,6 +238,7 @@ impl Config {
                 rename: true,
                 refactor: true,
                 change: true,
+                work: true,
             },
             cargo: CargoConfig { path: None },
             gate: GateConfig {
@@ -243,6 +259,14 @@ impl Config {
                 max_bytes: 268_435_456,
                 ttl_ms: 86_400_000,
                 max_revisions: 32,
+            },
+            work: WorkConfig {
+                max_active: 4,
+                max_compiles: 12,
+                max_candidates: 4,
+                max_handoffs: 3,
+                wall_time_ms: 600_000,
+                continuation_ttl_ms: 900_000,
             },
             rust_analyzer: RustAnalyzerConfig {
                 path: None,
@@ -400,6 +424,17 @@ impl Config {
         check_range("change.max_bytes", self.change.max_bytes, 1_024, u64::MAX)?;
         check_range("change.ttl_ms", self.change.ttl_ms, 1, u64::MAX)?;
         check_range("change.max_revisions", self.change.max_revisions, 1, 4_096)?;
+        check_range("work.max_active", self.work.max_active, 1, 64)?;
+        check_range("work.max_compiles", self.work.max_compiles, 1, 4_096)?;
+        check_range("work.max_candidates", self.work.max_candidates, 1, 256)?;
+        check_range("work.max_handoffs", self.work.max_handoffs, 0, 64)?;
+        check_range("work.wall_time_ms", self.work.wall_time_ms, 1, 86_400_000)?;
+        check_range(
+            "work.continuation_ttl_ms",
+            self.work.continuation_ttl_ms,
+            1_000,
+            86_400_000,
+        )?;
         check_range("context.max_capsules", self.context.max_capsules, 1, 1_024)?;
         check_range(
             "context.capsule_ttl_ms",
@@ -560,6 +595,9 @@ impl Config {
         if self.tools.change {
             names.push("change");
         }
+        if self.tools.work {
+            names.push("work");
+        }
         names
     }
 
@@ -606,6 +644,8 @@ pub struct CliOptions {
     pub tools_refactor: Option<bool>,
     #[arg(long = "tools-change")]
     pub tools_change: Option<bool>,
+    #[arg(long = "tools-work")]
+    pub tools_work: Option<bool>,
     #[arg(long = "cargo-path")]
     pub cargo_path: Option<PathBuf>,
     #[arg(long = "gate-hard-timeout-ms")]
@@ -638,6 +678,18 @@ pub struct CliOptions {
     pub change_ttl_ms: Option<u64>,
     #[arg(long = "change-max-revisions")]
     pub change_max_revisions: Option<u64>,
+    #[arg(long = "work-max-active")]
+    pub work_max_active: Option<u64>,
+    #[arg(long = "work-max-compiles")]
+    pub work_max_compiles: Option<u64>,
+    #[arg(long = "work-max-candidates")]
+    pub work_max_candidates: Option<u64>,
+    #[arg(long = "work-max-handoffs")]
+    pub work_max_handoffs: Option<u64>,
+    #[arg(long = "work-wall-time-ms")]
+    pub work_wall_time_ms: Option<u64>,
+    #[arg(long = "work-continuation-ttl-ms")]
+    pub work_continuation_ttl_ms: Option<u64>,
     #[arg(long = "rust-analyzer-path")]
     pub rust_analyzer_path: Option<PathBuf>,
     #[arg(long = "rust-analyzer-timeout-ms")]
@@ -722,6 +774,7 @@ struct FileConfig {
     cargo: Option<FileCargoConfig>,
     gate: Option<FileGateConfig>,
     change: Option<FileChangeConfig>,
+    work: Option<FileWorkConfig>,
     rust_analyzer: Option<FileRustAnalyzerConfig>,
     docs: Option<FileDocsConfig>,
     context: Option<FileContextConfig>,
@@ -751,6 +804,7 @@ struct FileToolConfig {
     rename: Option<bool>,
     refactor: Option<bool>,
     change: Option<bool>,
+    work: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -798,6 +852,17 @@ struct FileChangeConfig {
     max_bytes: Option<u64>,
     ttl_ms: Option<u64>,
     max_revisions: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct FileWorkConfig {
+    max_active: Option<u64>,
+    max_compiles: Option<u64>,
+    max_candidates: Option<u64>,
+    max_handoffs: Option<u64>,
+    wall_time_ms: Option<u64>,
+    continuation_ttl_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -915,6 +980,7 @@ fn apply_file(config: &mut Config, file: FileConfig) {
         apply_opt(&mut config.tools.rename, tools.rename);
         apply_opt(&mut config.tools.refactor, tools.refactor);
         apply_opt(&mut config.tools.change, tools.change);
+        apply_opt(&mut config.tools.work, tools.work);
     }
     if let Some(cargo) = file.cargo {
         if let Some(path) = cargo.path {
@@ -946,6 +1012,17 @@ fn apply_file(config: &mut Config, file: FileConfig) {
         apply_opt(&mut config.change.max_bytes, change.max_bytes);
         apply_opt(&mut config.change.ttl_ms, change.ttl_ms);
         apply_opt(&mut config.change.max_revisions, change.max_revisions);
+    }
+    if let Some(work) = file.work {
+        apply_opt(&mut config.work.max_active, work.max_active);
+        apply_opt(&mut config.work.max_compiles, work.max_compiles);
+        apply_opt(&mut config.work.max_candidates, work.max_candidates);
+        apply_opt(&mut config.work.max_handoffs, work.max_handoffs);
+        apply_opt(&mut config.work.wall_time_ms, work.wall_time_ms);
+        apply_opt(
+            &mut config.work.continuation_ttl_ms,
+            work.continuation_ttl_ms,
+        );
     }
     if let Some(ra) = file.rust_analyzer {
         if let Some(path) = ra.path {
@@ -1062,6 +1139,7 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
         "TOOLS__RENAME" => config.tools.rename = parse_bool(value).map_err(invalid)?,
         "TOOLS__REFACTOR" => config.tools.refactor = parse_bool(value).map_err(invalid)?,
         "TOOLS__CHANGE" => config.tools.change = parse_bool(value).map_err(invalid)?,
+        "TOOLS__WORK" => config.tools.work = parse_bool(value).map_err(invalid)?,
         "CARGO__PATH" => config.cargo.path = Some(nonempty_path(value).map_err(invalid)?),
         "GATE__HARD_TIMEOUT_MS" => {
             config.gate.hard_timeout_ms = parse_u64(value).map_err(invalid)?;
@@ -1097,6 +1175,24 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
         }
         "CHANGE__MAX_REVISIONS" => {
             config.change.max_revisions = parse_u64(value).map_err(invalid)?;
+        }
+        "WORK__MAX_ACTIVE" => {
+            config.work.max_active = parse_u64(value).map_err(invalid)?;
+        }
+        "WORK__MAX_COMPILES" => {
+            config.work.max_compiles = parse_u64(value).map_err(invalid)?;
+        }
+        "WORK__MAX_CANDIDATES" => {
+            config.work.max_candidates = parse_u64(value).map_err(invalid)?;
+        }
+        "WORK__MAX_HANDOFFS" => {
+            config.work.max_handoffs = parse_u64(value).map_err(invalid)?;
+        }
+        "WORK__WALL_TIME_MS" => {
+            config.work.wall_time_ms = parse_u64(value).map_err(invalid)?;
+        }
+        "WORK__CONTINUATION_TTL_MS" => {
+            config.work.continuation_ttl_ms = parse_u64(value).map_err(invalid)?;
         }
         "RUST_ANALYZER__PATH" => {
             config.rust_analyzer.path = Some(nonempty_path(value).map_err(invalid)?);
@@ -1221,6 +1317,7 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
     apply_opt(&mut config.tools.rename, cli.tools_rename);
     apply_opt(&mut config.tools.refactor, cli.tools_refactor);
     apply_opt(&mut config.tools.change, cli.tools_change);
+    apply_opt(&mut config.tools.work, cli.tools_work);
     if let Some(path) = cli.cargo_path.clone() {
         config.cargo.path = Some(path);
     }
@@ -1249,6 +1346,15 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
     apply_opt(&mut config.change.max_bytes, cli.change_max_bytes);
     apply_opt(&mut config.change.ttl_ms, cli.change_ttl_ms);
     apply_opt(&mut config.change.max_revisions, cli.change_max_revisions);
+    apply_opt(&mut config.work.max_active, cli.work_max_active);
+    apply_opt(&mut config.work.max_compiles, cli.work_max_compiles);
+    apply_opt(&mut config.work.max_candidates, cli.work_max_candidates);
+    apply_opt(&mut config.work.max_handoffs, cli.work_max_handoffs);
+    apply_opt(&mut config.work.wall_time_ms, cli.work_wall_time_ms);
+    apply_opt(
+        &mut config.work.continuation_ttl_ms,
+        cli.work_continuation_ttl_ms,
+    );
     if let Some(path) = cli.rust_analyzer_path.clone() {
         config.rust_analyzer.path = Some(path);
     }
@@ -1714,6 +1820,44 @@ mod tests {
             out_of_range,
             Err(ConfigError::InvalidField { .. })
         ));
+    }
+
+    #[test]
+    fn work_config_accepts_toml_environment_and_cli_layers() {
+        let mut cli = cli();
+        cli.work_wall_time_ms = Some(5_000);
+        let config = Config::from_sources(
+            "/workspace",
+            Some("[tools]\nwork = false\n[work]\nmax_handoffs = 1\n"),
+            [("AGZ_RUST_CODER_WORK__MAX_CANDIDATES", "2")],
+            &cli,
+        )
+        .unwrap();
+        assert!(!config.tools.work);
+        assert!(!config.enabled_tool_names().contains(&"work"));
+        assert_eq!(config.work.max_handoffs, 1);
+        assert_eq!(config.work.max_candidates, 2);
+        assert_eq!(config.work.wall_time_ms, 5_000);
+
+        let mut enabled = cli.clone();
+        enabled.tools_work = Some(true);
+        let config = Config::from_sources(
+            "/workspace",
+            Some("[tools]\nwork = false\n"),
+            std::iter::empty::<(String, String)>(),
+            &enabled,
+        )
+        .unwrap();
+        assert!(config.tools.work);
+        assert!(config.enabled_tool_names().contains(&"work"));
+
+        let out_of_range = Config::from_sources(
+            "/workspace",
+            Some("[work]\ncontinuation_ttl_ms = 1\n"),
+            std::iter::empty::<(String, String)>(),
+            &cli,
+        );
+        assert_invalid_field(out_of_range.map(|_| ()), "work.continuation_ttl_ms");
     }
 
     #[test]

@@ -48,6 +48,7 @@ use crate::{
         symbol_hierarchy, symbol_hover, symbol_implementations, symbol_references,
         with_lsp_authority, with_lsp_cancellation,
     },
+    work::{WorkAction, WorkBudget, WorkConstraints, WorkIntent, WorkOutcome, WorkRequest},
     workspace::{ClientRoots, WorkspaceRoot, select_in_root},
 };
 
@@ -164,6 +165,60 @@ pub struct ChangeInput {
 pub type ChangeOutput = ToolOutput<ChangeData>;
 
 pub use crate::change::ChangeData;
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkInput {
+    pub action: WorkAction,
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub dir: Option<String>,
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub work_id: Option<String>,
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub continuation_token: Option<String>,
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub change_id: Option<String>,
+    #[serde(default)]
+    pub intent: Option<WorkIntent>,
+    /// Host candidate patches. `resume` requires at least one.
+    #[serde(default)]
+    #[schemars(length(max = 512))]
+    pub patches: Vec<PatchInput>,
+    #[serde(default)]
+    #[schemars(length(max = 512))]
+    pub new_files: Vec<NewFileInput>,
+    #[serde(default)]
+    pub constraints: WorkConstraints,
+    #[serde(default)]
+    pub budget: WorkBudgetInput,
+}
+
+/// Per-call work budget overrides. Every value is bounded by the configured
+/// `[work]` ceiling; omitted values use the configured default.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkBudgetInput {
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub max_compiles: Option<u64>,
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub max_candidates: Option<u64>,
+    #[serde(default)]
+    #[schemars(range(min = 0))]
+    pub max_handoffs: Option<u64>,
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub wall_time_ms: Option<u64>,
+}
+
+pub type WorkOutput = ToolOutput<WorkData>;
+
+pub use crate::work::WorkData;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -859,6 +914,13 @@ pub fn tool_definitions(config: &Config) -> Vec<Tool> {
         tools.push(tool::<ChangeInput, ChangeData>(
             "change",
             "Create, stage, validate, export, and discard a revision-bound changeset in server-owned scratch.",
+            ToolAnnotations::new().destructive(true).open_world(true),
+        ));
+    }
+    if config.tools.work {
+        tools.push(tool::<WorkInput, WorkData>(
+            "work",
+            "Start, resume, inspect, or cancel a bounded work item over change/validate with typed templates, explicit gates, and single-use handoffs.",
             ToolAnnotations::new().destructive(true).open_world(true),
         ));
     }
@@ -1990,6 +2052,47 @@ impl ServerHandler for RustCoderServer {
                     &workspace.root,
                 )))
             }
+            "work" => {
+                let input: WorkInput = parse_input(arguments)?;
+                validate_work(self.state.config(), &input)?;
+                let Ok(_permit) = self.state.try_admit() else {
+                    return Ok(CallToolResponse::Complete(resource_blocked_work(
+                        &self.state,
+                        input.action,
+                    )));
+                };
+                if self.state.is_shutting_down() {
+                    return Ok(CallToolResponse::Complete(resource_blocked_work(
+                        &self.state,
+                        input.action,
+                    )));
+                }
+                let workspace = match self.resolve_workspace(input.dir.as_deref(), &context).await {
+                    Ok(workspace) => workspace,
+                    Err(reason) => {
+                        return Ok(CallToolResponse::Complete(inconclusive_work(
+                            &self.state,
+                            input.action,
+                            reason,
+                        )));
+                    }
+                };
+                let cancellation =
+                    workspace.cancellation(context.ct.clone(), self.state.shutdown_token());
+                let request = work_request(&input, self.state.config());
+                let outcome = Box::pin(self.state.work_service().execute(
+                    request,
+                    &workspace.root,
+                    cancellation.token(),
+                    None,
+                ))
+                .await;
+                Ok(CallToolResponse::Complete(work_result(
+                    &self.state,
+                    outcome,
+                    &workspace.root,
+                )))
+            }
             _ => Err(McpError::method_not_found::<CallToolRequestMethod>()),
         }
     }
@@ -2715,6 +2818,267 @@ fn inconclusive_change(state: &AppState, action: ChangeAction, reason: String) -
         "change",
         "INCONCLUSIVE",
         "The change workspace could not be resolved.",
+        data,
+    )
+    .into_call_tool_result(state.max_output_bytes(), true)
+}
+
+fn validate_work(config: &Config, input: &WorkInput) -> Result<(), McpError> {
+    validate_dir(input.dir.as_deref())?;
+    if let Some(work_id) = input.work_id.as_deref() {
+        validate_string(work_id, "workId")?;
+    }
+    if let Some(token) = input.continuation_token.as_deref() {
+        validate_string(token, "continuationToken")?;
+    }
+    if let Some(change_id) = input.change_id.as_deref() {
+        validate_string(change_id, "changeId")?;
+    }
+    if input.patches.len() > 512 {
+        return Err(McpError::invalid_params(
+            "patches accepts at most 512 items",
+            None,
+        ));
+    }
+    if input.new_files.len() > 512 {
+        return Err(McpError::invalid_params(
+            "newFiles accepts at most 512 items",
+            None,
+        ));
+    }
+    for patch in &input.patches {
+        validate_string(&patch.file, "patches.file")?;
+        if patch.old_string.trim().is_empty() {
+            return Err(McpError::invalid_params(
+                "patches.oldString cannot be empty",
+                None,
+            ));
+        }
+    }
+    for file in &input.new_files {
+        validate_string(&file.file, "newFiles.file")?;
+        if file.content.len() > 1_048_576 {
+            return Err(McpError::invalid_params(
+                "newFiles.content is limited to 1 MiB per file",
+                None,
+            ));
+        }
+    }
+    match input.action {
+        WorkAction::Start => {
+            if input.intent.is_none() {
+                return Err(McpError::invalid_params(
+                    "action=start requires intent",
+                    None,
+                ));
+            }
+            if input.work_id.is_some() || input.continuation_token.is_some() {
+                return Err(McpError::invalid_params(
+                    "action=start does not accept workId or continuationToken",
+                    None,
+                ));
+            }
+        }
+        WorkAction::Resume => {
+            if input.work_id.as_deref().is_none_or(str::is_empty) {
+                return Err(McpError::invalid_params(
+                    "action=resume requires workId",
+                    None,
+                ));
+            }
+            if input
+                .continuation_token
+                .as_deref()
+                .is_none_or(str::is_empty)
+            {
+                return Err(McpError::invalid_params(
+                    "action=resume requires continuationToken",
+                    None,
+                ));
+            }
+            if input.change_id.is_some() {
+                return Err(McpError::invalid_params(
+                    "action=resume does not accept changeId; it uses the recorded binding",
+                    None,
+                ));
+            }
+        }
+        WorkAction::Inspect => {
+            if input.work_id.as_deref().is_none_or(str::is_empty)
+                && input.change_id.as_deref().is_none_or(str::is_empty)
+            {
+                return Err(McpError::invalid_params(
+                    "action=inspect requires workId or changeId",
+                    None,
+                ));
+            }
+        }
+        WorkAction::Cancel => {
+            if input.work_id.as_deref().is_none_or(str::is_empty) {
+                return Err(McpError::invalid_params(
+                    "action=cancel requires workId",
+                    None,
+                ));
+            }
+        }
+    }
+    if let Some(intent) = &input.intent {
+        if intent.scope_paths.is_empty() {
+            return Err(McpError::invalid_params(
+                "intent.scopePaths must not be empty",
+                None,
+            ));
+        }
+        if intent.contract.trim().is_empty() {
+            return Err(McpError::invalid_params(
+                "intent.contract cannot be empty",
+                None,
+            ));
+        }
+        if intent.stop_condition.trim().is_empty() {
+            return Err(McpError::invalid_params(
+                "intent.stopCondition cannot be empty",
+                None,
+            ));
+        }
+        if intent.acceptance_gates.is_empty() {
+            return Err(McpError::invalid_params(
+                "intent.acceptanceGates must not be empty",
+                None,
+            ));
+        }
+        if intent.change_budget.max_patches == 0 {
+            return Err(McpError::invalid_params(
+                "intent.changeBudget.maxPatches must be at least 1",
+                None,
+            ));
+        }
+    }
+    if let Some(value) = input.budget.max_compiles
+        && (value == 0 || value > config.work.max_compiles)
+    {
+        return Err(McpError::invalid_params(
+            format!(
+                "maxCompiles must be between 1 and {}",
+                config.work.max_compiles
+            ),
+            None,
+        ));
+    }
+    if let Some(value) = input.budget.max_candidates
+        && (value == 0 || value > config.work.max_candidates)
+    {
+        return Err(McpError::invalid_params(
+            format!(
+                "maxCandidates must be between 1 and {}",
+                config.work.max_candidates
+            ),
+            None,
+        ));
+    }
+    if let Some(value) = input.budget.max_handoffs
+        && value > config.work.max_handoffs
+    {
+        return Err(McpError::invalid_params(
+            format!(
+                "maxHandoffs must be between 0 and {}",
+                config.work.max_handoffs
+            ),
+            None,
+        ));
+    }
+    if let Some(value) = input.budget.wall_time_ms
+        && (value == 0 || value > config.work.wall_time_ms)
+    {
+        return Err(McpError::invalid_params(
+            format!(
+                "wallTimeMs must be between 1 and {}",
+                config.work.wall_time_ms
+            ),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn work_request(input: &WorkInput, config: &Config) -> WorkRequest {
+    let max_compiles = input
+        .budget
+        .max_compiles
+        .unwrap_or(config.work.max_compiles)
+        .clamp(1, config.work.max_compiles);
+    let max_candidates = input
+        .budget
+        .max_candidates
+        .unwrap_or(config.work.max_candidates)
+        .clamp(1, config.work.max_candidates);
+    let max_handoffs = input
+        .budget
+        .max_handoffs
+        .unwrap_or(config.work.max_handoffs)
+        .min(config.work.max_handoffs);
+    let wall_time_ms = input
+        .budget
+        .wall_time_ms
+        .unwrap_or(config.work.wall_time_ms)
+        .clamp(1, config.work.wall_time_ms);
+    WorkRequest {
+        action: input.action,
+        work_id: input.work_id.clone(),
+        continuation_token: input.continuation_token.clone(),
+        change_id: input.change_id.clone(),
+        intent: input.intent.clone(),
+        patches: input.patches.clone(),
+        new_files: input.new_files.clone(),
+        constraints: input.constraints.clone(),
+        budget: WorkBudget {
+            max_compiles,
+            max_candidates,
+            max_handoffs,
+            wall_time_ms,
+        },
+    }
+}
+
+fn work_result(state: &AppState, outcome: WorkOutcome, root: &WorkspaceRoot) -> CallToolResult {
+    ToolOutput::new("work", outcome.status, outcome.summary, outcome.data)
+        .with_workspace(super::WorkspaceInfo {
+            requested_dir: root.path().display().to_string(),
+            package_root: root.path().display().to_string(),
+            workspace_root: root.authority_path().display().to_string(),
+            manifest_path: String::new(),
+        })
+        .with_untrusted_data()
+        .into_call_tool_result(state.max_output_bytes(), outcome.is_error)
+}
+
+fn empty_work_data(action: WorkAction) -> WorkData {
+    WorkData {
+        action: action.as_str().to_owned(),
+        state: "absent".to_owned(),
+        ..WorkData::default()
+    }
+}
+
+fn resource_blocked_work(state: &AppState, action: WorkAction) -> CallToolResult {
+    let mut data = empty_work_data(action);
+    data.reason = RESOURCE_BLOCKED_REASON.to_owned();
+    ToolOutput::new(
+        "work",
+        "RESOURCE_BLOCKED",
+        "The work request could not be admitted.",
+        data,
+    )
+    .into_call_tool_result(state.max_output_bytes(), true)
+}
+
+fn inconclusive_work(state: &AppState, action: WorkAction, reason: String) -> CallToolResult {
+    let mut data = empty_work_data(action);
+    data.reason = reason;
+    ToolOutput::new(
+        "work",
+        "INCONCLUSIVE",
+        "The work workspace could not be resolved.",
         data,
     )
     .into_call_tool_result(state.max_output_bytes(), true)
@@ -4379,6 +4743,67 @@ mod tests {
                 Some(status.as_str().to_ascii_uppercase().as_str())
             );
         }
+    }
+
+    #[test]
+    fn work_actions_validate_required_fields_without_echoing_input() {
+        let config = Config::defaults_at("/workspace");
+        let intent = crate::work::WorkIntent {
+            template: crate::work::WorkTemplate::RepairCompileFailure,
+            scope_paths: vec!["src".to_owned()],
+            contract: "value() works".to_owned(),
+            stop_condition: "check passes or the budget is exhausted".to_owned(),
+            acceptance_gates: vec![crate::work::WorkGate::Check],
+            change_budget: crate::work::WorkChangeBudget {
+                max_patches: 4,
+                max_new_files: 1,
+            },
+        };
+        let base = WorkInput {
+            action: WorkAction::Start,
+            dir: Some("/workspace".to_owned()),
+            work_id: None,
+            continuation_token: None,
+            change_id: None,
+            intent: Some(intent),
+            patches: Vec::new(),
+            new_files: Vec::new(),
+            constraints: crate::work::WorkConstraints::default(),
+            budget: WorkBudgetInput::default(),
+        };
+        assert!(validate_work(&config, &base).is_ok());
+
+        let mut without_intent = base.clone();
+        without_intent.intent = None;
+        assert!(validate_work(&config, &without_intent).is_err());
+
+        let mut resume_without_token = base.clone();
+        resume_without_token.action = WorkAction::Resume;
+        resume_without_token.intent = None;
+        resume_without_token.work_id = Some("wk-1-1-1".to_owned());
+        assert!(validate_work(&config, &resume_without_token).is_err());
+        resume_without_token.continuation_token = Some("token".to_owned());
+        assert!(validate_work(&config, &resume_without_token).is_ok());
+
+        let mut inspect_without_id = base.clone();
+        inspect_without_id.action = WorkAction::Inspect;
+        inspect_without_id.intent = None;
+        assert!(validate_work(&config, &inspect_without_id).is_err());
+        inspect_without_id.work_id = Some("wk-1-1-1".to_owned());
+        assert!(validate_work(&config, &inspect_without_id).is_ok());
+
+        let mut over_budget = base.clone();
+        over_budget.budget.max_compiles = Some(config.work.max_compiles + 1);
+        assert!(validate_work(&config, &over_budget).is_err());
+
+        let mut zero_budget = base.clone();
+        zero_budget.budget.wall_time_ms = Some(0);
+        assert!(validate_work(&config, &zero_budget).is_err());
+
+        let request = work_request(&base, &config);
+        assert_eq!(request.action, WorkAction::Start);
+        assert_eq!(request.budget.max_candidates, config.work.max_candidates);
+        assert_eq!(request.budget.max_handoffs, config.work.max_handoffs);
     }
 
     #[test]
