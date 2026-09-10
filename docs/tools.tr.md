@@ -21,6 +21,7 @@ işaretini korur.
 | `crate_lookup` | crates.io | Sınırlı HTTPS isteği | `FOUND`, `NOT_FOUND`, `VERSION_MISMATCH` veya `UNAVAILABLE`. |
 | `docs` | rustdoc/docs.rs | Cache, ağ veya yerel `cargo doc` kullanabilir | Tam sürüm alıntısı ve kaynak bilgisi ya da tipli erişilememe. |
 | `context` | Rust Analyzer, workspace kaynağı, cargo metadata | Kaynağa asla yazmaz | Tanım, tüketici, test, imza, bağımlılık/feature kanıtı ve sınırlı alıntıları öğe başına nedeniyle birlikte revizyona bağlı kapsül olarak döndürür. |
+| `api` | `probe` için Rust Analyzer + workspace kaynağı ve yalıtılmış Cargo adayı | Workspace'e asla yazmaz; `probe` geçici harness'i atılan aday kopyaya yerleştirir | İmza/import/trait/feature çözümü veya tam harness, assertion, yapılandırma ve input hash ile birlikte yalnız derleme kanıtı olan `COMPILES_IN_CONFIGURATION` sonucu. |
 | `explain` | rustc/Cargo ve advisory Rust Analyzer | `macro`/`trait` için sınırlı Cargo check çalıştırır; `cfg` yalnız metadata kullanır | Kaynak nitelikli parçalar; eksik açılım eşlemesi `unknown` kalır, tahmin edilmez. |
 | `verify` | Cargo/rustc | Sınırlı matris hücrelerinde derleme yapabilir | Hücre planı veya hücre başına tipli durum, kanıt ve kapsam sınırları içeren sınırlı matris çalıştırması. |
 | `symbol` | Rust Analyzer | Workspace-code politikasına bağlı | Hover metni ve seçilen konum. |
@@ -224,6 +225,37 @@ Kapsüller bu sürümde MCP kaynağı olarak sunulmaz; belgelenen fallback `expa
 sayfalamasıdır. Boyutlar yalnız kesin UTF-8 byte ve karakter sayılarıdır;
 tokenizer yoktur ve token sayısı bildirilmez.
 
+## API Çözümü ve Probe
+
+`api` iki eylem sunar ve yeni bir semantik motor kullanmaz:
+
+- `resolve`, tek bir `{path,symbol?,line?,character?}` çıpası için mevcut Rust
+  Analyzer hover, definition, completion ve reference kanıtını cargo metadata
+  feature durumuyla birleştirir. Sınırlı imzayı, import ipuçlarını, metinsel
+  trait sınırı parçalarını, etkin feature'ları ve yerel kullanım örneklerini
+  döndürür; analyzer kanıtı yoksa açık `omitted` kaydı üretir ve `changeId`
+  yalnız bağlama etiketi olarak yazılır.
+- `probe`, host'un aday kod parçasını sunucuya ait bir change adayı içindeki
+  geçici modüle yerleştirir; aynı yakalanmış bağımlılık grafiği, `Cargo.lock`
+  (`--locked` ile), toolchain dosyası ve tipli feature seçimiyle tip kontrolü
+  yapar ve change'i atar. Harness yaması yalnız aday kopyaya uygulanır; orijinal
+  workspace'e asla yazılmaz ve sonrasında çıpa, `Cargo.toml` ve `Cargo.lock`
+  hash'leri yeniden doğrulanır. Çıpa dosyası, varsayılan `cargo check`'in
+  seçtiği bir library veya binary hedefinin bildirilmiş modülü değilse boş bir
+  başarı yerine `UNSUPPORTED_CONTEXT` döner.
+
+Başarılı probe yalnız `COMPILES_IN_CONFIGURATION` bildirir; çalışma zamanı
+doğruluğu iddia edilmez ve kod parçası hiç çalıştırılmaz. `expectedSignature`
+verildiğinde kod parçası o tipte döndürülür ve derleyici birleştirmek zorundadır;
+kod parçası `todo!`, `unimplemented!` veya başka bir ıraksayan yapı içeriyorsa
+tip kontrolü geçse bile sonuç tamamlanmış uygulama değil
+`INCOMPLETE_IMPLEMENTATION` olur. Eksik bağımlılık veya feature yalnız
+`requiresExplicitHostChange=true` taşıyan danışma niteliğinde `proposals` olarak
+döner; probe hiçbir manifest, bağımlılık veya lockfile düzenlemez. Kod parçası,
+harness, imza, yapılandırma ve input hash birlikte raporlanır; byte'lar
+`api.max_snippet_bytes`, `api.max_snippets` ve `api.compile_timeout_ms` ile
+sınırlanır ve iptal baştan sona uygulanır.
+
 ## Sonuç Anlamları
 
 Beklenen alan sonuçları tipli durum içeren başarılı MCP çağrılarıdır:
@@ -274,6 +306,7 @@ platformun path-list ayırıcısını kullanır.
 | `tools.crate_lookup` | `true` | `crate_lookup` kaydı. |
 | `tools.docs` | `true` | `docs` kaydı. |
 | `tools.context` | `true` | `context` kaydı. |
+| `tools.api` | `true` | `api` kaydı. |
 | `tools.explain` | `true` | `explain` kaydı. |
 | `tools.verify` | `true` | `verify` kaydı. |
 | `tools.lsp` | `true` | Semantik gezinme araçları kaydı. |
@@ -324,6 +357,9 @@ platformun path-list ayırıcısını kullanır.
 | `context.max_capsules` | `32` | Bellek içi kapsül ring kapasitesi. |
 | `context.capsule_ttl_ms` | `900000` | Kapsül TTL süresi; root epoch değişimi de geçersiz kılar. |
 | `context.max_items` | `64` | Bir kapsüle seçilen öğe sayısı. |
+| `api.max_snippets` | `4` | Bir `probe` için kabul edilen aday kod parçası sayısı. |
+| `api.max_snippet_bytes` | `32768` | Bir `probe` için toplam kod parçası byte bütçesi. |
+| `api.compile_timeout_ms` | `120000` | Temizlik dahil bir `probe` için duvar saati sınırı. |
 | `limits.max_rename_edits` | `200` | Rename edit sınırı. |
 | `limits.max_refactor_edits` | `200` | Refactor edit sınırı. |
 | `limits.process_output_bytes` | `8388608` | Birleşik alt süreç çıktı sınırı. |

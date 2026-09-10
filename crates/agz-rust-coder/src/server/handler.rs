@@ -45,11 +45,12 @@ use crate::{
         RepairOutcome, RepairRequest, RepairService, RepairTarget,
     },
     tools::{
-        AuditCancellation, CompareRequest, ContextEnvironment,
+        ApiAction, ApiAnchor, ApiConfiguration, ApiData, ApiEnvironment,
+        ApiRequest as DomainApiRequest, AuditCancellation, CompareRequest, ContextEnvironment,
         ContextRequest as DomainContextRequest, CrateLookupInput as DomainCrateLookupInput,
         ProfileBudget, ProfileRequest, ToolError as SemanticToolError, VerifyOutcome,
-        document_symbols, execute_context, explain, semantic_refactor, semantic_rename,
-        symbol_definition, symbol_hierarchy, symbol_hover, symbol_implementations,
+        document_symbols, execute_api, execute_context, explain, semantic_refactor,
+        semantic_rename, symbol_definition, symbol_hierarchy, symbol_hover, symbol_implementations,
         symbol_references, with_lsp_authority, with_lsp_cancellation,
     },
     work::{WorkAction, WorkBudget, WorkConstraints, WorkIntent, WorkOutcome, WorkRequest},
@@ -413,6 +414,61 @@ pub struct ContextInput {
     #[schemars(range(min = 1, max = 32))]
     pub page_size: Option<u32>,
 }
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApiAnchorInput {
+    #[schemars(length(min = 1, max = 1024))]
+    pub path: String,
+    #[serde(default)]
+    #[schemars(length(min = 1, max = 512))]
+    pub symbol: Option<String>,
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub line: Option<u32>,
+    #[serde(default)]
+    pub character: Option<u32>,
+}
+
+/// Typed Cargo feature selection, never free-form flags.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApiConfigurationInput {
+    #[serde(default)]
+    #[schemars(length(max = 64), inner(length(min = 1, max = 128)))]
+    pub features: Vec<String>,
+    #[serde(default)]
+    pub all_features: bool,
+    #[serde(default)]
+    pub no_default_features: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApiInput {
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub dir: Option<String>,
+    #[serde(default)]
+    pub action: ApiAction,
+    pub anchor: ApiAnchorInput,
+    /// Optional explicit compile assertion: the snippet must evaluate to this
+    /// Rust type for `action=probe`.
+    #[serde(default)]
+    #[schemars(length(min = 1, max = 512))]
+    pub expected_signature: Option<String>,
+    #[serde(default)]
+    #[schemars(length(max = 4), inner(length(min = 1, max = 65_536)))]
+    pub snippets: Vec<String>,
+    /// Opaque caller-supplied binding label; never read as a change candidate.
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub change_id: Option<String>,
+    #[serde(default)]
+    pub configuration: ApiConfigurationInput,
+}
+
+pub type ApiOutput = ToolOutput<ApiData>;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -884,6 +940,17 @@ pub fn tool_definitions(config: &Config) -> Vec<Tool> {
         tools.push(tool::<ContextInput, ContextData>(
             "context",
             "Prepare, expand, or delta a task-focused, revision-bound semantic context capsule.",
+            ToolAnnotations::new()
+                .read_only(true)
+                .idempotent(true)
+                .open_world(true),
+        ));
+    }
+    if config.tools.api {
+        tools.push(tool::<ApiInput, ApiData>(
+            "api",
+            "Resolve an API signature from bounded analyzer evidence or type-check a candidate snippet \
+             in an isolated copy of the workspace configuration.",
             ToolAnnotations::new()
                 .read_only(true)
                 .idempotent(true)
@@ -1403,6 +1470,65 @@ impl RustCoderServer {
         context_result(&self.state, data)
     }
 
+    /// Bounded `api` execution: `resolve` composes analyzer evidence and cargo
+    /// metadata; `probe` stages a temporary harness into a server-owned change
+    /// candidate, type-checks it, and discards it. The workspace is never
+    /// written.
+    async fn api(
+        &self,
+        input: ApiInput,
+        workspace: WorkspaceRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> CallToolResult {
+        let action = input.action;
+        let request = DomainApiRequest {
+            action,
+            anchor: ApiAnchor {
+                path: input.anchor.path.clone(),
+                symbol: input.anchor.symbol.clone(),
+                line: input.anchor.line,
+                character: input.anchor.character,
+            },
+            expected_signature: input.expected_signature.clone(),
+            snippets: input.snippets.clone(),
+            change_id: input.change_id.clone(),
+            configuration: ApiConfiguration {
+                features: input.configuration.features.clone(),
+                all_features: input.configuration.all_features,
+                no_default_features: input.configuration.no_default_features,
+            },
+        };
+        let (snapshot, snapshot_error) = self
+            .context_snapshot(&workspace.root, cancellation.clone())
+            .await;
+        if cancellation.is_cancelled() {
+            return api_cancelled(&self.state, &input);
+        }
+        let manager = self.state.lsp_manager().cloned();
+        let timeout = Duration::from_millis(self.state.config().rust_analyzer.timeout_ms);
+        let env = ApiEnvironment {
+            manager: manager.as_deref(),
+            root: &workspace.root,
+            snapshot: snapshot.as_deref(),
+            snapshot_error,
+            change: self.state.change_service(),
+            limits: &self.state.config().api,
+            timeout,
+            tool_output_bytes: self.state.max_output_bytes(),
+            cancellation,
+        };
+        let data = if manager.is_some() {
+            Box::pin(with_lsp_authority(
+                workspace.root.requested_authority().clone(),
+                execute_api(request, env),
+            ))
+            .await
+        } else {
+            Box::pin(execute_api(request, env)).await
+        };
+        api_result(&self.state, data)
+    }
+
     /// Controlled metadata acquisition for `context`, mirroring the check
     /// preflight: bounded deadline, request/shutdown-aware cancellation, and
     /// supervised authorized execution instead of the uncancellable runner.
@@ -1918,6 +2044,42 @@ impl ServerHandler for RustCoderServer {
                     Box::pin(with_lsp_cancellation(
                         token.clone(),
                         self.context(input, workspace, token),
+                    ))
+                    .await,
+                ))
+            }
+            "api" => {
+                let input: ApiInput = parse_input(arguments)?;
+                validate_api(self.state.config(), &input)?;
+                let Ok(_permit) = self.state.try_admit() else {
+                    return Ok(CallToolResponse::Complete(resource_blocked_api(
+                        &self.state,
+                        &input,
+                    )));
+                };
+                if self.state.is_shutting_down() {
+                    return Ok(CallToolResponse::Complete(resource_blocked_api(
+                        &self.state,
+                        &input,
+                    )));
+                }
+                let workspace = match self.resolve_workspace(input.dir.as_deref(), &context).await {
+                    Ok(workspace) => workspace,
+                    Err(reason) => {
+                        return Ok(CallToolResponse::Complete(inconclusive_api(
+                            &self.state,
+                            &input,
+                            reason,
+                        )));
+                    }
+                };
+                let cancellation =
+                    workspace.cancellation(context.ct.clone(), self.state.shutdown_token());
+                let token = cancellation.token();
+                Ok(CallToolResponse::Complete(
+                    Box::pin(with_lsp_cancellation(
+                        token.clone(),
+                        self.api(input, workspace, token),
                     ))
                     .await,
                 ))
@@ -2791,6 +2953,106 @@ fn validate_context(input: &ContextInput) -> Result<(), McpError> {
             if input.anchors.is_empty() {
                 return Err(McpError::invalid_params(
                     "delta requires the current anchors",
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_api(config: &Config, input: &ApiInput) -> Result<(), McpError> {
+    validate_dir(input.dir.as_deref())?;
+    validate_string(&input.anchor.path, "anchor.path")?;
+    if let Some(symbol) = input.anchor.symbol.as_deref() {
+        validate_string(symbol, "anchor.symbol")?;
+    }
+    validate_line(input.anchor.line)?;
+    if let Some(change_id) = input.change_id.as_deref() {
+        validate_string(change_id, "changeId")?;
+    }
+    if let Some(expected) = input.expected_signature.as_deref() {
+        validate_string(expected, "expectedSignature")?;
+        if expected.chars().count() > 512 || expected.chars().any(char::is_control) {
+            return Err(McpError::invalid_params(
+                "expectedSignature must be a bounded single-line Rust type",
+                None,
+            ));
+        }
+    }
+    for snippet in &input.snippets {
+        if snippet.trim().is_empty() {
+            return Err(McpError::invalid_params(
+                "snippets cannot contain an empty snippet",
+                None,
+            ));
+        }
+        if snippet.chars().any(|character| {
+            character.is_control() && character != '\n' && character != '\t' && character != '\r'
+        }) {
+            return Err(McpError::invalid_params(
+                "snippets cannot contain control characters",
+                None,
+            ));
+        }
+    }
+    let options = crate::gate::ValidationOptions {
+        features: input.configuration.features.clone(),
+        all_features: input.configuration.all_features,
+        no_default_features: input.configuration.no_default_features,
+        ..crate::gate::ValidationOptions::default()
+    };
+    options
+        .validate(GateTargetId::Check)
+        .map_err(|message| McpError::invalid_params(message, None))?;
+    match input.action {
+        ApiAction::Resolve => {
+            if input.anchor.symbol.is_none() && input.anchor.line.is_none() {
+                return Err(McpError::invalid_params(
+                    "action=resolve requires anchor.symbol or anchor.line",
+                    None,
+                ));
+            }
+            if !input.snippets.is_empty() {
+                return Err(McpError::invalid_params(
+                    "snippets are accepted only for action=probe",
+                    None,
+                ));
+            }
+            if input.expected_signature.is_some() {
+                return Err(McpError::invalid_params(
+                    "expectedSignature is accepted only for action=probe",
+                    None,
+                ));
+            }
+        }
+        ApiAction::Probe => {
+            if input.snippets.is_empty() {
+                return Err(McpError::invalid_params(
+                    "action=probe requires at least one snippet",
+                    None,
+                ));
+            }
+            if u64::try_from(input.snippets.len()).unwrap_or(u64::MAX) > config.api.max_snippets {
+                return Err(McpError::invalid_params(
+                    format!(
+                        "action=probe accepts at most {} snippet(s)",
+                        config.api.max_snippets
+                    ),
+                    None,
+                ));
+            }
+            let total_bytes: u64 = input
+                .snippets
+                .iter()
+                .map(|snippet| u64::try_from(snippet.len()).unwrap_or(u64::MAX))
+                .sum();
+            if total_bytes > config.api.max_snippet_bytes {
+                return Err(McpError::invalid_params(
+                    format!(
+                        "snippets exceed the {}-byte probe budget",
+                        config.api.max_snippet_bytes
+                    ),
                     None,
                 ));
             }
@@ -4399,6 +4661,85 @@ fn context_result(state: &AppState, data: ContextData) -> CallToolResult {
         )
         .with_untrusted_data()
         .into_call_tool_result(state.max_output_bytes(), is_error)
+}
+
+fn api_result(state: &AppState, data: ApiData) -> CallToolResult {
+    let status = data.status.clone();
+    let is_error = !matches!(status.as_str(), "OK" | "COMPILES_IN_CONFIGURATION");
+    let summary = match status.as_str() {
+        "OK" => match data.resolve.as_ref() {
+            Some(resolve) => format!(
+                "API resolution completed via {}; {} import hint(s), {} example(s).",
+                resolve.analyzer,
+                resolve.imports.len(),
+                resolve.examples.len()
+            ),
+            None => "API resolution completed.".to_owned(),
+        },
+        "COMPILES_IN_CONFIGURATION" => {
+            "The snippet type-checked with the pinned configuration; runtime correctness is not claimed."
+                .to_owned()
+        }
+        "COMPILE_FAILED" => "The snippet did not type-check in this configuration.".to_owned(),
+        "INCOMPLETE_IMPLEMENTATION" => {
+            "Type-checking passed, but the snippet contains diverging constructs and is not a completed implementation."
+                .to_owned()
+        }
+        "UNSUPPORTED_CONTEXT" => {
+            "The api context is not supported for this anchor or workspace.".to_owned()
+        }
+        "CANCELLED" => "The api request was cancelled.".to_owned(),
+        "TIMEOUT" => "The probe exceeded its bounded compile budget.".to_owned(),
+        _ => "The api request did not complete.".to_owned(),
+    };
+    ToolOutput::new("api", status, summary, data)
+        .with_untrusted_data()
+        .into_call_tool_result(state.max_output_bytes(), is_error)
+}
+
+fn empty_api_data(input: &ApiInput, status: &str, reason: impl Into<String>) -> ApiData {
+    let mut data = ApiData::failure(
+        input.action,
+        &ApiAnchor {
+            path: input.anchor.path.clone(),
+            symbol: input.anchor.symbol.clone(),
+            line: input.anchor.line,
+            character: input.anchor.character,
+        },
+        status,
+        reason,
+    );
+    data.change_id = input.change_id.clone();
+    data
+}
+
+fn resource_blocked_api(state: &AppState, input: &ApiInput) -> CallToolResult {
+    api_result(
+        state,
+        empty_api_data(input, "RESOURCE_BLOCKED", RESOURCE_BLOCKED_REASON),
+    )
+}
+
+fn inconclusive_api(state: &AppState, input: &ApiInput, _reason: String) -> CallToolResult {
+    api_result(
+        state,
+        empty_api_data(
+            input,
+            "INCONCLUSIVE",
+            "the api workspace could not be resolved inside the configured roots",
+        ),
+    )
+}
+
+fn api_cancelled(state: &AppState, input: &ApiInput) -> CallToolResult {
+    api_result(
+        state,
+        empty_api_data(
+            input,
+            "CANCELLED",
+            "the api request was cancelled before bounded evidence was assembled",
+        ),
+    )
 }
 
 fn docs_internal_error(state: &AppState, input: DocsInput, reason: String) -> CallToolResult {
