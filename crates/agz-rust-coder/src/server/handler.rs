@@ -216,11 +216,33 @@ pub struct VerifyInput {
     pub required_configurations: crate::tools::RequiredConfigurations,
     #[serde(default)]
     pub budget: crate::tools::VerifyBudget,
-    /// Opaque caller-supplied change identifier copied into every result for
-    /// binding; the verify tool never resolves or mutates a changeset.
+    /// Opaque caller-supplied change identifier. Matrix actions copy it into
+    /// the result for binding; test actions resolve it against the change
+    /// engine to derive the changed set and candidate snapshot.
     #[serde(default)]
     #[schemars(length(min = 1))]
     pub change_id: Option<String>,
+    /// Test runner and feature selection for test actions.
+    #[serde(default)]
+    pub configuration: crate::gate::ValidationOptions,
+    /// Explicit user mappings that prioritize or force test scopes.
+    #[serde(default)]
+    #[schemars(length(max = 32))]
+    pub test_mappings: Vec<crate::tools::TestMapping>,
+    /// Explicit workspace-relative changed paths for test planning.
+    #[serde(default)]
+    #[schemars(length(max = 64))]
+    pub changed_paths: Vec<String>,
+    /// Semantic reference hints (for example from the `references` tool).
+    #[serde(default)]
+    #[schemars(length(max = 32))]
+    pub semantic_references: Vec<crate::tools::SemanticReference>,
+    /// Regression test patch for `test_candidate`.
+    #[serde(default)]
+    pub test_patch: Option<crate::tools::TestPatchInput>,
+    /// Behavior contract for `test_candidate`.
+    #[serde(default)]
+    pub behavior_contract: Option<crate::tools::BehaviorContract>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -1028,7 +1050,8 @@ pub fn tool_definitions(config: &Config) -> Vec<Tool> {
         tools.push(tool::<VerifyInput, VerifyOutcome>(
             "verify",
             "Plan or run a bounded configuration matrix over features, targets, toolchains, and \
-             development stages.",
+             development stages, or plan, run, and validate tests including baseline/candidate \
+             regression comparisons.",
             ToolAnnotations::new().destructive(true).open_world(true),
         ));
     }
@@ -1256,12 +1279,20 @@ impl RustCoderServer {
             change_id: input.change_id.clone(),
             required: input.required_configurations.clone(),
             budget: input.budget,
+            test_configuration: input.configuration.clone(),
+            test_mappings: input.test_mappings.clone(),
+            changed_paths: input.changed_paths.clone(),
+            semantic_references: input.semantic_references.clone(),
+            test_patch: input.test_patch.clone(),
+            behavior_contract: input.behavior_contract.clone(),
+            workspace: Some(workspace.root.clone()),
         };
-        let outcome = self
-            .state
-            .verify_service()
-            .execute(request, Some(callback), Some(cancellation.token()))
-            .await;
+        let outcome = Box::pin(self.state.verify_service().execute(
+            request,
+            Some(callback),
+            Some(cancellation.token()),
+        ))
+        .await;
         let _ = progress_worker.await;
         verify_result(&self.state, outcome)
     }
@@ -3041,6 +3072,22 @@ fn validate_verify(input: &VerifyInput) -> Result<(), McpError> {
             None,
         ));
     }
+    if let Some(max_tests) = input.budget.max_tests
+        && !(1..=64).contains(&max_tests)
+    {
+        return Err(McpError::invalid_params(
+            "budget.maxTests must be between 1 and 64",
+            None,
+        ));
+    }
+    if let Some(repeats) = input.budget.repeats
+        && !(1..=5).contains(&repeats)
+    {
+        return Err(McpError::invalid_params(
+            "budget.repeats must be between 1 and 5",
+            None,
+        ));
+    }
     if input.required_configurations.feature_groups.len() > 16
         || input.required_configurations.targets.len() > 16
         || input.required_configurations.stages.len() > 4
@@ -3070,6 +3117,171 @@ fn validate_verify(input: &VerifyInput) -> Result<(), McpError> {
                 None,
             ));
         }
+    }
+    input
+        .configuration
+        .validate(crate::gate::GateTargetId::Test)
+        .map_err(|reason| McpError::invalid_params(format!("configuration: {reason}"), None))?;
+    if input.changed_paths.len() > 64 {
+        return Err(McpError::invalid_params(
+            "changedPaths accepts at most 64 entries",
+            None,
+        ));
+    }
+    for path in &input.changed_paths {
+        validate_relative_path(path)?;
+    }
+    if input.semantic_references.len() > 32 {
+        return Err(McpError::invalid_params(
+            "semanticReferences accepts at most 32 entries",
+            None,
+        ));
+    }
+    for reference in &input.semantic_references {
+        validate_relative_path(&reference.file)?;
+        if let Some(symbol) = reference.symbol.as_deref()
+            && (symbol.is_empty() || symbol.len() > 256 || symbol.chars().any(char::is_control))
+        {
+            return Err(McpError::invalid_params(
+                "semanticReferences.symbol must be a bounded printable symbol",
+                None,
+            ));
+        }
+    }
+    if input.test_mappings.len() > 32 {
+        return Err(McpError::invalid_params(
+            "testMappings accepts at most 32 entries",
+            None,
+        ));
+    }
+    for mapping in &input.test_mappings {
+        if let Some(path) = mapping.path.as_deref() {
+            validate_relative_path(path)?;
+        }
+        for (value, field) in [
+            (mapping.package.as_deref(), "package"),
+            (mapping.target.as_deref(), "target"),
+        ] {
+            if let Some(value) = value
+                && (value.is_empty() || value.len() > 128 || value.chars().any(char::is_control))
+            {
+                return Err(McpError::invalid_params(
+                    format!("testMappings.{field} must be a bounded printable name"),
+                    None,
+                ));
+            }
+        }
+        if let Some(name) = mapping.test_name.as_deref()
+            && (name.is_empty()
+                || name.len() > 256
+                || name.starts_with('-')
+                || name.chars().any(char::is_control))
+        {
+            return Err(McpError::invalid_params(
+                "testMappings.testName must be a bounded test name, not a flag",
+                None,
+            ));
+        }
+    }
+    if let Some(patch) = input.test_patch.as_ref() {
+        if patch.patches.len() > 32 || patch.new_files.len() > 16 {
+            return Err(McpError::invalid_params(
+                "testPatch accepts at most 32 patches and 16 new files",
+                None,
+            ));
+        }
+        for entry in &patch.patches {
+            validate_relative_path(&entry.file)?;
+            if entry.old_string.chars().count() > 32_768
+                || entry.new_string.chars().count() > 32_768
+            {
+                return Err(McpError::invalid_params(
+                    "testPatch strings accept at most 32768 characters per patch",
+                    None,
+                ));
+            }
+        }
+        for file in &patch.new_files {
+            validate_relative_path(&file.file)?;
+            if file.content.chars().count() > 65_536 {
+                return Err(McpError::invalid_params(
+                    "testPatch new file content accepts at most 65536 characters",
+                    None,
+                ));
+            }
+        }
+    }
+    if let Some(contract) = input.behavior_contract.as_ref() {
+        if contract.test_name.is_empty()
+            || contract.test_name.len() > 256
+            || contract.test_name.starts_with('-')
+            || contract.test_name.chars().any(char::is_control)
+        {
+            return Err(McpError::invalid_params(
+                "behaviorContract.testName must be a bounded test name, not a flag",
+                None,
+            ));
+        }
+        if contract.expected_failure.is_empty()
+            || contract.expected_failure.chars().count() > 512
+            || contract.expected_failure.chars().any(char::is_control)
+        {
+            return Err(McpError::invalid_params(
+                "behaviorContract.expectedFailure must be a bounded printable assertion text",
+                None,
+            ));
+        }
+        for (value, field) in [
+            (contract.package.as_deref(), "package"),
+            (contract.target.as_deref(), "target"),
+        ] {
+            if let Some(value) = value
+                && (value.is_empty() || value.len() > 128 || value.chars().any(char::is_control))
+            {
+                return Err(McpError::invalid_params(
+                    format!("behaviorContract.{field} must be a bounded printable name"),
+                    None,
+                ));
+            }
+        }
+    }
+    if input.action == crate::tools::VerifyAction::TestCandidate {
+        if input.change_id.is_none() {
+            return Err(McpError::invalid_params(
+                "testCandidate requires changeId",
+                None,
+            ));
+        }
+        if input.test_patch.is_none() {
+            return Err(McpError::invalid_params(
+                "testCandidate requires testPatch",
+                None,
+            ));
+        }
+        if input.behavior_contract.is_none() {
+            return Err(McpError::invalid_params(
+                "testCandidate requires behaviorContract",
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_relative_path(path: &str) -> Result<(), McpError> {
+    let candidate = std::path::Path::new(path);
+    if path.is_empty()
+        || path.len() > 512
+        || path.chars().any(char::is_control)
+        || candidate.is_absolute()
+        || candidate
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+    {
+        return Err(McpError::invalid_params(
+            "paths must be bounded workspace-relative paths without parent traversal",
+            None,
+        ));
     }
     Ok(())
 }
@@ -4301,7 +4513,12 @@ fn verify_result(state: &AppState, outcome: VerifyOutcome) -> CallToolResult {
     let status = outcome.status.clone();
     let is_error = !matches!(
         status.as_str(),
-        "PLANNED" | "FULL_REQUESTED_MATRIX" | "PARTIAL"
+        "PLANNED"
+            | "FULL_REQUESTED_MATRIX"
+            | "PARTIAL"
+            | "TESTED_SUBSET"
+            | "FULL_REQUESTED_SUITE"
+            | "SATISFIED"
     );
     let summary = match status.as_str() {
         "PLANNED" => "The matrix plan is ready; no cell was executed.".to_owned(),
@@ -4309,7 +4526,18 @@ fn verify_result(state: &AppState, outcome: VerifyOutcome) -> CallToolResult {
         "PARTIAL" => {
             "The matrix run is partial; skipped or incomplete cells never grant a pass.".to_owned()
         }
-        other => format!("The matrix request finished with {other}."),
+        "FULL_REQUESTED_SUITE" => {
+            "Every requested workspace test scope completed with a pass.".to_owned()
+        }
+        "TESTED_SUBSET" => "A relevant test subset passed; this is development feedback, not the \
+                            final gate."
+            .to_owned(),
+        "SATISFIED" => {
+            "The regression test failed on the baseline with the expected assertion and passed on \
+             the candidate."
+                .to_owned()
+        }
+        other => format!("The verify request finished with {other}."),
     };
     let warnings = outcome.warnings.clone();
     ToolOutput::new("verify", status, summary, outcome)
@@ -6362,6 +6590,12 @@ mod tests {
                 required_configurations: crate::tools::RequiredConfigurations::default(),
                 budget: crate::tools::VerifyBudget::default(),
                 change_id: None,
+                configuration: crate::gate::ValidationOptions::default(),
+                test_mappings: Vec::new(),
+                changed_paths: Vec::new(),
+                semantic_references: Vec::new(),
+                test_patch: None,
+                behavior_contract: None,
             }
         }
         let mut input = input();
@@ -6423,6 +6657,43 @@ mod tests {
         assert!(validate_verify(&input).is_err());
         input.required_configurations.stages = vec![crate::tools::VerifyStage::Check; 4];
         assert!(validate_verify(&input).is_ok());
+
+        input.budget.max_tests = Some(0);
+        assert!(validate_verify(&input).is_err());
+        input.budget.max_tests = Some(64);
+        assert!(validate_verify(&input).is_ok());
+        input.budget.max_tests = None;
+        input.budget.repeats = Some(6);
+        assert!(validate_verify(&input).is_err());
+        input.budget.repeats = Some(5);
+        assert!(validate_verify(&input).is_ok());
+        input.budget.repeats = None;
+        input.changed_paths = vec!["../escape".to_owned()];
+        assert!(validate_verify(&input).is_err());
+        input.changed_paths = vec!["/absolute".to_owned()];
+        assert!(validate_verify(&input).is_err());
+        input.changed_paths = vec!["src/lib.rs".to_owned()];
+        assert!(validate_verify(&input).is_ok());
+        input.changed_paths.clear();
+
+        let mut candidate = input.clone();
+        candidate.action = crate::tools::VerifyAction::TestCandidate;
+        assert!(
+            validate_verify(&candidate).is_err(),
+            "candidate needs input"
+        );
+        candidate.change_id = Some("ch-1-1".to_owned());
+        candidate.test_patch = Some(crate::tools::TestPatchInput {
+            patches: Vec::new(),
+            new_files: Vec::new(),
+        });
+        candidate.behavior_contract = Some(crate::tools::BehaviorContract {
+            test_name: "regression".to_owned(),
+            package: None,
+            target: None,
+            expected_failure: "expected failure text".to_owned(),
+        });
+        assert!(validate_verify(&candidate).is_ok());
     }
 
     #[tokio::test]

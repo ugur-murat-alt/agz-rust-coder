@@ -107,6 +107,11 @@ pub struct GateConfig {
 pub struct VerifyConfig {
     pub max_cells: u64,
     pub max_wall_ms: u64,
+    /// Maximum planned test items for `verify` test actions.
+    pub max_tests: u64,
+    /// Hard ceiling for repeated baseline/candidate test runs used to observe
+    /// flakiness. The request may only narrow this value.
+    pub repeats: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -350,6 +355,8 @@ impl Config {
             verify: VerifyConfig {
                 max_cells: 8,
                 max_wall_ms: 120_000,
+                max_tests: 16,
+                repeats: 2,
             },
             work: WorkConfig {
                 max_active: 4,
@@ -515,6 +522,8 @@ impl Config {
             1_000,
             3_600_000,
         )?;
+        check_range("verify.max_tests", self.verify.max_tests, 1, 64)?;
+        check_range("verify.repeats", self.verify.repeats, 1, 5)?;
         check_range(
             "rust_analyzer.timeout_ms",
             self.rust_analyzer.timeout_ms,
@@ -880,6 +889,10 @@ pub struct CliOptions {
     pub verify_max_cells: Option<u64>,
     #[arg(long = "verify-max-wall-ms")]
     pub verify_max_wall_ms: Option<u64>,
+    #[arg(long = "verify-max-tests")]
+    pub verify_max_tests: Option<u64>,
+    #[arg(long = "verify-repeats")]
+    pub verify_repeats: Option<u64>,
     #[arg(long = "work-max-active")]
     pub work_max_active: Option<u64>,
     #[arg(long = "work-max-compiles")]
@@ -1072,6 +1085,8 @@ enum GateScopeFile {
 struct FileVerifyConfig {
     max_cells: Option<u64>,
     max_wall_ms: Option<u64>,
+    max_tests: Option<u64>,
+    repeats: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1287,6 +1302,8 @@ fn apply_file(config: &mut Config, file: FileConfig) {
     if let Some(verify) = file.verify {
         apply_opt(&mut config.verify.max_cells, verify.max_cells);
         apply_opt(&mut config.verify.max_wall_ms, verify.max_wall_ms);
+        apply_opt(&mut config.verify.max_tests, verify.max_tests);
+        apply_opt(&mut config.verify.repeats, verify.repeats);
     }
     if let Some(work) = file.work {
         apply_opt(&mut config.work.max_active, work.max_active);
@@ -1486,6 +1503,8 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
         }
         "VERIFY__MAX_CELLS" => config.verify.max_cells = parse_u64(value).map_err(invalid)?,
         "VERIFY__MAX_WALL_MS" => config.verify.max_wall_ms = parse_u64(value).map_err(invalid)?,
+        "VERIFY__MAX_TESTS" => config.verify.max_tests = parse_u64(value).map_err(invalid)?,
+        "VERIFY__REPEATS" => config.verify.repeats = parse_u64(value).map_err(invalid)?,
         "WORK__MAX_ACTIVE" => {
             config.work.max_active = parse_u64(value).map_err(invalid)?;
         }
@@ -1697,6 +1716,8 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
     apply_opt(&mut config.change.max_revisions, cli.change_max_revisions);
     apply_opt(&mut config.verify.max_cells, cli.verify_max_cells);
     apply_opt(&mut config.verify.max_wall_ms, cli.verify_max_wall_ms);
+    apply_opt(&mut config.verify.max_tests, cli.verify_max_tests);
+    apply_opt(&mut config.verify.repeats, cli.verify_repeats);
     apply_opt(&mut config.work.max_active, cli.work_max_active);
     apply_opt(&mut config.work.max_compiles, cli.work_max_compiles);
     apply_opt(&mut config.work.max_candidates, cli.work_max_candidates);
@@ -2511,9 +2532,10 @@ mod tests {
         cli.tools_verify = Some(false);
         let config = Config::from_sources(
             "/workspace",
-            Some("[verify]\nmax_cells = 2\nmax_wall_ms = 5000\n"),
+            Some("[verify]\nmax_cells = 2\nmax_wall_ms = 5000\nrepeats = 3\nmax_tests = 5\n"),
             [
                 ("AGZ_RUST_CODER_VERIFY__MAX_CELLS", "4"),
+                ("AGZ_RUST_CODER_VERIFY__REPEATS", "4"),
                 ("AGZ_RUST_CODER_TOOLS__VERIFY", "true"),
             ],
             &cli,
@@ -2521,6 +2543,8 @@ mod tests {
         .expect("verify configuration is valid");
         assert_eq!(config.verify.max_cells, 3);
         assert_eq!(config.verify.max_wall_ms, 5_000);
+        assert_eq!(config.verify.max_tests, 5);
+        assert_eq!(config.verify.repeats, 4);
         assert!(!config.tools.verify);
         assert!(!config.enabled_tool_names().contains(&"verify"));
     }
@@ -2532,6 +2556,10 @@ mod tests {
             "[verify]\nmax_cells = 65\n",
             "[verify]\nmax_wall_ms = 999\n",
             "[verify]\nmax_wall_ms = 3600001\n",
+            "[verify]\nmax_tests = 0\n",
+            "[verify]\nmax_tests = 65\n",
+            "[verify]\nrepeats = 0\n",
+            "[verify]\nrepeats = 6\n",
         ] {
             let config = Config::from_sources(
                 "/workspace",

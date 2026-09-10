@@ -6,7 +6,7 @@
 //! original workspace is never written.
 
 mod capture;
-mod model;
+pub(crate) mod model;
 mod patch;
 mod runtime;
 mod service;

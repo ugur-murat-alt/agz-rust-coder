@@ -67,6 +67,8 @@ pub use symbol::{
     with_lsp_authority, with_lsp_cancellation, with_rust_document, with_symbol_position,
 };
 pub use verify::{
-    BudgetOutcome, CellOutcome, RequiredConfigurations, SkippedCellData, VerifyAction,
+    BehaviorContract, BudgetOutcome, CellOutcome, RequiredConfigurations, SemanticReference,
+    SkippedCellData, TestCandidateData, TestCandidateSideData, TestMapping, TestPatchInput,
+    TestPlanData, TestPlanItemData, TestRepeatData, TestRunData, TestRunItemData, VerifyAction,
     VerifyBudget, VerifyOutcome, VerifyRequest, VerifyRunner, VerifyService, VerifyStage,
 };
