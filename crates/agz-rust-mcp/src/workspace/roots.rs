@@ -1005,6 +1005,40 @@ fn split_final_component(path: &Path) -> Result<(PathBuf, OsString), RootError> 
         .ok_or_else(|| RootError::InvalidPath(path.display().to_string()))
 }
 
+/// Rewrite an ordinary Windows drive path (`C:\...`) into the verbatim spelling
+/// (`\\?\C:\...`) that `fs::canonicalize` produces.
+///
+/// Cargo reports ordinary drive paths while authorized roots are canonical, so
+/// path-identity comparisons need one shared spelling. This is syntax-only: it
+/// never resolves symlinks, and a path containing parent components is returned
+/// unchanged rather than normalized. Identity on non-Windows platforms.
+pub(crate) fn canonical_spelling(path: &Path) -> PathBuf {
+    #[cfg(not(windows))]
+    {
+        path.to_owned()
+    }
+    #[cfg(windows)]
+    {
+        if !path.is_absolute() {
+            return path.to_owned();
+        }
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::Prefix(prefix) => match prefix.kind() {
+                    Prefix::Disk(drive) => normalized.push(format!(r"\\?\{}:", char::from(drive))),
+                    _ => normalized.push(prefix.as_os_str()),
+                },
+                Component::RootDir => normalized.push(Path::new(std::path::MAIN_SEPARATOR_STR)),
+                Component::CurDir => {}
+                Component::ParentDir => return path.to_owned(),
+                Component::Normal(name) => normalized.push(name),
+            }
+        }
+        normalized
+    }
+}
+
 fn normalize_path(path: &Path) -> Result<PathBuf, RootError> {
     if path.as_os_str().is_empty() {
         return Ok(PathBuf::new());
@@ -1206,5 +1240,32 @@ fn hex_value(value: u8) -> Option<u8> {
         b'a'..=b'f' => Some(value - b'a' + 10),
         b'A'..=b'F' => Some(value - b'A' + 10),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_spelling_bridges_cargo_and_authority_paths() {
+        let plain = PathBuf::from(r"C:\users\runneradmin\work");
+        let verbatim = PathBuf::from(r"\\?\C:\users\runneradmin\work");
+        #[cfg(windows)]
+        {
+            assert_eq!(canonical_spelling(&plain), verbatim);
+            assert_eq!(canonical_spelling(&verbatim), verbatim);
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(canonical_spelling(&plain), plain);
+            assert_eq!(canonical_spelling(&verbatim), verbatim);
+        }
+    }
+
+    #[test]
+    fn canonical_spelling_never_normalizes_traversal() {
+        let path = PathBuf::from(r"C:\work\..\escape");
+        assert_eq!(canonical_spelling(&path), path);
     }
 }

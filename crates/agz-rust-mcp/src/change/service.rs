@@ -2452,7 +2452,10 @@ fn create_blocking(
     }
     reject_escaping_cargo_target(&capture_root)?;
     let mut excluded = BTreeSet::new();
-    if let Ok(relative) = snapshot.target_directory.strip_prefix(&capture_root) {
+    // Cargo reports the target directory in the ordinary spelling while the
+    // capture root is canonical; normalize before computing the exclusion.
+    let cargo_target = crate::workspace::canonical_spelling(&snapshot.target_directory);
+    if let Ok(relative) = cargo_target.strip_prefix(&capture_root) {
         excluded.insert(relative.to_owned());
     }
     if let Ok(relative) = scratch_root.strip_prefix(&capture_root) {
@@ -2715,9 +2718,14 @@ fn next_change_id() -> String {
 }
 
 fn path_is_within(root: &Path, candidate: &Path) -> bool {
+    // Cargo and config may spell the same Windows path with or without the
+    // verbatim prefix; compare one canonical spelling so containment stays
+    // fail-closed regardless of the caller's spelling.
+    let root = crate::workspace::canonical_spelling(root);
+    let candidate = crate::workspace::canonical_spelling(candidate);
     candidate == root
         || candidate
-            .strip_prefix(root)
+            .strip_prefix(&root)
             .is_ok_and(|relative| !relative.is_absolute())
 }
 
