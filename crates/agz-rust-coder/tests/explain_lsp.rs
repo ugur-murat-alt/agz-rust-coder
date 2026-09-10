@@ -13,7 +13,10 @@ use std::{
 use agz_rust_coder::{
     config::WorkspaceCode,
     lsp::{ManagerOptions, RustAnalyzerManager},
-    tools::explain::{self, RaStatus},
+    tools::{
+        explain::{self, RaStatus},
+        with_lsp_cancellation,
+    },
 };
 
 static EXPAND_BINARY: OnceLock<PathBuf> = OnceLock::new();
@@ -177,6 +180,85 @@ async fn unsupported_capability_returns_typed_status() {
     .await;
     assert!(
         matches!(obligations, RaStatus::Unsupported(_)),
+        "unexpected obligations status: {obligations:?}"
+    );
+
+    assert_eq!(manager.close_all().await.remaining, 0);
+}
+
+#[tokio::test]
+async fn cancelled_capability_probe_does_not_start_the_analyzer() {
+    let root = TestRoot::new("cancelled-probe");
+    // A missing binary discriminates the cancellation-aware probe: an
+    // uncancelled probe would try to start it and report a startup failure.
+    let missing = root.path().join("missing-rust-analyzer");
+    let manager = manager(&missing);
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    cancellation.cancel();
+
+    let expansion = with_lsp_cancellation(
+        cancellation,
+        explain::expand_macro(
+            &manager,
+            root.path(),
+            Path::new("src/lib.rs"),
+            Some("mock_fn".to_owned()),
+            1,
+            Duration::from_secs(2),
+        ),
+    )
+    .await;
+    match expansion {
+        RaStatus::Unavailable(reason) => {
+            assert!(reason.contains("cancel"), "{reason}");
+        }
+        other => panic!("expected a cancellation fallback, got {other:?}"),
+    }
+
+    assert_eq!(manager.close_all().await.remaining, 0);
+}
+
+#[tokio::test]
+async fn workspace_code_deny_degrades_to_a_typed_fallback() {
+    let root = TestRoot::new("deny-fallback");
+    let manager = RustAnalyzerManager::new_authorized(
+        ManagerOptions::default()
+            .with_binary(expand_binary())
+            .with_workspace_code(WorkspaceCode::Deny)
+            .with_timeout(Duration::from_secs(2))
+            .with_wait_timeout(Duration::from_secs(2))
+            .with_shutdown_timeout(Duration::from_millis(200)),
+    )
+    .expect("create deny manager");
+
+    // Deny gates analyzer startup behind the binary schema probe; when the
+    // probe cannot verify the binary, advisory evidence degrades to a typed
+    // fallback instead of being fabricated.
+    let expansion = explain::expand_macro(
+        &manager,
+        root.path(),
+        Path::new("src/lib.rs"),
+        Some("mock_fn".to_owned()),
+        1,
+        Duration::from_secs(2),
+    )
+    .await;
+    assert!(
+        !matches!(expansion, RaStatus::Available(_)),
+        "unexpected expansion status: {expansion:?}"
+    );
+
+    let obligations = explain::failed_obligations(
+        &manager,
+        root.path(),
+        Path::new("src/lib.rs"),
+        Some("mock_fn".to_owned()),
+        1,
+        Duration::from_secs(2),
+    )
+    .await;
+    assert!(
+        !matches!(obligations, RaStatus::Available(_)),
         "unexpected obligations status: {obligations:?}"
     );
 

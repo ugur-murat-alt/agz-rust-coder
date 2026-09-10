@@ -62,14 +62,18 @@ in memory.
 `observedCompiler`, `advisoryAnalyzer`, `inferred`, or `unknown` provenance.
 `macro` combines rustc expansion provenance retained in diagnostics with a
 negotiated `rust-analyzer/expandMacro` response when the capability exists;
-unsupported capabilities return `UNSUPPORTED_CAPABILITY`. `trait` reports
+unsupported capabilities return `UNSUPPORTED_CAPABILITY`, and expansion walks
+that reach their depth bound are marked `truncated`. `trait` reports
 compiler expected/found text and failed bounds with a bounded source selection;
 Rust Analyzer failed obligations are advisory and disagreements keep the
 compiler side authoritative. `cfg` evaluates the source `#[cfg]` condition
-against Cargo metadata features for the recorded selection and answers `unknown`
-for target predicates that were not probed. Unsupported configurations are
-never presented as verified, and proc-macro/build-script policy is never
-elevated.
+against Cargo metadata features scoped to the workspace member that owns the
+anchor, so features activated only for dependency crates never enable the anchor
+cfg; target predicates that were not probed stay `unknown`. Rust Analyzer
+requests follow the workspace-code policy and request/epoch cancellation, and
+their failure degrades to typed unavailable fragments. Unsupported
+configurations are never presented as verified, and proc-macro/build-script
+policy is never elevated.
 
 All tools return equivalent structured and text representations within
 `limits.tool_output_bytes`. Remote bodies and excerpts are bounded before

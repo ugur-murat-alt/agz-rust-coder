@@ -30,9 +30,9 @@ pub use edits::{
     semantic_rename,
 };
 pub use explain::{
-    CfgVerdict, CompilerView, ExplainConflict, ExplainFragment, ExplainProvenance,
-    ExplainSourceRef, FeatureSelection, RaObligations, RaStatus, cfg_view, evaluate_cfg,
-    expand_macro, extract_expected_found, failed_obligations, feature_selection,
+    AnchorFeatures, CfgVerdict, CompilerView, ExplainConflict, ExplainFragment, ExplainProvenance,
+    ExplainSourceRef, FeatureSelection, RaObligations, RaStatus, anchor_feature_maps, cfg_view,
+    evaluate_cfg, expand_macro, extract_expected_found, failed_obligations, feature_selection,
     find_cfg_attributes, macro_compiler_view, obligation_conflicts, parse_cfg, parse_expand_macro,
     parse_failed_obligations, related_source_fragments, resolve_anchor_line, select_diagnostics,
     source_sha256, trait_compiler_view, trait_hint,
