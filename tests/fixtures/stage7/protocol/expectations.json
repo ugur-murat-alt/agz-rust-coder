@@ -8,6 +8,7 @@
     "audit",
     "crate_lookup",
     "docs",
+    "context",
     "symbol",
     "references",
     "definition",

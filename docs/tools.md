@@ -18,6 +18,7 @@ Failed compilations are revalidated before offering edit/context evidence. Trunc
 | `audit` | Advisory scanner | Reads authorized Rust files | Bounded findings and skipped-file reasons. |
 | `crate_lookup` | crates.io | Bounded HTTPS request | `FOUND`, `NOT_FOUND`, `VERSION_MISMATCH`, or `UNAVAILABLE`. |
 | `docs` | rustdoc/docs.rs | May use cache, network, or local `cargo doc` | Exact-version excerpt and provenance or typed unavailability. |
+| `context` | Rust Analyzer, workspace source, cargo metadata | Never writes source | Revision-bound capsule of definitions, consumers, tests, signatures, dependency/feature evidence, and bounded excerpts with per-item reasons. |
 | `symbol` | Rust Analyzer | Depends on workspace-code policy | Hover text and selected location. |
 | `references` | Rust Analyzer | Depends on workspace-code policy | Bounded reference locations. |
 | `definition` | Rust Analyzer | Depends on workspace-code policy | Selected definition location. |
@@ -63,6 +64,31 @@ reproduce their relative `path = "..."` references. A mid-apply I/O failure, a
 crash between the applying marker and the final publish, or candidate bytes
 that no longer match the recorded revision mark the change
 `FAILED_INCONSISTENT` and refuse further stage/validate/export requests.
+## Context Capsules
+
+`context` works from typed anchors only: `{kind:"file",file,range?}` and
+`{kind:"symbol",symbol,file?,line?}`. There is no free-text or natural-language
+interpretation. `prepare` selects a bounded capsule with definitions,
+implementations, workspace consumers, related test candidates, hover
+signatures, cargo-metadata dependency/feature evidence, and source excerpts.
+Every item carries a selection reason and provenance, and unavailable, ambiguous,
+or budget-omitted items stay visible in an `omitted` list.
+
+`capsuleId` is a sha256 over the root epoch, toolchain/analyzer identity, source
+hashes, typed anchor set, purpose, change label, feature selection, and byte
+budget. A changed source therefore produces a new identity, and `expand` marks
+items `stale` when the current file hash differs from the stored one; old symbol
+handles never silently apply to a new revision. `expand` re-reads authorized
+files, re-hashes them, and pages items with `cursor`/`pageSize`. `delta` returns
+only added, changed, and removed items versus a stored previous capsule and
+answers `NOT_FOUND` or `EXPIRED` instead of a fake empty delta.
+
+The in-memory capsule store is bounded by `context.max_capsules` and
+`context.capsule_ttl_ms`; a root-epoch change invalidates stored capsules.
+Analyzer, workspace, and metadata text stays untrusted, provenance-tagged
+evidence. Capsules are not exposed as MCP resources in this version; `expand`
+pagination is the documented fallback. Sizes are exact UTF-8 byte and character
+counts only; no tokenizer exists, and no token counts are reported.
 
 ## Result Semantics
 
@@ -72,7 +98,9 @@ Expected domain outcomes are successful MCP calls with typed status:
 - crate absence, mismatch, or registry outage: `NOT_FOUND`,
   `VERSION_MISMATCH`, or `UNAVAILABLE`;
 - missing or ambiguous symbols: `NOT_FOUND` or `AMBIGUOUS`;
-- documentation fallback exhaustion: typed unavailable data.
+- documentation fallback exhaustion: typed unavailable data;
+- capsule handles that are unknown or past TTL/root-epoch invalidation:
+  `NOT_FOUND` or `EXPIRED`.
 
 Invalid arguments, unauthorized paths, resource limits, timeouts, and
 unavailable semantic infrastructure use `isError=true`. Text and structured
@@ -105,6 +133,7 @@ use the platform path-list separator.
 | `tools.audit` | `true` | Register `audit`. |
 | `tools.crate_lookup` | `true` | Register `crate_lookup`. |
 | `tools.docs` | `true` | Register `docs`. |
+| `tools.context` | `true` | Register `context`. |
 | `tools.lsp` | `true` | Register semantic navigation tools. |
 | `tools.rename` | `true` | Register `rename` when LSP is enabled. |
 | `tools.refactor` | `true` | Register `refactor` when LSP is enabled. |
@@ -134,6 +163,9 @@ use the platform path-list separator.
 | `change.max_bytes` | `268435456` | Captured candidate bytes per change. |
 | `change.ttl_ms` | `86400000` | Orphan and discarded scratch retention before the startup sweep. |
 | `change.max_revisions` | `32` | Stage revisions per change. |
+| `context.max_capsules` | `32` | In-memory capsule ring capacity. |
+| `context.capsule_ttl_ms` | `900000` | Capsule TTL; root-epoch changes also invalidate. |
+| `context.max_items` | `64` | Items selected into one capsule. |
 | `limits.max_rename_edits` | `200` | Rename edit cap. |
 | `limits.max_refactor_edits` | `200` | Refactor edit cap. |
 | `limits.process_output_bytes` | `8388608` | Combined child-output cap. |

@@ -19,6 +19,7 @@ işaretini korur.
 | `audit` | Advisory scanner | Yetkili Rust dosyalarını okur | Sınırlı bulgular ve atlanan dosya nedenleri. |
 | `crate_lookup` | crates.io | Sınırlı HTTPS isteği | `FOUND`, `NOT_FOUND`, `VERSION_MISMATCH` veya `UNAVAILABLE`. |
 | `docs` | rustdoc/docs.rs | Cache, ağ veya yerel `cargo doc` kullanabilir | Tam sürüm alıntısı ve kaynak bilgisi ya da tipli erişilememe. |
+| `context` | Rust Analyzer, workspace kaynağı, cargo metadata | Kaynağa asla yazmaz | Tanım, tüketici, test, imza, bağımlılık/feature kanıtı ve sınırlı alıntıları öğe başına nedeniyle birlikte revizyona bağlı kapsül olarak döndürür. |
 | `symbol` | Rust Analyzer | Workspace-code politikasına bağlı | Hover metni ve seçilen konum. |
 | `references` | Rust Analyzer | Workspace-code politikasına bağlı | Sınırlı referans konumları. |
 | `definition` | Rust Analyzer | Workspace-code politikasına bağlı | Seçilen tanım konumu. |
@@ -64,6 +65,32 @@ başarısız olur. Uygulama sırasında G/Ç hatası, "applying" işareti ile so
 arasında çökme veya kayıtlı revizyonla eşleşmeyen aday byte'ları change'i
 `FAILED_INCONSISTENT` işaretler ve sonraki stage/validate/export istekleri
 reddedilir.
+## Bağlam Kapsülleri
+
+`context` yalnız tipli çıpalarla çalışır: `{kind:"file",file,range?}` ve
+`{kind:"symbol",symbol,file?,line?}`. Serbest metin veya doğal dil yorumu
+yapılmaz. `prepare`; tanımlar, uygulamalar, workspace tüketicileri, ilgili test
+adayları, hover imzaları, cargo metadata bağımlılık/feature kanıtı ve kaynak
+alıntılarından oluşan sınırlı bir kapsül seçer. Her öğe seçim nedeni ve kaynak
+bilgisi taşır; erişilemeyen, belirsiz veya bütçeyle çıkarılan öğeler görünür bir
+`omitted` listesinde kalır.
+
+`capsuleId`, root epoch, toolchain/analyzer kimliği, kaynak hash'leri, tipli çıpa
+kümesi, amaç, değişiklik etiketi, feature seçimi ve byte bütçesi üzerinden
+sha256'dır. Bu nedenle değişen kaynak yeni bir kimlik üretir ve `expand`, geçerli
+dosya hash'i saklanan hash'ten farklıysa öğeleri `stale` olarak işaretler; eski
+sembol tutamaçları yeni bir revizyona sessizce uygulanmaz. `expand` yetkili
+dosyaları yeniden okur, yeniden hash'ler ve öğeleri `cursor`/`pageSize` ile
+sayfalar. `delta`, saklanan önceki kapsüle göre yalnız eklenen, değişen ve
+kaldırılan öğeleri döndürür; sahte boş delta yerine `NOT_FOUND` veya `EXPIRED`
+yanıtı verir.
+
+Bellek içi kapsül deposu `context.max_capsules` ve `context.capsule_ttl_ms` ile
+sınırlıdır; root epoch değişimi saklanan kapsülleri geçersiz kılar. Analyzer,
+workspace ve metadata metni güvenilmez, kaynak etiketli kanıt olarak kalır.
+Kapsüller bu sürümde MCP kaynağı olarak sunulmaz; belgelenen fallback `expand`
+sayfalamasıdır. Boyutlar yalnız kesin UTF-8 byte ve karakter sayılarıdır;
+tokenizer yoktur ve token sayısı bildirilmez.
 
 ## Sonuç Anlamları
 
@@ -73,7 +100,9 @@ Beklenen alan sonuçları tipli durum içeren başarılı MCP çağrılarıdır:
 - crate yokluğu, sürüm uyuşmazlığı veya registry kesintisi: `NOT_FOUND`,
   `VERSION_MISMATCH` veya `UNAVAILABLE`;
 - bulunamayan veya belirsiz sembol: `NOT_FOUND` veya `AMBIGUOUS`;
-- belge fallback tükenmesi: tipli erişilememe verisi.
+- belge fallback tükenmesi: tipli erişilememe verisi;
+- bilinmeyen veya TTL/root-epoch ile geçersizleşen kapsül tutamaçları:
+  `NOT_FOUND` veya `EXPIRED`.
 
 Geçersiz argüman, yetkisiz yol, kaynak sınırı, timeout ve semantik altyapı
 yokluğu `isError=true` kullanır. Metin ve belirli yapıdaki durum aynı olmalıdır.
@@ -105,6 +134,7 @@ platformun path-list ayırıcısını kullanır.
 | `tools.audit` | `true` | `audit` kaydı. |
 | `tools.crate_lookup` | `true` | `crate_lookup` kaydı. |
 | `tools.docs` | `true` | `docs` kaydı. |
+| `tools.context` | `true` | `context` kaydı. |
 | `tools.lsp` | `true` | Semantik gezinme araçları kaydı. |
 | `tools.rename` | `true` | LSP açıksa `rename` kaydı. |
 | `tools.refactor` | `true` | LSP açıksa `refactor` kaydı. |
@@ -134,6 +164,9 @@ platformun path-list ayırıcısını kullanır.
 | `change.max_bytes` | `268435456` | Change başına yakalanan aday byte. |
 | `change.ttl_ms` | `86400000` | Açılış taramasından önce orphan ve discarded scratch saklama süresi. |
 | `change.max_revisions` | `32` | Change başına stage revizyonu. |
+| `context.max_capsules` | `32` | Bellek içi kapsül ring kapasitesi. |
+| `context.capsule_ttl_ms` | `900000` | Kapsül TTL süresi; root epoch değişimi de geçersiz kılar. |
+| `context.max_items` | `64` | Bir kapsüle seçilen öğe sayısı. |
 | `limits.max_rename_edits` | `200` | Rename edit sınırı. |
 | `limits.max_refactor_edits` | `200` | Refactor edit sınırı. |
 | `limits.process_output_bytes` | `8388608` | Birleşik alt süreç çıktı sınırı. |

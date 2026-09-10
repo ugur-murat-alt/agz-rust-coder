@@ -75,6 +75,7 @@ OpenCode gruplanmış MCP araçlarını çoğunlukla `rust_*` adıyla gösterir.
 | `audit` | `rust_audit` | `enabled` | Rust kaynağını sınırlı statik bulgular için tarar. |
 | `crate_lookup` | `rust_crate_lookup` | `enabled` | Crate adını ve isteğe bağlı tam sürümü crates.io üzerinde doğrular. |
 | `docs` | `rust_docs` | `enabled` | Tam sürüm belgesini cache, yerel kaynak veya docs.rs üzerinden çözer. |
+| `context` | `rust_context` | `enabled` | Öğe başına nedeniyle revizyona bağlı anlamsal bağlam kapsülü hazırlar, genişletir veya farkını üretir. |
 | `symbol` | `rust_symbol` | `enabled` | Bir sembol için Rust Analyzer hover verisini okur. |
 | `references` | `rust_references` | `enabled` | Sınırlı referansları bulur. |
 | `definition` | `rust_definition` | `enabled` | Seçilen tanımı bulur. |

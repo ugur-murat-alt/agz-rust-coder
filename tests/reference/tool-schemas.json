@@ -70,6 +70,62 @@
     "required": ["dir", "crate"],
     "additionalProperties": false
   },
+  "context": {
+    "type": "object",
+    "properties": {
+      "dir": {
+        "type": "string",
+        "description": "Absolute path to the Rust project directory (workspace root or member)."
+      },
+      "action": {
+        "type": "string",
+        "enum": ["prepare", "expand", "delta"],
+        "description": "prepare: build a new capsule; expand: read stored items with pagination; delta: compare current anchors against a stored previous capsule."
+      },
+      "anchors": {
+        "type": "array",
+        "description": "Typed anchors. File and symbol anchors only; no free-text interpretation."
+      },
+      "purpose": {
+        "type": "string",
+        "description": "Optional label recorded in the capsule identity and echoed back; never treated as instructions."
+      },
+      "changeId": {
+        "type": "string",
+        "description": "Optional change label recorded in the capsule identity. No candidate service exists in this version; workspace hashes are used."
+      },
+      "byteBudget": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Requested payload byte budget, clamped by the tool-output limit."
+      },
+      "capsuleId": {
+        "type": "string",
+        "description": "Capsule identity required by action=expand."
+      },
+      "previousCapsuleId": {
+        "type": "string",
+        "description": "Stored capsule identity required by action=delta."
+      },
+      "itemIds": {
+        "type": "array",
+        "description": "Optional expand filter; unknown ids are reported as omissions."
+      },
+      "cursor": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Zero-based item offset for paginated expand."
+      },
+      "pageSize": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 32,
+        "description": "Expand page size; bounded fallback for hosts without MCP resource support."
+      }
+    },
+    "required": ["action"],
+    "additionalProperties": false
+  },
   "crate_lookup": {
     "type": "object",
     "properties": {

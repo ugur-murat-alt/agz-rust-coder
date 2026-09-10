@@ -24,6 +24,15 @@
     "inputSchemaHash": "fnv1a64:31844fe83727cfe2",
     "outputSchemaHash": "fnv1a64:c4521d513d0c3238"
   },
+  "context": {
+    "annotations": {
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "inputSchemaHash": "fnv1a64:ee66cb0f63c697ae",
+    "outputSchemaHash": "fnv1a64:bddd9713e49be4bf"
+  },
   "crate_lookup": {
     "annotations": {
       "idempotentHint": true,
