@@ -33,7 +33,7 @@ işaretini korur.
 | `rename` | Rust Analyzer | Kaynağa asla yazmaz | Doğrulanmış `old_string`/`new_string` edit paketi. |
 | `refactor` | Rust Analyzer | Kaynağa asla yazmaz | Doğrulanmış, yazmasız refactor paketi. |
 | `change` | Sunucuya ait scratch + aday doğrulaması için Cargo/rustc | Workspace'e asla yazmaz; yalnız aday kopyayı derler | Aday hash'leri, doğrulama kanıtı (taze `FAIL` için sınırlı tanılar ve yazmasız öneriler) ve doğrulanmış/doğrulanmamış export paketi içeren revizyona bağlı change kaydı. |
-| `repair` | Sunucuya ait scratch + aday doğrulaması için Cargo/rustc | Workspace'e yazmaz; yalnız geçici aday kopyaları oluşturup derler | Gerekçeli kök-neden hipotezleri ve kaynak destekli ownership kanıtıyla gruplanmış tanılar, aday başına ölçülmüş derleme/test sonucu, davranış/performans korumaları ve kalan risklerle birlikte ölçülmüş seçim. |
+| `repair` | Sunucuya ait scratch + aday doğrulaması ve sınırlı küçültme için Cargo/rustc | Workspace'e asla yazmaz; yalnız geçici aday kopyaları oluşturup derler | Gerekçeli kök-neden hipotezleri ve kaynak alıntılı ownership kanıtıyla gruplanmış tanılar, aday başına ölçülmüş derleme/test sonucu, davranış/performans koruyucuları, kalan risklerle ölçülmüş seçim ve sabitlenmiş yapılandırmayla dışa aktarımı doğrulanmış küçültülmüş üretici. |
 | `work` | change/validate üzerinde sunucuya ait work kaydı | Workspace'e yazmaz; yalnız bağlı aday kopyasını derler | Açık kapılar ve bütçelerle tipli intent yürütme: dürüst `READY` istenen-kapı kanıtı, tek kullanımlık revizyona bağlı token'lı sınırlı `NEEDS_MODEL` handoff veya tipli `BLOCKED`/`FAILED`/`CANCELLED` durma nedeni. |
 
 `check` hedefleri `check`, `clippy`, `test`, `doc`, `fmt` ve `all` değerleridir.
@@ -216,6 +216,47 @@ temizliğini kullanır. Derleyici metni ve host aday metni,
 `limits.tool_output_bytes` içinde görünür kırpmayla güvenilmez kanıt olarak
 kalır.
 
+## Hata Küçültme
+
+`repair(action=minimize)`, hatalı bir change revizyonunu küçük ve taşınabilir
+bir yeniden üreticiye indirir. Önce güncel revizyonun taze `FAIL` kanıtındaki
+gerçek bir tanıdan failure predicate üretilir: hata kodu artı trait ve tip
+adlarını içeren normalleştirilmiş mesaj yapısı. Hata kodu tek başına predicate
+değildir; `failurePredicate` yalnız kimliği daraltabilir (kod,
+`messageContains`, `file`). Değişmemiş aday anlık görüntüsü predicate'i ilk
+taze Cargo koşusunda ve ikinci bir değişmemiş doğrulama koşusunda üretmelidir;
+eşleşmeyen, zaman aşımına uğrayan veya doğrulamadan önce derleme bütçesini
+tüketen koşu küçültülmek yerine görünür biçimde `NOT_REPRODUCED` olarak durur.
+
+Ardından küçültme araması, revizyona bağlı aday kopyada izinli
+`reductionScope` eksenlerini (`files`, `items`, `modules` veya tümü) dener:
+başvurulmayan dosyalar, sözdizimsel olarak bütün item'lar ve `use` item'ları,
+modül dosyalarıyla birlikte `mod` bildirimleri ve satır içi `mod` blokları.
+Başka yerde hâlâ başvurulan adlar ve hâlâ kullanılan modül yolları (`name::`)
+aday gösterilmez; böylece bir küçültme hatanın bağlı olduğu kodu sessizce
+silemez. Her deneme gerçek bir Cargo koşusudur; bir küçültme yalnız aynı
+predicate üretildiğinde ve deneme yeni bir hata imzası eklemediğinde kabul
+edilir. Aynı hata kodlu ilgisiz tanı, yanlış syntax hatası, yeni eksik
+bağımlılık ve zaman aşımı reddedilir ve failure eşleşmesi ile nedeni kaydedilir.
+Kabul edilen küçültmeler seçilme nedenleriyle kaydedilir; `remainingRisks`
+aranmamış kapsamı belirtir.
+
+Sonuç bir kanıt paketidir: SHA-256 içerik hash'leri ve satır içi içerikle en
+küçük kaynak, sabitlenmiş toolchain dosyası, edition, target, feature'lar,
+Cargo.toml ve Cargo.lock hash'leri, yeniden üretim komutu ve doğrulama kanıtı.
+`REPRODUCED` iddiasından önce tam küçültülmüş kaynak temiz bir geçici dizinde
+yeniden oluşturulur ve tekrar derlenir; yalnız orada yeni imza olmadan
+eşleşen predicate `exportVerified: true` yapar. Bütçe durması ise
+`verification: trialVerified` ile `BEST_KNOWN_REPRODUCER` ve kalan kapsamı
+yayınlar. Global minimalite iddia edilmez, otomatik yükleme veya issue açma
+yapılmaz ve orijinal workspace'e asla yazılmaz. Dışa aktarma Cargo home,
+kimlik bilgileri, ortam sırları, sürüm kontrolü verisi veya ilgisiz depo
+dosyalarını asla kopyalamaz; yalnız Rust kaynakları, manifestler, lockfile,
+toolchain sabitlemeleri, `.cargo` yapılandırması ve provenance dosyaları
+alınır ve dışarıda kalan her şey `omitted` içinde listelenir. Aday item'lar
+ayrıca dosya, plan, anlık görüntü toplam bayt ve duvar saati ile sınırlıdır ve
+iptal her Cargo alt sürecine iletilir.
+
 ## Bağlam Kapsülleri
 
 `context` yalnız tipli çıpalarla çalışır: `{kind:"file",file,range?}` ve
@@ -371,6 +412,8 @@ platformun path-list ayırıcısını kullanır.
 | `repair.max_candidates` | `4` | `repair` işlemi başına aday denemesi; istekler yalnız daraltabilir. |
 | `repair.max_compiles` | `4` | `repair` işlemi başına Cargo doğrulaması; istekler yalnız daraltabilir. |
 | `repair.wall_time_ms` | `120000` | `repair` işlemi başına duvar saati bütçesi; istekler yalnız daraltabilir. |
+| `repair.minimize_max_candidates` | `32` | `repair(action=minimize)` başına derlemeyle değerlendirilen küçültme denemesi; istekler yalnız daraltabilir. |
+| `repair.minimize_max_compiles` | `16` | `repair(action=minimize)` başına, yeniden üretim ve dışa aktarma doğrulaması dahil Cargo koşusu; istekler yalnız daraltabilir. |
 | `work.max_active` | `4` | Sunucu başına eşzamanlı, terminal olmayan work öğesi. |
 | `work.max_compiles` | `12` | Bir work öğesinin çalıştırabileceği kapı doğrulaması. |
 | `work.max_candidates` | `4` | Bir work öğesinin stage edebileceği host aday revizyonu. |

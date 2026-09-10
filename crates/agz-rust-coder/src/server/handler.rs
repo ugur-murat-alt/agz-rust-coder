@@ -42,7 +42,8 @@ use crate::{
     lsp::documents,
     repair::{
         RepairAction, RepairBudgetInput, RepairCandidateInput, RepairConstraintsInput,
-        RepairOutcome, RepairRequest, RepairService, RepairTarget,
+        RepairFailurePredicateInput, RepairOutcome, RepairReductionScope, RepairRequest,
+        RepairService, RepairTarget,
     },
     tools::{
         ApiAction, ApiAnchor, ApiConfiguration, ApiData, ApiEnvironment,
@@ -187,6 +188,13 @@ pub struct RepairInput {
     pub constraints: RepairConstraintsInput,
     #[serde(default)]
     pub budget: RepairBudgetInput,
+    /// `action=minimize` only: narrow the failure identity. Omitted derives it
+    /// from the selected fresh diagnostic (code plus message structure).
+    #[serde(default)]
+    pub failure_predicate: Option<RepairFailurePredicateInput>,
+    /// `action=minimize` only: permitted reduction axes. Omitted defaults to all.
+    #[serde(default)]
+    pub reduction_scope: Option<RepairReductionScope>,
 }
 
 pub type ChangeOutput = ToolOutput<ChangeData>;
@@ -1091,7 +1099,7 @@ pub fn tool_definitions(config: &Config) -> Vec<Tool> {
     if config.tools.repair && config.tools.change {
         tools.push(tool::<RepairInput, RepairData>(
             "repair",
-            "Analyze, try, and compare compiler-driven repair candidates for a failing change revision.",
+            "Analyze, try, compare, and minimize compiler-driven repair candidates for a failing change revision.",
             ToolAnnotations::new().destructive(true).open_world(true),
         ));
     }
@@ -3594,11 +3602,72 @@ fn validate_repair(input: &RepairInput) -> Result<(), McpError> {
             None,
         ));
     }
-    if input.action == RepairAction::Analyze && !input.candidates.is_empty() {
+    if matches!(input.action, RepairAction::Analyze | RepairAction::Minimize)
+        && !input.candidates.is_empty()
+    {
         return Err(McpError::invalid_params(
             "candidates are accepted only for action=try or action=compare",
             None,
         ));
+    }
+    match input.action {
+        RepairAction::Minimize => {
+            if input.constraints.test_target.is_some() {
+                return Err(McpError::invalid_params(
+                    "constraints.testTarget is not accepted for action=minimize; the evidence target is reproduced",
+                    None,
+                ));
+            }
+            if let Some(predicate) = &input.failure_predicate {
+                if let Some(code) = &predicate.code {
+                    validate_string(code, "failurePredicate.code")?;
+                    if code.chars().count() > 64 {
+                        return Err(McpError::invalid_params(
+                            "failurePredicate.code is limited to 64 characters",
+                            None,
+                        ));
+                    }
+                }
+                if predicate.message_contains.len() > 8 {
+                    return Err(McpError::invalid_params(
+                        "failurePredicate.messageContains accepts at most 8 items",
+                        None,
+                    ));
+                }
+                for fragment in &predicate.message_contains {
+                    validate_string(fragment, "failurePredicate.messageContains item")?;
+                    if fragment.chars().count() > 160 {
+                        return Err(McpError::invalid_params(
+                            "failurePredicate.messageContains items are limited to 160 characters",
+                            None,
+                        ));
+                    }
+                }
+                if let Some(file) = &predicate.file {
+                    validate_string(file, "failurePredicate.file")?;
+                    if file.chars().count() > 512 {
+                        return Err(McpError::invalid_params(
+                            "failurePredicate.file is limited to 512 characters",
+                            None,
+                        ));
+                    }
+                }
+            }
+        }
+        _ => {
+            if input.failure_predicate.is_some() {
+                return Err(McpError::invalid_params(
+                    "failurePredicate is accepted only for action=minimize",
+                    None,
+                ));
+            }
+            if input.reduction_scope.is_some() {
+                return Err(McpError::invalid_params(
+                    "reductionScope is accepted only for action=minimize",
+                    None,
+                ));
+            }
+        }
     }
     for candidate in &input.candidates {
         if candidate.patches.is_empty() {
@@ -3849,6 +3918,11 @@ fn validate_work(config: &Config, input: &WorkInput) -> Result<(), McpError> {
 }
 
 fn repair_request(input: &RepairInput, service: &RepairService) -> RepairRequest {
+    let budget = if input.action == RepairAction::Minimize {
+        service.effective_minimize_budget(&input.budget)
+    } else {
+        service.effective_budget(&input.budget)
+    };
     RepairRequest {
         action: input.action,
         change_id: input.change_id.clone(),
@@ -3858,7 +3932,9 @@ fn repair_request(input: &RepairInput, service: &RepairService) -> RepairRequest
             .constraints
             .test_target
             .map(RepairTarget::as_gate_target),
-        budget: service.effective_budget(&input.budget),
+        budget,
+        reduction_scope: input.reduction_scope.unwrap_or_default(),
+        failure_predicate: input.failure_predicate.clone(),
     }
 }
 
@@ -6092,6 +6168,72 @@ mod tests {
         valid.budget.wall_time_ms = Some(60_000);
         assert!(validate_repair(&valid).is_ok());
         assert_eq!(RepairTarget::Test.as_gate_target(), GateTargetId::Test);
+    }
+
+    #[test]
+    fn minimize_input_validation_bounds_predicate_and_scope() {
+        let base: RepairInput = serde_json::from_value(serde_json::json!({
+            "action": "minimize",
+            "changeId": "ch-1-1-1"
+        }))
+        .expect("minimize input must deserialize");
+        assert!(validate_repair(&base).is_ok());
+
+        let mut analyze_with_scope = base.clone();
+        analyze_with_scope.action = RepairAction::Analyze;
+        analyze_with_scope.reduction_scope = Some(RepairReductionScope::Items);
+        assert!(
+            validate_repair(&analyze_with_scope).is_err(),
+            "reductionScope is minimize-only"
+        );
+
+        let mut analyze_with_predicate = base.clone();
+        analyze_with_predicate.action = RepairAction::Analyze;
+        analyze_with_predicate.failure_predicate = Some(RepairFailurePredicateInput {
+            code: Some("E0382".to_owned()),
+            message_contains: Vec::new(),
+            file: None,
+        });
+        assert!(
+            validate_repair(&analyze_with_predicate).is_err(),
+            "failurePredicate is minimize-only"
+        );
+
+        let mut with_candidates = base.clone();
+        with_candidates.candidates = vec![RepairCandidateInput {
+            id: None,
+            source: None,
+            patches: vec![PatchInput {
+                file: "src/lib.rs".to_owned(),
+                old_string: "a".to_owned(),
+                new_string: "b".to_owned(),
+            }],
+        }];
+        assert!(validate_repair(&with_candidates).is_err());
+
+        let mut with_test_target = base.clone();
+        with_test_target.constraints.test_target = Some(RepairTarget::Test);
+        assert!(validate_repair(&with_test_target).is_err());
+
+        let mut valid = base.clone();
+        valid.failure_predicate = Some(RepairFailurePredicateInput {
+            code: Some("E0382".to_owned()),
+            message_contains: vec!["borrow of moved value".to_owned()],
+            file: Some("src/lib.rs".to_owned()),
+        });
+        valid.reduction_scope = Some(RepairReductionScope::Modules);
+        assert!(validate_repair(&valid).is_ok());
+
+        valid
+            .failure_predicate
+            .as_mut()
+            .expect("predicate")
+            .message_contains = vec!["x".repeat(161)];
+        assert!(validate_repair(&valid).is_err());
+
+        let mut bad_budget = base;
+        bad_budget.budget.max_compiles = Some(0);
+        assert!(validate_repair(&bad_budget).is_err());
     }
 
     #[test]

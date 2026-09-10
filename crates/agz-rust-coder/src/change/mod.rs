@@ -18,4 +18,4 @@ pub use model::{
     ChangeSuggestionPackageData, ChangeSuggestionPatchData, NewFileInput, PatchInput,
 };
 pub use runtime::{RuntimeSnapshotPair, SnapshotError};
-pub use service::ChangeService;
+pub use service::{CandidateTree, CandidateTreeSkip, ChangeService};

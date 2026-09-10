@@ -617,7 +617,8 @@
         "enum": [
           "analyze",
           "try",
-          "compare"
+          "compare",
+          "minimize"
         ],
         "type": "string"
       },
@@ -759,6 +760,26 @@
         "type": [
           "string",
           "null"
+        ]
+      },
+      "failurePredicate": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RepairFailurePredicateInput"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "reductionScope": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RepairReductionScope"
+          },
+          {
+            "type": "null"
+          }
         ]
       }
     },

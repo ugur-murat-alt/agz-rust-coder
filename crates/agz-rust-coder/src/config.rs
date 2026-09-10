@@ -282,6 +282,11 @@ pub struct RepairConfig {
     pub max_candidates: u32,
     pub max_compiles: u32,
     pub wall_time_ms: u64,
+    /// Reduction attempts and Cargo runs for `action=minimize`. Minimization
+    /// searches a different, larger space than candidate repair, so it has its
+    /// own caps; a request may still only narrow them.
+    pub minimize_max_candidates: u32,
+    pub minimize_max_compiles: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -410,6 +415,8 @@ impl Config {
                 max_candidates: 4,
                 max_compiles: 4,
                 wall_time_ms: 120_000,
+                minimize_max_candidates: 32,
+                minimize_max_compiles: 16,
             },
             telemetry: TelemetryConfig {
                 enabled: true,
@@ -620,6 +627,18 @@ impl Config {
             86_400_000,
         )?;
         validate_runtime_adapters(&self.profile.runtime_adapters)?;
+        check_range(
+            "repair.minimize_max_candidates",
+            u64::from(self.repair.minimize_max_candidates),
+            1,
+            256,
+        )?;
+        check_range(
+            "repair.minimize_max_compiles",
+            u64::from(self.repair.minimize_max_compiles),
+            3,
+            64,
+        )?;
         check_range(
             "limits.tool_output_bytes",
             self.limits.tool_output_bytes,
@@ -923,6 +942,10 @@ pub struct CliOptions {
     pub profile_runtime_max_warmup: Option<u64>,
     #[arg(long = "profile-runtime-run-timeout-ms")]
     pub profile_runtime_run_timeout_ms: Option<u64>,
+    #[arg(long = "repair-minimize-max-candidates")]
+    pub repair_minimize_max_candidates: Option<u64>,
+    #[arg(long = "repair-minimize-max-compiles")]
+    pub repair_minimize_max_compiles: Option<u64>,
     #[arg(long = "max-rename-edits")]
     pub max_rename_edits: Option<u64>,
     #[arg(long = "max-refactor-edits")]
@@ -1179,6 +1202,8 @@ struct FileRepairConfig {
     max_candidates: Option<u32>,
     max_compiles: Option<u32>,
     wall_time_ms: Option<u64>,
+    minimize_max_candidates: Option<u32>,
+    minimize_max_compiles: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1370,6 +1395,14 @@ fn apply_file(config: &mut Config, file: FileConfig) {
         apply_opt(&mut config.repair.max_candidates, repair.max_candidates);
         apply_opt(&mut config.repair.max_compiles, repair.max_compiles);
         apply_opt(&mut config.repair.wall_time_ms, repair.wall_time_ms);
+        apply_opt(
+            &mut config.repair.minimize_max_candidates,
+            repair.minimize_max_candidates,
+        );
+        apply_opt(
+            &mut config.repair.minimize_max_compiles,
+            repair.minimize_max_compiles,
+        );
     }
     if let Some(telemetry) = file.telemetry {
         apply_opt(&mut config.telemetry.enabled, telemetry.enabled);
@@ -1522,6 +1555,12 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
         }
         "REPAIR__MAX_COMPILES" => {
             config.repair.max_compiles = parse_u32(value).map_err(invalid)?;
+        }
+        "REPAIR__MINIMIZE_MAX_CANDIDATES" => {
+            config.repair.minimize_max_candidates = parse_u32(value).map_err(invalid)?;
+        }
+        "REPAIR__MINIMIZE_MAX_COMPILES" => {
+            config.repair.minimize_max_compiles = parse_u32(value).map_err(invalid)?;
         }
         "REPAIR__WALL_TIME_MS" => {
             config.repair.wall_time_ms = parse_u64(value).map_err(invalid)?;
@@ -1739,6 +1778,22 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
         &mut config.profile.runtime_run_timeout_ms,
         cli.profile_runtime_run_timeout_ms,
     );
+    if let Some(value) = cli.repair_minimize_max_candidates {
+        config.repair.minimize_max_candidates = u32::try_from(value).map_err(|_| {
+            invalid(
+                "repair.minimize_max_candidates",
+                "value exceeds u32".to_owned(),
+            )
+        })?;
+    }
+    if let Some(value) = cli.repair_minimize_max_compiles {
+        config.repair.minimize_max_compiles = u32::try_from(value).map_err(|_| {
+            invalid(
+                "repair.minimize_max_compiles",
+                "value exceeds u32".to_owned(),
+            )
+        })?;
+    }
     apply_opt(&mut config.limits.max_rename_edits, cli.max_rename_edits);
     apply_opt(
         &mut config.limits.max_refactor_edits,
@@ -2319,10 +2374,16 @@ mod tests {
         let plain_cli = cli();
         let mut cli = cli();
         cli.repair_max_candidates = Some(1);
+        cli.repair_minimize_max_compiles = Some(5);
         let config = Config::from_sources(
             "/workspace",
-            Some("[tools]\nrepair = false\n[repair]\nmax_compiles = 2\nwall_time_ms = 5_000\n"),
-            [("AGZ_RUST_CODER_REPAIR__MAX_CANDIDATES", "3")],
+            Some(
+                "[tools]\nrepair = false\n[repair]\nmax_compiles = 2\nwall_time_ms = 5_000\nminimize_max_candidates = 9\n",
+            ),
+            [
+                ("AGZ_RUST_CODER_REPAIR__MAX_CANDIDATES", "3"),
+                ("AGZ_RUST_CODER_REPAIR__MINIMIZE_MAX_COMPILES", "7"),
+            ],
             &cli,
         )
         .unwrap();
@@ -2331,6 +2392,8 @@ mod tests {
         assert_eq!(config.repair.max_candidates, 1);
         assert_eq!(config.repair.max_compiles, 2);
         assert_eq!(config.repair.wall_time_ms, 5_000);
+        assert_eq!(config.repair.minimize_max_candidates, 9);
+        assert_eq!(config.repair.minimize_max_compiles, 5);
 
         let defaults = Config::defaults_at("/workspace");
         assert!(defaults.tools.repair);
@@ -2353,6 +2416,17 @@ mod tests {
         );
         assert!(matches!(
             out_of_range,
+            Err(ConfigError::InvalidField { .. })
+        ));
+
+        let minimize_out_of_range = Config::from_sources(
+            "/workspace",
+            Some("[repair]\nminimize_max_compiles = 2\n"),
+            std::iter::empty::<(String, String)>(),
+            &plain_cli,
+        );
+        assert!(matches!(
+            minimize_out_of_range,
             Err(ConfigError::InvalidField { .. })
         ));
 
