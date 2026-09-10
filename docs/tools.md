@@ -15,6 +15,7 @@ Failed compilations are revalidated before offering edit/context evidence. Trunc
 | Tool | Authority | Side effects | Result |
 | --- | --- | --- | --- |
 | `check` | Cargo/rustc | May build in a bounded target directory | Validation status, command evidence, diagnostics, and timing data. |
+| `profile` | Cargo/rustc | Runs one bounded Cargo target with `--timings` and stores its bounded HTML report under server-owned evidence | Observed rebuild report, separated admission/preflight/Cargo phases, observed/reasoned-hypothesis/unknown explanations, and baseline/candidate comparison. |
 | `audit` | Advisory scanner | Reads authorized Rust files | Bounded findings and skipped-file reasons. |
 | `crate_lookup` | crates.io | Bounded HTTPS request | `FOUND`, `NOT_FOUND`, `VERSION_MISMATCH`, or `UNAVAILABLE`. |
 | `docs` | rustdoc/docs.rs | May use cache, network, or local `cargo doc` | Exact-version excerpt and provenance or typed unavailability. |
@@ -30,6 +31,22 @@ Failed compilations are revalidated before offering edit/context evidence. Trunc
 `check` targets are `check`, `clippy`, `test`, `doc`, `fmt`, and `all`. Formatting
 uses check-only behavior. A completed explicit validation is never reused as
 authority for a later request; only an active identical job may be joined.
+
+`profile` runs exactly one of `check`, `clippy`, `test`, or `doc`. It separates
+protocol admission, scheduler queue, metadata/identity preflight, Cargo process
+time, and finalization; parallel unit durations are never summed as wall time.
+The stable Cargo `--timings` HTML report is stored as a bounded server-owned
+artifact, and its embedded unit data is extracted only with the exact
+version-bound shape. A missing, oversized, or malformed report produces a typed
+`unavailable` result instead of guessed numbers, and missing Cargo telemetry is
+never reported as cache hits. `buildAnalyze` returns one sample; `buildCompare`
+records toolchain, hardware class, configuration, cache state, sample counts, and
+the source-change binding, and returns `INCONCLUSIVE` for single-run, noisy,
+mixed warm/cold, or insufficient samples. Warm and cold experiments are never
+merged, CPU/I/O bottleneck types are not asserted without observation, and any
+suggested feature/dependency/profile change remains a proposal that is never
+applied automatically. Debug assertions and test scope are never disabled as a
+hidden speedup.
 
 All tools return equivalent structured and text representations within
 `limits.tool_output_bytes`. Remote bodies and excerpts are bounded before
@@ -74,6 +91,7 @@ use the platform path-list separator.
 | `server.allow_roots` | canonical CWD | Primary authorized workspace roots. |
 | `server.allow_dependency_roots` | empty | External path-dependency roots. |
 | `tools.check` | `true` | Register `check`. |
+| `tools.profile` | `true` | Register `profile`. |
 | `tools.audit` | `true` | Register `audit`. |
 | `tools.crate_lookup` | `true` | Register `crate_lookup`. |
 | `tools.docs` | `true` | Register `docs`. |
@@ -90,6 +108,9 @@ use the platform path-list separator.
 | `gate.min_available_memory_mb` | `512` | Preflight memory floor when the host exposes a reliable available-memory measurement (currently Linux). |
 | `gate.cache_dir` | platform `agz-rust-coder/state/gate` | Server-owned Cargo cache. |
 | `gate.lease_dir` | platform `agz-rust-coder/state/leases` | Host leases and process journal. |
+| `profile.max_report_bytes` | `4194304` | Bounded read/store cap for one Cargo timing artifact. |
+| `profile.max_runs` | `4` | Fresh Cargo runs available to one `profile` call. |
+| `profile.compare_samples` | `3` | Required samples per side before any speed claim. |
 | `rust_analyzer.path` | PATH or rustup | Optional binary override. |
 | `rust_analyzer.timeout_ms` | `30000` | Semantic request deadline. |
 | `rust_analyzer.idle_ms` | `900000` | Idle process lifetime. |

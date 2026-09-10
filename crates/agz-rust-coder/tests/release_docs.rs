@@ -136,6 +136,7 @@ fn assert_contract(english: &str, turkish: &str) -> Result<(), String> {
         english,
         &[
             "check",
+            "profile",
             "audit",
             "crate_lookup",
             "docs",
@@ -153,6 +154,7 @@ fn assert_contract(english: &str, turkish: &str) -> Result<(), String> {
         turkish,
         &[
             "check",
+            "profile",
             "audit",
             "crate_lookup",
             "docs",
@@ -176,6 +178,7 @@ fn assert_contract(english: &str, turkish: &str) -> Result<(), String> {
     }
     for direct_name in [
         "rust_check",
+        "rust_profile",
         "rust_audit",
         "rust_crate_lookup",
         "rust_docs",
@@ -202,6 +205,9 @@ fn assert_contract(english: &str, turkish: &str) -> Result<(), String> {
         "rust_analyzer.workspace_code",
         "docs.fallback",
         "limits.tool_output_bytes",
+        "profile.max_report_bytes",
+        "profile.max_runs",
+        "profile.compare_samples",
         "telemetry.enabled",
     ];
     let english_config = keyed_table(english, &config_keys)?;

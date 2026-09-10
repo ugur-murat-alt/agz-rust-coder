@@ -16,6 +16,7 @@ işaretini korur.
 | Tool | Authority | Side effects | Sonuç |
 | --- | --- | --- | --- |
 | `check` | Cargo/rustc | Sınırlı target dizininde derleme yapabilir | Doğrulama durumu, komut kanıtı, tanılar ve zamanlama verisi. |
+| `profile` | Cargo/rustc | Tek bir sınırlı Cargo hedefini `--timings` ile çalıştırır ve sınırlı HTML raporunu sunucuya ait kanıt altında saklar | Gözlenen yeniden derleme raporu, ayrıştırılmış admission/preflight/Cargo aşamaları, gözlenen/gerekçeli hipotez/bilinmiyor açıklamaları ve baz/aday karşılaştırması. |
 | `audit` | Advisory scanner | Yetkili Rust dosyalarını okur | Sınırlı bulgular ve atlanan dosya nedenleri. |
 | `crate_lookup` | crates.io | Sınırlı HTTPS isteği | `FOUND`, `NOT_FOUND`, `VERSION_MISMATCH` veya `UNAVAILABLE`. |
 | `docs` | rustdoc/docs.rs | Cache, ağ veya yerel `cargo doc` kullanabilir | Tam sürüm alıntısı ve kaynak bilgisi ya da tipli erişilememe. |
@@ -32,6 +33,21 @@ işaretini korur.
 Biçimlendirme yalnız kontrol kipinde çalışır. Tamamlanmış açık bir doğrulama daha
 sonraki istek için yetki kanıtı olarak yeniden kullanılmaz; yalnız aynı anda
 çalışan özdeş işe katılım mümkündür.
+
+`profile` yalnızca `check`, `clippy`, `test` veya `doc` hedeflerinden birini
+çalıştırır. Protokol admission, scheduler kuyruğu, metadata/identity preflight,
+Cargo süreci ve finalizasyon sürelerini ayırır; paralel unit sürelerinin toplamı
+duvar saati olarak sunulmaz. Stable Cargo `--timings` HTML raporu sınırlı ve
+sunucuya ait bir artifact olarak saklanır; gömülü unit verisi yalnızca tam
+sürüme bağlı şekille çıkarılır. Eksik, aşırı büyük veya bozuk rapor tahmin
+yerine tipli `unavailable` üretir ve eksik Cargo kanıtı cache-hit olarak
+sayılmaz. `buildAnalyze` tek örnek döndürür; `buildCompare` toolchain, donanım
+sınıfı, yapılandırma, cache durumu, örnek sayıları ve kaynak değişim bağını
+kaydeder; tek koşu, gürültülü, karışık warm/cold veya yetersiz örneklerde
+`INCONCLUSIVE` döner. Warm ve cold deneyler birleştirilmez, gözlem olmadan
+CPU/I/O darboğaz türü kesinleştirilmez ve önerilen feature/dependency/profile
+değişiklikleri otomatik uygulanmaz. Debug assertion'ları ve test kapsamı gizli
+hızlandırma olarak kapatılmaz.
 
 Tüm araçlar `limits.tool_output_bytes` içinde eşdeğer belirli yapıdaki veri ve
 metin döndürür. Uzak gövdeler ve alıntılar ayrıştırmadan önce sınırlandırılır.
@@ -74,6 +90,7 @@ platformun path-list ayırıcısını kullanır.
 | `server.allow_roots` | canonical CWD | Birincil yetkili workspace kökleri. |
 | `server.allow_dependency_roots` | empty | Dış path-dependency kökleri. |
 | `tools.check` | `true` | `check` kaydı. |
+| `tools.profile` | `true` | `profile` kaydı. |
 | `tools.audit` | `true` | `audit` kaydı. |
 | `tools.crate_lookup` | `true` | `crate_lookup` kaydı. |
 | `tools.docs` | `true` | `docs` kaydı. |
@@ -90,6 +107,9 @@ platformun path-list ayırıcısını kullanır.
 | `gate.min_available_memory_mb` | `512` | İşletim sistemi güvenilir kullanılabilir bellek ölçümü sağladığında uygulanan ön kontrol tabanı (şu anda Linux). |
 | `gate.cache_dir` | platform `agz-rust-coder/state/gate` | Sunucuya ait Cargo cache. |
 | `gate.lease_dir` | platform `agz-rust-coder/state/leases` | Host lease ve süreç journal'ı. |
+| `profile.max_report_bytes` | `4194304` | Tek Cargo zamanlama artifact'ı için sınırlı okuma/saklama üst sınırı. |
+| `profile.max_runs` | `4` | Bir `profile` çağrısında kullanılabilen taze Cargo koşusu. |
+| `profile.compare_samples` | `3` | Hız iddiası öncesi her taraf için gereken örnek sayısı. |
 | `rust_analyzer.path` | PATH or rustup | İsteğe bağlı binary değişimi. |
 | `rust_analyzer.timeout_ms` | `30000` | Semantik istek son süresi. |
 | `rust_analyzer.idle_ms` | `900000` | Boş süreç ömrü. |

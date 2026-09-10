@@ -72,6 +72,7 @@ OpenCode commonly exposes grouped MCP tools as `rust_*`.
 | MCP tool | OpenCode direct name | Default | Purpose |
 | --- | --- | --- | --- |
 | `check` | `rust_check` | `enabled` | Run bounded Cargo check, Clippy, tests, docs, or the full gate. |
+| `profile` | `rust_profile` | `enabled` | Analyze observed Cargo rebuild behavior and compare bounded build evidence without claiming unmeasured speedups. |
 | `audit` | `rust_audit` | `enabled` | Scan Rust source for bounded static findings. |
 | `crate_lookup` | `rust_crate_lookup` | `enabled` | Verify a crate and optional exact version on crates.io. |
 | `docs` | `rust_docs` | `enabled` | Resolve exact-version docs from cache, local sources, or docs.rs. |
@@ -105,7 +106,13 @@ sections, for example `AGZ_RUST_CODER_GATE__HARD_TIMEOUT_MS=600000`.
 | `gate.cache` | `auto` | Cache policy: `auto`, `project`, or `isolated`. |
 | `rust_analyzer.workspace_code` | `deny` | Reject RA startup unless workspace code is disabled. |
 | `docs.fallback` | `auto` | Documentation source policy. |
+| `profile.max_report_bytes` | `4194304` | Bounded read/store cap for one Cargo timing artifact. |
+| `profile.max_runs` | `4` | Fresh Cargo runs available to one `profile` call. |
+| `profile.compare_samples` | `3` | Required samples per side before any speed claim. |
 | `limits.tool_output_bytes` | `49152` | Maximum serialized tool result size. |
+| `profile.max_report_bytes` | `4194304` | Bounded read/store cap for one Cargo timing artifact. |
+| `profile.max_runs` | `4` | Fresh Cargo runs available to one `profile` call. |
+| `profile.compare_samples` | `3` | Required samples per side before any speed claim. |
 | `telemetry.enabled` | `true` | Bounded local activity records without prompts or source. |
 
 Run `agz-rust-coder --help` for every CLI field. The complete behavior and

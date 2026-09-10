@@ -103,6 +103,7 @@ async fn initialize_lists_the_static_surface_and_guidance() -> Result<()> {
         names,
         [
             "check",
+            "profile",
             "audit",
             "crate_lookup",
             "docs",

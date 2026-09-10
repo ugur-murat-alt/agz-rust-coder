@@ -60,6 +60,14 @@
     "inputSchemaHash": "fnv1a64:4d9d4b3f0649d4e4",
     "outputSchemaHash": "fnv1a64:eeaf84b47f98d84f"
   },
+  "profile": {
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": true
+    },
+    "inputSchemaHash": "fnv1a64:14172655fa8f92ea",
+    "outputSchemaHash": "fnv1a64:8be711623f664e81"
+  },
   "refactor": {
     "annotations": {
       "idempotentHint": true,

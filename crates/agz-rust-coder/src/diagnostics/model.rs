@@ -255,6 +255,12 @@ pub struct RenderedDiagnostics {
     pub truncated: bool,
 }
 
+/// Bounded package-name lists recorded from Cargo's JSON artifact stream.
+///
+/// Absence of a name means only that the bounded list did not retain it; it is
+/// never evidence that the package was not rebuilt.
+pub const MAX_TRACKED_PACKAGES: usize = 64;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CargoBuildTelemetry {
@@ -263,12 +269,69 @@ pub struct CargoBuildTelemetry {
     pub rebuilt_units: usize,
     pub build_scripts: usize,
     pub linked_units: usize,
+    /// Display names of observed non-fresh compilation units, bounded and deduplicated.
+    #[serde(default)]
+    pub rebuilt_packages: Vec<String>,
+    /// Display names of packages whose build script was executed, bounded and deduplicated.
+    #[serde(default)]
+    pub build_script_packages: Vec<String>,
+    /// True when at least one tracked package list dropped an entry at its bound.
+    #[serde(default)]
+    pub packages_truncated: bool,
 }
 
 impl CargoBuildTelemetry {
     pub fn is_empty(&self) -> bool {
         self.total_units == 0 && self.build_scripts == 0
     }
+
+    pub fn record_rebuilt_package(&mut self, package_id: Option<&str>) {
+        let name = package_display_name(package_id);
+        record_package(
+            &mut self.rebuilt_packages,
+            &mut self.packages_truncated,
+            name,
+        );
+    }
+
+    pub fn record_build_script_package(&mut self, package_id: Option<&str>) {
+        let name = package_display_name(package_id);
+        record_package(
+            &mut self.build_script_packages,
+            &mut self.packages_truncated,
+            name,
+        );
+    }
+}
+
+fn record_package(target: &mut Vec<String>, truncated: &mut bool, name: String) {
+    if target.iter().any(|existing| existing == &name) {
+        return;
+    }
+    if target.len() >= MAX_TRACKED_PACKAGES {
+        *truncated = true;
+        return;
+    }
+    target.push(name);
+}
+
+/// Extract the display name from a Cargo package id such as
+/// `path+file:///tmp/demo#demo@0.1.0`. Falls back to a bounded literal.
+fn package_display_name(package_id: Option<&str>) -> String {
+    let Some(package_id) = package_id else {
+        return "unknown".to_owned();
+    };
+    let after_hash = package_id
+        .rsplit_once('#')
+        .map_or(package_id, |(_, name)| name);
+    let candidate = after_hash
+        .rsplit_once('@')
+        .map_or(after_hash, |(name, _)| name)
+        .trim();
+    if candidate.is_empty() {
+        return "unknown".to_owned();
+    }
+    candidate.chars().take(256).collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

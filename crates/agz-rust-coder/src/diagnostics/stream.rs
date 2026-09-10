@@ -56,6 +56,9 @@ impl CargoStream {
                 rebuilt_units: 0,
                 build_scripts: 0,
                 linked_units: 0,
+                rebuilt_packages: Vec::new(),
+                build_script_packages: Vec::new(),
+                packages_truncated: false,
             },
             stats: EvidenceStats::default(),
         }
@@ -171,6 +174,35 @@ impl CargoStream {
             self.build.rebuilt_units = self.build.rebuilt_units.saturating_add(build.rebuilt_units);
             self.build.build_scripts = self.build.build_scripts.saturating_add(build.build_scripts);
             self.build.linked_units = self.build.linked_units.saturating_add(build.linked_units);
+            for name in &build.rebuilt_packages {
+                if !self
+                    .build
+                    .rebuilt_packages
+                    .iter()
+                    .any(|existing| existing == name)
+                {
+                    if self.build.rebuilt_packages.len() < super::model::MAX_TRACKED_PACKAGES {
+                        self.build.rebuilt_packages.push(name.clone());
+                    } else {
+                        self.build.packages_truncated = true;
+                    }
+                }
+            }
+            for name in &build.build_script_packages {
+                if !self
+                    .build
+                    .build_script_packages
+                    .iter()
+                    .any(|existing| existing == name)
+                {
+                    if self.build.build_script_packages.len() < super::model::MAX_TRACKED_PACKAGES {
+                        self.build.build_script_packages.push(name.clone());
+                    } else {
+                        self.build.packages_truncated = true;
+                    }
+                }
+            }
+            self.build.packages_truncated |= build.packages_truncated;
         }
         for diagnostic in parsed.diagnostics {
             self.retain(diagnostic);

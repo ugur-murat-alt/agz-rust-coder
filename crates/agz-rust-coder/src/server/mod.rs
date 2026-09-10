@@ -9,8 +9,9 @@ pub use handler::{
     AuditData, AuditInput, AuditOutput, CheckData, CheckDetail, CheckInput, CheckOutput,
     CheckTarget, CrateLookupData, CrateLookupInput, CrateLookupOutput, DocsData, DocsInput,
     DocsOutput, EditData, EditOutput, HierarchyDirection, HierarchyInput, ImplementationsInput,
-    RefactorInput, RenameInput, RustCoderServer, SemanticData, SemanticInput, SemanticOutput,
-    SymbolInput, SymbolsInput, tool_definitions,
+    ProfileAction, ProfileBudgetInput, ProfileConfigurationInput, ProfileData, ProfileInput,
+    ProfileOutput, RefactorInput, RenameInput, RustCoderServer, SemanticData, SemanticInput,
+    SemanticOutput, SymbolInput, SymbolsInput, tool_definitions,
 };
 pub use progress::ProgressReporter;
 pub use response::{ToolData, ToolOutput, WorkspaceInfo};
@@ -35,7 +36,7 @@ use crate::{
     lsp::RustAnalyzerManager,
     process::{ProcessJournal, ProcessSupervisor},
     telemetry::ActivityLog,
-    tools::{AuditLimits, AuditService, CheckService},
+    tools::{AuditLimits, AuditService, CheckService, ProfileService},
     workspace::{AuthorizedRoot, RootGuard},
 };
 use admission::AdmissionController;
@@ -49,6 +50,7 @@ pub struct AppState {
     client_roots: ClientRootsCoordinator,
     processes: ProcessSupervisor,
     check: Arc<CheckService>,
+    profile: ProfileService,
     audit: AuditService,
     docs: Arc<DocsResolver>,
     cargo_home: Option<Arc<AuthorizedRoot>>,
@@ -128,6 +130,7 @@ impl AppState {
             Arc::clone(&roots),
             processes.clone(),
         ));
+        let profile = ProfileService::new(config.clone(), Arc::clone(&check), processes.clone());
         let audit = AuditService::new(AuditLimits::from_u64(
             config.limits.audit_files,
             config.limits.audit_file_bytes,
@@ -149,6 +152,7 @@ impl AppState {
             client_roots,
             processes: processes.clone(),
             check,
+            profile,
             audit,
             docs: Arc::new(DocsResolver::with_authorized_supervisor(processes)),
             cargo_home,
@@ -267,6 +271,10 @@ impl AppState {
 
     pub(crate) fn check_service(&self) -> &Arc<CheckService> {
         &self.check
+    }
+
+    pub(crate) fn profile_service(&self) -> &ProfileService {
+        &self.profile
     }
 
     pub(crate) fn audit_service(&self) -> &AuditService {

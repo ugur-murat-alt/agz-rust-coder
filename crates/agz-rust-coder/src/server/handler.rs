@@ -35,10 +35,10 @@ use crate::{
     },
     gate::{GateDetail, GateEvidence, GateRequest, GateStatus, GateTargetId},
     tools::{
-        AuditCancellation, CrateLookupInput as DomainCrateLookupInput,
-        ToolError as SemanticToolError, document_symbols, semantic_refactor, semantic_rename,
-        symbol_definition, symbol_hierarchy, symbol_hover, symbol_implementations,
-        symbol_references, with_lsp_authority, with_lsp_cancellation,
+        AuditCancellation, CompareRequest, CrateLookupInput as DomainCrateLookupInput,
+        ProfileBudget, ProfileRequest, ToolError as SemanticToolError, document_symbols,
+        semantic_refactor, semantic_rename, symbol_definition, symbol_hierarchy, symbol_hover,
+        symbol_implementations, symbol_references, with_lsp_authority, with_lsp_cancellation,
     },
     workspace::{ClientRoots, WorkspaceRoot, select_in_root},
 };
@@ -286,6 +286,80 @@ pub struct RefactorInput {
     pub include_contents: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileAction {
+    #[default]
+    BuildAnalyze,
+    BuildCompare,
+}
+
+impl ProfileAction {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BuildAnalyze => "build_analyze",
+            Self::BuildCompare => "build_compare",
+        }
+    }
+}
+
+/// Typed Cargo configuration for `profile`. The target must be a single Cargo
+/// operation so one timing artifact can be attributed to it.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProfileConfigurationInput {
+    #[serde(default)]
+    pub target: CheckTarget,
+    #[serde(default)]
+    pub options: crate::gate::ValidationOptions,
+}
+
+/// Bounded run, report-byte, and wall-time budget for `profile`.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProfileBudgetInput {
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 16))]
+    pub max_runs: Option<u64>,
+    #[serde(default)]
+    #[schemars(range(min = 1_024, max = 67_108_864))]
+    pub max_report_bytes: Option<u64>,
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub wall_time_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProfileInput {
+    #[serde(default)]
+    pub action: ProfileAction,
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub dir: Option<String>,
+    #[serde(default)]
+    pub configuration: ProfileConfigurationInput,
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub change_id: Option<String>,
+    #[serde(default)]
+    #[schemars(length(max = 16), inner(length(min = 1)))]
+    pub baseline_evidence: Vec<String>,
+    #[serde(default)]
+    pub budget: ProfileBudgetInput,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileData {
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analysis: Option<crate::tools::ProfileRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<crate::tools::ProfileComparison>,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckData {
@@ -468,6 +542,7 @@ pub struct EditData {
 }
 
 pub type CheckOutput = ToolOutput<CheckData>;
+pub type ProfileOutput = ToolOutput<ProfileData>;
 pub type AuditOutput = ToolOutput<AuditData>;
 pub type CrateLookupOutput = ToolOutput<CrateLookupData>;
 pub type DocsOutput = ToolOutput<DocsData>;
@@ -482,6 +557,13 @@ pub fn tool_definitions(config: &Config) -> Vec<Tool> {
         tools.push(tool::<CheckInput, CheckData>(
             "check",
             "Run a bounded Cargo validation operation and return structured diagnostics.",
+            ToolAnnotations::new().destructive(true).open_world(true),
+        ));
+    }
+    if config.tools.profile {
+        tools.push(tool::<ProfileInput, ProfileData>(
+            "profile",
+            "Analyze observed Cargo rebuild behavior and compare bounded build evidence.",
             ToolAnnotations::new().destructive(true).open_world(true),
         ));
     }
@@ -1041,6 +1123,127 @@ impl ServerHandler for RustCoderServer {
                     self.check(input, &context, workspace).await,
                 ))
             }
+            "profile" => {
+                let input: ProfileInput = parse_input(arguments)?;
+                validate_profile(self.state.config(), &input)?;
+                let handler_started = std::time::Instant::now();
+                let Ok(permit) = self.state.try_admit() else {
+                    return Ok(CallToolResponse::Complete(profile_terminal(
+                        &self.state,
+                        &input,
+                        "RESOURCE_BLOCKED",
+                        RESOURCE_BLOCKED_REASON.to_owned(),
+                    )));
+                };
+                if self.state.is_shutting_down() {
+                    return Ok(CallToolResponse::Complete(profile_terminal(
+                        &self.state,
+                        &input,
+                        "RESOURCE_BLOCKED",
+                        RESOURCE_BLOCKED_REASON.to_owned(),
+                    )));
+                }
+                let workspace = match self.resolve_workspace(input.dir.as_deref(), &context).await {
+                    Ok(workspace) => workspace,
+                    Err(reason) => {
+                        return Ok(CallToolResponse::Complete(profile_terminal(
+                            &self.state,
+                            &input,
+                            "INCONCLUSIVE",
+                            reason,
+                        )));
+                    }
+                };
+                let cancellation =
+                    workspace.cancellation(context.ct.clone(), self.state.shutdown_token());
+                let token = cancellation.token();
+                let authority = Some(workspace.root.requested_authority().clone());
+                let budget = profile_budget(self.state.config(), &input.budget);
+                let target = profile_gate_target(input.configuration.target)?;
+                let directory = input.dir.as_deref().map(PathBuf::from);
+                let mcp_admission_ms = Some(
+                    handler_started
+                        .elapsed()
+                        .as_millis()
+                        .min(u128::from(u64::MAX)) as u64,
+                );
+                let (data, warnings, status, is_error) = match input.action {
+                    ProfileAction::BuildAnalyze => {
+                        let request = ProfileRequest {
+                            directory,
+                            target,
+                            options: input.configuration.options.clone(),
+                            client_roots: workspace.client_roots.clone(),
+                            root_epoch: workspace.root.epoch(),
+                            budget,
+                            change_id: input.change_id.clone(),
+                            mcp_admission_ms,
+                        };
+                        let record = self
+                            .state
+                            .profile_service()
+                            .analyze(&request, handler_started, authority, &token)
+                            .await;
+                        let status = record.status.clone();
+                        let is_error = status != "COMPLETE";
+                        let reason = record.reason.clone();
+                        let warnings = record.warnings.clone();
+                        (
+                            ProfileData {
+                                action: input.action.as_str().to_owned(),
+                                analysis: Some(record),
+                                comparison: None,
+                                reason,
+                            },
+                            warnings,
+                            status,
+                            is_error,
+                        )
+                    }
+                    ProfileAction::BuildCompare => {
+                        let request = CompareRequest {
+                            directory,
+                            target,
+                            options: input.configuration.options.clone(),
+                            client_roots: workspace.client_roots.clone(),
+                            root_epoch: workspace.root.epoch(),
+                            budget,
+                            change_id: input.change_id.clone(),
+                            baseline_evidence: input.baseline_evidence.clone(),
+                        };
+                        let comparison = self
+                            .state
+                            .profile_service()
+                            .compare(&request, handler_started, authority, &token)
+                            .await;
+                        let status = comparison.status.clone();
+                        let is_error = status != "COMPARABLE";
+                        let reason = comparison.reason.clone();
+                        let warnings = comparison.warnings.clone();
+                        (
+                            ProfileData {
+                                action: input.action.as_str().to_owned(),
+                                analysis: None,
+                                comparison: Some(comparison),
+                                reason,
+                            },
+                            warnings,
+                            status,
+                            is_error,
+                        )
+                    }
+                };
+                let summary = format!("Build profile finished with status {status}");
+                let output = ToolOutput::new("profile", status, summary, data)
+                    .with_warnings(warnings)
+                    .with_untrusted_data()
+                    .with_workspace(profile_workspace_info(&workspace));
+                let _permit = permit;
+                Ok(CallToolResponse::Complete(output.into_call_tool_result(
+                    self.state.max_output_bytes(),
+                    is_error,
+                )))
+            }
             "audit" => {
                 let input: AuditInput = parse_input(arguments)?;
                 validate_audit(&input)?;
@@ -1565,6 +1768,126 @@ fn validate_check(input: &CheckInput) -> Result<(), McpError> {
         .options
         .validate(gate_request(input, ClientRoots::unsupported(), 0).target)
         .map_err(|message| McpError::invalid_params(message, None))
+}
+
+fn validate_profile(config: &Config, input: &ProfileInput) -> Result<(), McpError> {
+    validate_dir(input.dir.as_deref())?;
+    let target = profile_gate_target(input.configuration.target)?;
+    input
+        .configuration
+        .options
+        .validate(target)
+        .map_err(|message| McpError::invalid_params(message, None))?;
+    if let Some(change_id) = input.change_id.as_deref() {
+        validate_string(change_id, "changeId")?;
+    }
+    if input.baseline_evidence.len() > 16 {
+        return Err(McpError::invalid_params(
+            "baselineEvidence accepts at most 16 evidence ids",
+            None,
+        ));
+    }
+    for evidence in &input.baseline_evidence {
+        validate_string(evidence, "baselineEvidence item")?;
+    }
+    if input.action == ProfileAction::BuildAnalyze && !input.baseline_evidence.is_empty() {
+        return Err(McpError::invalid_params(
+            "baselineEvidence applies only to action=build_compare",
+            None,
+        ));
+    }
+    if let Some(max_runs) = input.budget.max_runs
+        && (max_runs == 0 || max_runs > config.profile.max_runs)
+    {
+        return Err(McpError::invalid_params(
+            format!("maxRuns must be between 1 and {}", config.profile.max_runs),
+            None,
+        ));
+    }
+    if let Some(max_report_bytes) = input.budget.max_report_bytes
+        && !(1_024..=config.profile.max_report_bytes).contains(&max_report_bytes)
+    {
+        return Err(McpError::invalid_params(
+            format!(
+                "maxReportBytes must be between 1024 and {}",
+                config.profile.max_report_bytes
+            ),
+            None,
+        ));
+    }
+    if let Some(wall_time_ms) = input.budget.wall_time_ms
+        && (wall_time_ms == 0 || wall_time_ms > config.gate.hard_timeout_ms)
+    {
+        return Err(McpError::invalid_params(
+            format!(
+                "wallTimeMs must be between 1 and {}",
+                config.gate.hard_timeout_ms
+            ),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn profile_gate_target(target: CheckTarget) -> Result<GateTargetId, McpError> {
+    match target {
+        CheckTarget::Check => Ok(GateTargetId::Check),
+        CheckTarget::Clippy => Ok(GateTargetId::Clippy),
+        CheckTarget::Test => Ok(GateTargetId::Test),
+        CheckTarget::Doc => Ok(GateTargetId::Doc),
+        CheckTarget::Fmt | CheckTarget::All => Err(McpError::invalid_params(
+            "profile requires a single Cargo target: check, clippy, test, or doc",
+            None,
+        )),
+    }
+}
+
+fn profile_budget(config: &Config, input: &ProfileBudgetInput) -> ProfileBudget {
+    ProfileBudget {
+        max_runs: input
+            .max_runs
+            .unwrap_or(config.profile.max_runs)
+            .min(config.profile.max_runs)
+            .max(1),
+        max_report_bytes: input
+            .max_report_bytes
+            .unwrap_or(config.profile.max_report_bytes)
+            .min(config.profile.max_report_bytes),
+        wall_time_ms: input
+            .wall_time_ms
+            .unwrap_or(config.gate.hard_timeout_ms)
+            .min(config.gate.hard_timeout_ms)
+            .max(1),
+    }
+}
+
+fn profile_workspace_info(workspace: &WorkspaceRequest) -> super::WorkspaceInfo {
+    super::WorkspaceInfo {
+        requested_dir: workspace.root.path().display().to_string(),
+        package_root: workspace.root.path().display().to_string(),
+        workspace_root: workspace.root.authority_path().display().to_string(),
+        manifest_path: String::new(),
+    }
+}
+
+fn profile_terminal(
+    state: &AppState,
+    input: &ProfileInput,
+    status: &str,
+    reason: String,
+) -> CallToolResult {
+    ToolOutput::new(
+        "profile",
+        status,
+        "The profile request could not start.",
+        ProfileData {
+            action: input.action.as_str().to_owned(),
+            analysis: None,
+            comparison: None,
+            reason,
+        },
+    )
+    .into_call_tool_result(state.max_output_bytes(), true)
 }
 
 fn validate_audit(input: &AuditInput) -> Result<(), McpError> {
