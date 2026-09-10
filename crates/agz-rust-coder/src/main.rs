@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     };
     let server = RustCoderServer::new(config)?;
     let state = server.state().clone();
-    let service = server.serve(stdio()).await?;
+    let service = Box::pin(server.serve(stdio())).await?;
     let transport_cancellation = service.cancellation_token();
     let waiting = service.waiting();
     tokio::pin!(waiting);
