@@ -21,7 +21,8 @@
     "rename",
     "refactor",
     "change",
-    "repair"
+    "repair",
+    "work"
   ],
   "prompts": ["workflow"],
   "resource_count": 4,

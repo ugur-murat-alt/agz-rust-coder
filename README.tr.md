@@ -89,6 +89,7 @@ OpenCode gruplanmış MCP araçlarını çoğunlukla `rust_*` adıyla gösterir.
 | `refactor` | `rust_refactor` | `enabled` | Uygulamadan doğrulanmış refactor paketi üretir. |
 | `change` | `rust_change` | `enabled` | Workspace'e yazmadan sunucuya ait scratch alanında revizyona bağlı changeset oluşturur, uygular ve doğrular. |
 | `repair` | `rust_repair` | `enabled` | Başarısız bir change revizyonu için derleyici güdümlü onarım adaylarını analiz eder, dener ve karşılaştırır; workspace'e yazmaz. |
+| `work` | `rust_work` | `enabled` | Tipli bir intent'i açık kapılar ve bütçelerle change/validate üzerinden yürütür; dürüst kapı kanıtı veya sınırlı tek kullanımlık handoff döndürür. |
 
 Her araç belirli yapıda veri ve ona eşdeğer, boyutu sınırlı metin döndürür. Dış
 veri `untrustedData` altında tutulur. Derleme hatası, bulunamayan crate veya
@@ -118,6 +119,9 @@ dosyası ve varsayılanlardır. Ortam anahtarları bölümler arasında `__` kul
 | `repair.max_candidates` | `4` | Bir `repair` işleminin deneyebileceği aday sayısı. |
 | `repair.max_compiles` | `4` | Bir `repair` işleminin çalıştırabileceği Cargo doğrulaması. |
 | `repair.wall_time_ms` | `120000` | Bir `repair` işlemi için duvar saati bütçesi. |
+| `work.max_candidates` | `4` | Bir work öğesinin stage edebileceği host aday revizyonu. |
+| `work.max_compiles` | `12` | Bir work öğesinin çalıştırabileceği kapı doğrulaması. |
+| `work.wall_time_ms` | `600000` | Bir work öğesi için duvar saati bütçesi. |
 | `telemetry.enabled` | `true` | Prompt veya kaynak içermeyen sınırlı yerel etkinlik kaydı. |
 
 `profile` kanıtı sınırlıdır: en güncel 64 kayıt bellekte tutulur ve sunucuya ait

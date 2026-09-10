@@ -89,6 +89,7 @@ OpenCode commonly exposes grouped MCP tools as `rust_*`.
 | `refactor` | `rust_refactor` | `enabled` | Produce a verified refactor edit package without applying it. |
 | `change` | `rust_change` | `enabled` | Create, stage, and validate a revision-bound changeset in server-owned scratch without writing the workspace. |
 | `repair` | `rust_repair` | `enabled` | Analyze, try, and compare compiler-driven repair candidates for a failing change revision without writing the workspace. |
+| `work` | `rust_work` | `enabled` | Drive a typed intent through change/validate with explicit gates and budgets, returning honest gate evidence or a bounded single-use handoff. |
 
 Every tool returns deterministic structured data plus an equivalent bounded text
 fallback. External data stays under `untrustedData`. Expected domain outcomes
@@ -119,6 +120,9 @@ sections, for example `AGZ_RUST_CODER_GATE__HARD_TIMEOUT_MS=600000`.
 | `repair.max_candidates` | `4` | Candidates one `repair` action may try. |
 | `repair.max_compiles` | `4` | Cargo validations one `repair` action may run. |
 | `repair.wall_time_ms` | `120000` | Wall-clock budget for one `repair` action. |
+| `work.max_candidates` | `4` | Host candidate revisions one work item may stage. |
+| `work.max_compiles` | `12` | Gate validations one work item may run. |
+| `work.wall_time_ms` | `600000` | Wall-time budget for one work item. |
 | `telemetry.enabled` | `true` | Bounded local activity records without prompts or source. |
 
 `profile` evidence is bounded: the latest 64 records stay in memory, and

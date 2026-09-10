@@ -32,6 +32,7 @@ Failed compilations are revalidated before offering edit/context evidence. Trunc
 | `refactor` | Rust Analyzer | Never writes source | Verified write-free refactor package. |
 | `change` | Server-owned scratch + Cargo/rustc for candidate validation | Never writes the workspace; compiles only the candidate copy | Revision-bound change record with candidate hashes, validation evidence (bounded diagnostics and write-free suggestions for a fresh `FAIL`), and a verified/unverified export package. |
 | `repair` | Server-owned scratch + Cargo/rustc for candidate validation | Never writes the workspace; creates and compiles only temporary candidate copies | Grouped diagnostics with reasoned root-cause hypotheses and source-backed ownership evidence, per-candidate measured compile/test results, behavior/performance guards, and a measured selection with residual risks. |
+| `work` | Server-owned work record over change/validate | Never writes the workspace; compiles only the bound candidate copy | Typed intent execution with explicit gates and budgets: honest `READY` requested-gate evidence, a bounded `NEEDS_MODEL` handoff with a single-use revision-bound token, or a typed `BLOCKED`/`FAILED`/`CANCELLED` stop reason. |
 
 `check` targets are `check`, `clippy`, `test`, `doc`, `fmt`, and `all`. Formatting
 uses check-only behavior. A completed explicit validation is never reused as
@@ -152,6 +153,52 @@ the comparison is `compileVerified` only. Pre-existing impacts are reported
 separately from candidate-added impacts. Cancelled, timed-out, incomplete, or
 cleanup-failed runs publish no usable repair evidence.
 
+## Work Executor
+
+`work` drives one bounded intent through the existing validated domain APIs; it
+never adds an arbitrary shell command as a plan node. Actions are `start`,
+`resume`, `inspect`, and `cancel`. The lifecycle is
+`PLANNED → COLLECTING → STAGING → VALIDATING → NEEDS_MODEL / READY / BLOCKED /
+FAILED / CANCELLED`. Every `intent` is typed and explicit: a `template`
+(`implement_with_contract`, `repair_compile_failure`, or `refactor_and_verify`),
+`scopePaths`, a bounded `contract` and `stopCondition`, typed
+`acceptanceGates` (the same Cargo targets as `check`), and a per-candidate
+`changeBudget`. Candidate patches outside `scopePaths` are refused as `BLOCKED`
+instead of silently widening the plan.
+
+`start` creates (`change(action=create)`) or adopts a change, stages the host
+candidate (`change(action=stage)`), and runs each requested gate as
+`change(action=validate)`. `READY` is returned only when every requested gate has
+a fresh, authoritative pass on the current revision; it is evidence for the
+requested gates on that revision, not proof that a behavior contract holds in
+general or that any source was applied.
+
+A gate failure returns `NEEDS_MODEL` with a bounded decision package: the
+`changeId`, `revision`, `patchHash`, bounded `diagnostics`, the machine-
+applicable `suggestionPackage`, unresolved obligations, and the typed candidate
+input schema, plus a **single-use continuation token bound to the work, revision,
+and patch hash**. `resume` requires `workId` plus `continuationToken`, verifies
+the token has not been used or expired and that the bound change still reports
+the same revision and patch hash, consumes it, stages the host candidate, and
+repeats the requested gates. A stale, reused, expired, or wrong-revision token
+is rejected as `STALE`; an identical previous candidate is refused as `BLOCKED`
+("no progress"), as is a candidate whose failure diagnostics exactly repeat the
+previous handoff. Budgets (`maxCompiles`, `maxCandidates`, `maxHandoffs`,
+`wallTimeMs`) are checked before staging and before each compile; exhaustion
+returns `BLOCKED` with the exact budget and the declared stop condition.
+`inspect` returns the bounded record (by `workId`, or by `changeId` for the most
+recent work bound to it). `cancel` marks the work `CANCELLED` and cancels its
+bound change validation through the recorded cancellation token; the change
+scratch itself is left to the change TTL sweep.
+
+`BLOCKED` is also returned when a required tool is disabled, when an offline
+constraint conflicts with a network-backed required tool, or when the change
+service is unavailable; the executor never silently substitutes a different
+plan. Work records are in-memory in this version and are not persisted across
+server restarts; the bound change scratch keeps its own TTL cleanup. Compiler
+text and host candidate text stay untrusted evidence inside
+`limits.tool_output_bytes` with visible truncation.
+
 ## Context Capsules
 
 `context` works from typed anchors only: `{kind:"file",file,range?}` and
@@ -201,6 +248,12 @@ accepts `tasks/cancel`, propagates request, root-epoch, and shutdown cancellatio
 and removes terminal task state after bounded retention. Synchronous fallback
 remains available for clients without task support.
 
+`work` is synchronous in this version, like `change` and `context`: clients with
+and without MCP task support get the same typed action result. Request
+cancellation and shutdown still propagate into the bound change validation
+through the cancellation bridge, and `work(action=cancel)` cancels an in-flight
+validation through the work record's cancellation token.
+
 ## Configuration Sources
 
 The precedence order is CLI, `AGZ_RUST_CODER_*` environment, explicit TOML, and
@@ -230,6 +283,7 @@ use the platform path-list separator.
 | `tools.refactor` | `true` | Register `refactor` when LSP is enabled. |
 | `tools.change` | `true` | Register `change`. |
 | `tools.repair` | `true` | Register `repair` when `change` is enabled. |
+| `tools.work` | `true` | Register `work`. |
 | `cargo.path` | PATH `cargo` | Optional Cargo executable override. |
 | `gate.hard_timeout_ms` | `600000` | One Cargo operation deadline. |
 | `gate.debounce_ms` | `500` | Stable-input debounce. |
@@ -263,6 +317,12 @@ use the platform path-list separator.
 | `repair.max_candidates` | `4` | Candidate attempts per `repair` action; requests may only narrow. |
 | `repair.max_compiles` | `4` | Cargo validations per `repair` action; requests may only narrow. |
 | `repair.wall_time_ms` | `120000` | Wall-clock budget per `repair` action; requests may only narrow. |
+| `work.max_active` | `4` | Concurrent non-terminal work items per server. |
+| `work.max_compiles` | `12` | Gate validations one work item may run. |
+| `work.max_candidates` | `4` | Host candidate revisions one work item may stage. |
+| `work.max_handoffs` | `3` | Bounded `NEEDS_MODEL` handoffs one work item may issue. |
+| `work.wall_time_ms` | `600000` | Wall-time budget for one work item. |
+| `work.continuation_ttl_ms` | `900000` | Single-use handoff token lifetime. |
 | `context.max_capsules` | `32` | In-memory capsule ring capacity. |
 | `context.capsule_ttl_ms` | `900000` | Capsule TTL; root-epoch changes also invalidate. |
 | `context.max_items` | `64` | Items selected into one capsule. |

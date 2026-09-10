@@ -14,6 +14,7 @@ pub mod repair;
 pub mod server;
 pub mod telemetry;
 pub mod tools;
+pub mod work;
 pub mod workspace;
 
 pub use config::{CliOptions, Config, ConfigError};

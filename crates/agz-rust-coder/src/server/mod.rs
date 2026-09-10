@@ -15,7 +15,7 @@ pub use handler::{
     ImplementationsInput, ProfileAction, ProfileBudgetInput, ProfileConfigurationInput,
     ProfileData, ProfileInput, ProfileOutput, RefactorInput, RenameInput, RepairData, RepairInput,
     RepairOutput, RustCoderServer, SemanticData, SemanticInput, SemanticOutput, SymbolInput,
-    SymbolsInput, VerifyInput, VerifyOutput, tool_definitions,
+    SymbolsInput, VerifyInput, VerifyOutput, WorkData, WorkInput, WorkOutput, tool_definitions,
 };
 pub use progress::ProgressReporter;
 pub use response::{ToolData, ToolOutput, WorkspaceInfo};
@@ -45,6 +45,7 @@ use crate::{
     repair::RepairService,
     telemetry::ActivityLog,
     tools::{AuditLimits, AuditService, CheckService, ProfileService, VerifyService},
+    work::WorkService,
     workspace::{AuthorizedRoot, MetadataService, RootGuard},
 };
 use admission::AdmissionController;
@@ -64,6 +65,9 @@ pub struct AppState {
     /// Present only when `tools.repair` and `tools.change` are both enabled;
     /// `repair` always operates on server-owned change scratch.
     repair: Option<Arc<RepairService>>,
+    /// Bounded work executor. It is always constructed; when `tools.change` is
+    /// disabled it fails every action closed as `BLOCKED`.
+    work: WorkService,
     profile: ProfileService,
     verify: Arc<VerifyService>,
     audit: AuditService,
@@ -91,6 +95,7 @@ impl fmt::Debug for AppState {
             .field("check", &self.check)
             .field("change", &self.change)
             .field("verify", &self.verify)
+            .field("work", &self.work)
             .field("lsp_available", &self.lsp.is_some())
             .field("tasks", &self.tasks)
             .field("shutting_down", &self.is_shutting_down())
@@ -168,6 +173,7 @@ impl AppState {
             ))),
             _ => None,
         };
+        let work = WorkService::new(&config, change.clone());
         let metadata = Arc::new(MetadataService::new(Arc::clone(&roots)));
         let capsules = Arc::new(CapsuleStore::new(
             usize::try_from(config.context.max_capsules).unwrap_or(usize::MAX),
@@ -201,6 +207,7 @@ impl AppState {
             check,
             change,
             repair,
+            work,
             profile,
             verify,
             audit,
@@ -331,6 +338,10 @@ impl AppState {
 
     pub(crate) fn repair_service(&self) -> Option<&Arc<RepairService>> {
         self.repair.as_ref()
+    }
+
+    pub(crate) fn work_service(&self) -> &WorkService {
+        &self.work
     }
 
     pub(crate) fn profile_service(&self) -> &ProfileService {

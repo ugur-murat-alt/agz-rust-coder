@@ -630,5 +630,320 @@
     },
     "required": ["dir"],
     "additionalProperties": false
+  },
+  "work": {
+    "$defs": {
+      "NewFileInput": {
+        "additionalProperties": false,
+        "description": "One new file created in the candidate copy.",
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "file": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "file",
+          "content"
+        ],
+        "type": "object"
+      },
+      "PatchInput": {
+        "additionalProperties": false,
+        "description": "One `oldString`/`newString` patch applied to the candidate copy only.",
+        "properties": {
+          "file": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "newString": {
+            "type": "string"
+          },
+          "oldString": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "file",
+          "oldString",
+          "newString"
+        ],
+        "type": "object"
+      },
+      "WorkAction": {
+        "description": "Supported lifecycle actions for the `work` tool.",
+        "enum": [
+          "start",
+          "resume",
+          "inspect",
+          "cancel"
+        ],
+        "type": "string"
+      },
+      "WorkBudgetInput": {
+        "additionalProperties": false,
+        "description": "Per-call work budget overrides. Every value is bounded by the configured\n`[work]` ceiling; omitted values use the configured default.",
+        "properties": {
+          "maxCandidates": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "maxCompiles": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "maxHandoffs": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "wallTimeMs": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WorkChangeBudget": {
+        "additionalProperties": false,
+        "description": "Per-candidate change budget. Both fields are explicit; the executor refuses\na candidate that exceeds them before any candidate byte is staged.",
+        "properties": {
+          "maxNewFiles": {
+            "format": "uint32",
+            "maximum": 512,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxPatches": {
+            "format": "uint32",
+            "maximum": 512,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "maxPatches",
+          "maxNewFiles"
+        ],
+        "type": "object"
+      },
+      "WorkConstraints": {
+        "additionalProperties": false,
+        "description": "Work policy constraints. Offline work cannot require network-backed tools.",
+        "properties": {
+          "offline": {
+            "default": false,
+            "type": "boolean"
+          },
+          "requiredTools": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/WorkTool"
+            },
+            "maxItems": 8,
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "WorkGate": {
+        "description": "Typed acceptance gate. Only existing validated Cargo targets are allowed;\narbitrary shell commands cannot become plan nodes.",
+        "enum": [
+          "check",
+          "clippy",
+          "test",
+          "doc",
+          "fmt",
+          "all"
+        ],
+        "type": "string"
+      },
+      "WorkIntent": {
+        "additionalProperties": false,
+        "description": "Typed work intent assembled by the protocol boundary.",
+        "properties": {
+          "acceptanceGates": {
+            "items": {
+              "$ref": "#/$defs/WorkGate"
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "type": "array"
+          },
+          "changeBudget": {
+            "$ref": "#/$defs/WorkChangeBudget"
+          },
+          "contract": {
+            "description": "Behavior contract the candidate must satisfy (bounded text, never a\ncommand).",
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "scopePaths": {
+            "description": "Explicit target scope: candidate patches must stay inside these\nworkspace-relative paths.",
+            "items": {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 64,
+            "minItems": 1,
+            "type": "array"
+          },
+          "stopCondition": {
+            "description": "Explicit stop condition for the bounded repair loop.",
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": "string"
+          },
+          "template": {
+            "$ref": "#/$defs/WorkTemplate"
+          }
+        },
+        "required": [
+          "template",
+          "scopePaths",
+          "contract",
+          "stopCondition",
+          "acceptanceGates",
+          "changeBudget"
+        ],
+        "type": "object"
+      },
+      "WorkTemplate": {
+        "description": "Typed intent templates. A template is a bounded plan: explicit scope,\nbehavior contract, stop condition, acceptance gates, and change budget.",
+        "oneOf": [
+          {
+            "const": "implement_with_contract",
+            "description": "The host supplies the implementation candidate for the contract.",
+            "type": "string"
+          },
+          {
+            "const": "repair_compile_failure",
+            "description": "The host repairs the current candidate after a compile failure.",
+            "type": "string"
+          },
+          {
+            "const": "refactor_and_verify",
+            "description": "The host refactors and the executor verifies the requested gates.",
+            "type": "string"
+          }
+        ]
+      },
+      "WorkTool": {
+        "description": "Tools a work item may declare as required. A disabled or offline-backed\nrequired tool blocks the work instead of silently changing the plan.",
+        "enum": [
+          "change",
+          "check",
+          "docs",
+          "lsp",
+          "audit",
+          "crate_lookup"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "action": {
+        "$ref": "#/$defs/WorkAction"
+      },
+      "budget": {
+        "$ref": "#/$defs/WorkBudgetInput"
+      },
+      "changeId": {
+        "default": null,
+        "minLength": 1,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "constraints": {
+        "$ref": "#/$defs/WorkConstraints",
+        "default": {
+          "offline": false,
+          "requiredTools": []
+        }
+      },
+      "continuationToken": {
+        "default": null,
+        "minLength": 1,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "dir": {
+        "default": null,
+        "minLength": 1,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "intent": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WorkIntent"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "newFiles": {
+        "items": {
+          "$ref": "#/$defs/NewFileInput"
+        },
+        "maxItems": 512,
+        "type": "array"
+      },
+      "patches": {
+        "description": "Host candidate patches. `resume` requires at least one.",
+        "items": {
+          "$ref": "#/$defs/PatchInput"
+        },
+        "maxItems": 512,
+        "type": "array"
+      },
+      "workId": {
+        "default": null,
+        "minLength": 1,
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "action"
+    ],
+    "type": "object"
   }
 }
