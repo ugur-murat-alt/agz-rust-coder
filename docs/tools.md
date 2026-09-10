@@ -58,6 +58,24 @@ hidden speedup. Persisted timing artifacts report their retention policy and are
 pruned after 24 hours or beyond 64 files, and the latest 64 evidence records stay
 in memory.
 
+`profile(action=runtime_compare)` measures one designated workload on two
+verified server-owned snapshots of a staged change: the recorded candidate and a
+byte-exact reconstruction of the captured baseline. Both sides run the same
+correctness gate first, so a fast-but-wrong or work-skipping candidate is
+rejected before any timing, and differing hashes are `INCOMPARABLE`. The caller
+must declare a positive acceptance threshold before measurement, and the runner
+only executes an operator-authorized adapter from `[profile.runtime]` with
+balanced baseline/candidate pairs, warmup runs, raw samples, sample counts and
+uncertainty. Single-run, insufficient, or noisy measurements return
+`INCONCLUSIVE`; a single best sample can never show a win. Compile/prepare time
+is recorded separately from workload time, and allocation, peak-RSS, and
+hardware counters stay `unavailable` because no MVP adapter measures them.
+Results bind source digests, patch hash, capture manifest, adapter digest,
+configuration, toolchain, hardware, raw samples, and exact commands; model
+interpretation and measured findings are separate fields. The tool never writes
+or applies source, and an exportable candidate still requires the separate
+change export/apply capability.
+
 `explain` actions are `macro`, `trait`, and `cfg`. Every fragment carries
 `observedCompiler`, `advisoryAnalyzer`, `inferred`, or `unknown` provenance.
 `macro` combines rustc expansion provenance retained in diagnostics with a
@@ -211,6 +229,11 @@ use the platform path-list separator.
 | `profile.max_report_bytes` | `4194304` | Bounded read/store cap for one Cargo timing artifact. |
 | `profile.max_runs` | `4` | Fresh Cargo runs available to one `profile` call. |
 | `profile.compare_samples` | `3` | Required samples per side before any speed claim. |
+| `profile.runtime_max_samples` | `8` | Maximum measured runtime samples per side. |
+| `profile.runtime_min_samples` | `3` | Minimum measured runtime samples per side before any claim. |
+| `profile.runtime_max_warmup` | `2` | Discarded warmup runs per side before runtime measurement. |
+| `profile.runtime_run_timeout_ms` | `120000` | Hard timeout for one authorized runtime adapter process. |
+| `profile.runtime.adapters` | empty | Operator-authorized runtime benchmark adapters; an empty list keeps `runtime_compare` fail-closed. |
 | `verify.max_cells` | `8` | Hard ceiling for matrix cells planned or executed per request. |
 | `verify.max_wall_ms` | `120000` | Hard wall-clock ceiling for one matrix run. |
 | `rust_analyzer.path` | PATH or rustup | Optional binary override. |

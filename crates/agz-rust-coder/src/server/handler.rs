@@ -43,10 +43,10 @@ use crate::{
     tools::{
         AuditCancellation, CompareRequest, ContextEnvironment,
         ContextRequest as DomainContextRequest, CrateLookupInput as DomainCrateLookupInput,
-        ProfileBudget, ProfileRequest, ToolError as SemanticToolError, VerifyOutcome,
-        document_symbols, execute_context, explain, semantic_refactor, semantic_rename,
-        symbol_definition, symbol_hierarchy, symbol_hover, symbol_implementations,
-        symbol_references, with_lsp_authority, with_lsp_cancellation,
+        ProfileBudget, ProfileRequest, RuntimeCompareRequest, RuntimeComparison,
+        ToolError as SemanticToolError, VerifyOutcome, document_symbols, execute_context, explain,
+        semantic_refactor, semantic_rename, symbol_definition, symbol_hierarchy, symbol_hover,
+        symbol_implementations, symbol_references, with_lsp_authority, with_lsp_cancellation,
     },
     workspace::{ClientRoots, WorkspaceRoot, select_in_root},
 };
@@ -447,6 +447,7 @@ pub enum ProfileAction {
     #[default]
     BuildAnalyze,
     BuildCompare,
+    RuntimeCompare,
 }
 
 impl ProfileAction {
@@ -454,6 +455,7 @@ impl ProfileAction {
         match self {
             Self::BuildAnalyze => "build_analyze",
             Self::BuildCompare => "build_compare",
+            Self::RuntimeCompare => "runtime_compare",
         }
     }
 }
@@ -484,6 +486,39 @@ pub struct ProfileBudgetInput {
     pub wall_time_ms: Option<u64>,
 }
 
+/// Typed benchmark selection for `profile(action=runtime_compare)`. The named
+/// adapter and workload must match an operator-declared `[profile.runtime]`
+/// adapter; the caller never supplies argv.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeBenchmarkSpecInput {
+    #[serde(default)]
+    #[schemars(length(min = 1, max = 64))]
+    pub adapter: Option<String>,
+    #[serde(default)]
+    #[schemars(length(min = 1, max = 64))]
+    pub workload: Option<String>,
+    /// Acceptance threshold in percent. Required and positive so it is always
+    /// declared before measurement.
+    pub threshold_percent: f64,
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 32))]
+    pub samples: Option<u64>,
+    #[serde(default)]
+    #[schemars(range(min = 0, max = 16))]
+    pub warmup: Option<u64>,
+}
+
+/// Correctness oracle run on both snapshots before any measurement.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeCorrectnessGateInput {
+    #[serde(default)]
+    pub target: CheckTarget,
+    #[serde(default)]
+    pub options: crate::gate::ValidationOptions,
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProfileInput {
@@ -501,6 +536,19 @@ pub struct ProfileInput {
     #[schemars(length(max = 16), inner(length(min = 1)))]
     pub baseline_evidence: Vec<String>,
     #[serde(default)]
+    #[schemars(range(min = 0))]
+    pub baseline_revision: Option<u64>,
+    #[serde(default)]
+    #[schemars(range(min = 0))]
+    pub candidate_revision: Option<u64>,
+    #[serde(default)]
+    pub benchmark_spec: Option<RuntimeBenchmarkSpecInput>,
+    #[serde(default)]
+    pub correctness_gate: Option<RuntimeCorrectnessGateInput>,
+    #[serde(default)]
+    #[schemars(length(max = 4_096))]
+    pub hypothesis: Option<String>,
+    #[serde(default)]
     pub budget: ProfileBudgetInput,
 }
 
@@ -512,6 +560,8 @@ pub struct ProfileData {
     pub analysis: Option<crate::tools::ProfileRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comparison: Option<crate::tools::ProfileComparison>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<RuntimeComparison>,
     pub reason: String,
 }
 
@@ -767,7 +817,8 @@ pub fn tool_definitions(config: &Config) -> Vec<Tool> {
     if config.tools.profile {
         tools.push(tool::<ProfileInput, ProfileData>(
             "profile",
-            "Analyze observed Cargo rebuild behavior and compare bounded build evidence.",
+            "Analyze observed Cargo rebuild behavior, compare bounded build evidence, and run a \
+             gated runtime comparison of a staged candidate against its captured baseline.",
             ToolAnnotations::new().destructive(true).open_world(true),
         ));
     }
@@ -1551,7 +1602,6 @@ impl ServerHandler for RustCoderServer {
                 let token = cancellation.token();
                 let authority = Some(workspace.root.requested_authority().clone());
                 let budget = profile_budget(self.state.config(), &input.budget);
-                let target = profile_gate_target(input.configuration.target)?;
                 let directory = input.dir.as_deref().map(PathBuf::from);
                 let mcp_admission_ms = Some(
                     handler_started
@@ -1561,6 +1611,7 @@ impl ServerHandler for RustCoderServer {
                 );
                 let (data, warnings, status, is_error) = match input.action {
                     ProfileAction::BuildAnalyze => {
+                        let target = profile_gate_target(input.configuration.target)?;
                         let request = ProfileRequest {
                             directory,
                             target,
@@ -1586,6 +1637,7 @@ impl ServerHandler for RustCoderServer {
                                 action: input.action.as_str().to_owned(),
                                 analysis: Some(record),
                                 comparison: None,
+                                runtime: None,
                                 reason,
                             },
                             warnings,
@@ -1594,6 +1646,7 @@ impl ServerHandler for RustCoderServer {
                         )
                     }
                     ProfileAction::BuildCompare => {
+                        let target = profile_gate_target(input.configuration.target)?;
                         let request = CompareRequest {
                             directory,
                             target,
@@ -1619,6 +1672,81 @@ impl ServerHandler for RustCoderServer {
                                 action: input.action.as_str().to_owned(),
                                 analysis: None,
                                 comparison: Some(comparison),
+                                runtime: None,
+                                reason,
+                            },
+                            warnings,
+                            status,
+                            is_error,
+                        )
+                    }
+                    ProfileAction::RuntimeCompare => {
+                        let Some(change) = self.state.change_service() else {
+                            return Ok(CallToolResponse::Complete(profile_terminal(
+                                &self.state,
+                                &input,
+                                "RESOURCE_BLOCKED",
+                                "runtime_compare requires the change tool to be enabled".to_owned(),
+                            )));
+                        };
+                        let change_id = input.change_id.clone().unwrap_or_default();
+                        let candidate_revision = match input.candidate_revision {
+                            Some(revision) => revision,
+                            None => match change.current_revision(&change_id) {
+                                Ok(revision) => revision,
+                                Err(error) => {
+                                    return Ok(CallToolResponse::Complete(profile_terminal(
+                                        &self.state,
+                                        &input,
+                                        "INCOMPARABLE",
+                                        error.reason().to_owned(),
+                                    )));
+                                }
+                            },
+                        };
+                        let Some(spec) = input.benchmark_spec.as_ref() else {
+                            return Err(McpError::invalid_params(
+                                "action=runtime_compare requires benchmarkSpec",
+                                None,
+                            ));
+                        };
+                        let Some(gate) = input.correctness_gate.as_ref() else {
+                            return Err(McpError::invalid_params(
+                                "action=runtime_compare requires correctnessGate",
+                                None,
+                            ));
+                        };
+                        let request = RuntimeCompareRequest {
+                            change_id,
+                            baseline_revision: input.baseline_revision.unwrap_or(0),
+                            candidate_revision,
+                            adapter: spec.adapter.clone().unwrap_or_default(),
+                            workload: spec.workload.clone().unwrap_or_default(),
+                            hypothesis: input.hypothesis.clone().unwrap_or_default(),
+                            threshold_percent: spec.threshold_percent,
+                            samples: spec.samples,
+                            warmup: spec.warmup,
+                            gate_target: profile_gate_target(gate.target)?,
+                            gate_options: gate.options.clone(),
+                            budget,
+                            root_epoch: workspace.root.epoch(),
+                            workspace_root: workspace.root.authority_path().to_owned(),
+                        };
+                        let comparison = self
+                            .state
+                            .runtime_service()
+                            .compare(&request, change, handler_started, &token)
+                            .await;
+                        let status = comparison.status.clone();
+                        let is_error = status != "COMPARABLE";
+                        let reason = comparison.reason.clone();
+                        let warnings = comparison.warnings.clone();
+                        (
+                            ProfileData {
+                                action: input.action.as_str().to_owned(),
+                                analysis: None,
+                                comparison: None,
+                                runtime: Some(comparison),
                                 reason,
                             },
                             warnings,
@@ -1627,7 +1755,12 @@ impl ServerHandler for RustCoderServer {
                         )
                     }
                 };
-                let summary = format!("Build profile finished with status {status}");
+                let summary = match input.action {
+                    ProfileAction::RuntimeCompare => {
+                        format!("Runtime comparison finished with status {status}")
+                    }
+                    _ => format!("Build profile finished with status {status}"),
+                };
                 let output = ToolOutput::new("profile", status, summary, data)
                     .with_warnings(warnings)
                     .with_untrusted_data()
@@ -2308,12 +2441,6 @@ fn validate_check(input: &CheckInput) -> Result<(), McpError> {
 
 fn validate_profile(config: &Config, input: &ProfileInput) -> Result<(), McpError> {
     validate_dir(input.dir.as_deref())?;
-    let target = profile_gate_target(input.configuration.target)?;
-    input
-        .configuration
-        .options
-        .validate(target)
-        .map_err(|message| McpError::invalid_params(message, None))?;
     if let Some(change_id) = input.change_id.as_deref() {
         validate_string(change_id, "changeId")?;
     }
@@ -2331,6 +2458,28 @@ fn validate_profile(config: &Config, input: &ProfileInput) -> Result<(), McpErro
             "baselineEvidence applies only to action=build_compare",
             None,
         ));
+    }
+    if input.action == ProfileAction::RuntimeCompare {
+        validate_runtime_profile(config, input)?;
+    } else {
+        let target = profile_gate_target(input.configuration.target)?;
+        input
+            .configuration
+            .options
+            .validate(target)
+            .map_err(|message| McpError::invalid_params(message, None))?;
+        let runtime_only = input.baseline_revision.is_some()
+            || input.candidate_revision.is_some()
+            || input.benchmark_spec.is_some()
+            || input.correctness_gate.is_some()
+            || input.hypothesis.is_some();
+        if runtime_only {
+            return Err(McpError::invalid_params(
+                "baselineRevision, candidateRevision, benchmarkSpec, correctnessGate, and \
+                 hypothesis apply only to action=runtime_compare",
+                None,
+            ));
+        }
     }
     if let Some(max_runs) = input.budget.max_runs
         && (max_runs == 0 || max_runs > config.profile.max_runs)
@@ -2361,6 +2510,96 @@ fn validate_profile(config: &Config, input: &ProfileInput) -> Result<(), McpErro
             ),
             None,
         ));
+    }
+    Ok(())
+}
+
+fn validate_runtime_profile(config: &Config, input: &ProfileInput) -> Result<(), McpError> {
+    if input.change_id.is_none() {
+        return Err(McpError::invalid_params(
+            "action=runtime_compare requires changeId",
+            None,
+        ));
+    }
+    if !input.baseline_evidence.is_empty() {
+        return Err(McpError::invalid_params(
+            "baselineEvidence applies only to action=build_compare",
+            None,
+        ));
+    }
+    if let Some(baseline_revision) = input.baseline_revision
+        && baseline_revision != 0
+    {
+        return Err(McpError::invalid_params(
+            "baselineRevision must be 0: only the captured revision can be reconstructed \
+             byte-exactly",
+            None,
+        ));
+    }
+    let Some(spec) = input.benchmark_spec.as_ref() else {
+        return Err(McpError::invalid_params(
+            "action=runtime_compare requires benchmarkSpec",
+            None,
+        ));
+    };
+    let Some(adapter) = spec.adapter.as_deref() else {
+        return Err(McpError::invalid_params(
+            "benchmarkSpec.adapter is required",
+            None,
+        ));
+    };
+    validate_string(adapter, "benchmarkSpec.adapter")?;
+    let Some(workload) = spec.workload.as_deref() else {
+        return Err(McpError::invalid_params(
+            "benchmarkSpec.workload is required",
+            None,
+        ));
+    };
+    validate_string(workload, "benchmarkSpec.workload")?;
+    if !spec.threshold_percent.is_finite()
+        || spec.threshold_percent <= 0.0
+        || spec.threshold_percent > 100.0
+    {
+        return Err(McpError::invalid_params(
+            "benchmarkSpec.thresholdPercent must be declared in (0, 100] before measurement",
+            None,
+        ));
+    }
+    if let Some(samples) = spec.samples
+        && !(config.profile.runtime_min_samples..=config.profile.runtime_max_samples)
+            .contains(&samples)
+    {
+        return Err(McpError::invalid_params(
+            format!(
+                "benchmarkSpec.samples must be between {} and {}",
+                config.profile.runtime_min_samples, config.profile.runtime_max_samples
+            ),
+            None,
+        ));
+    }
+    if let Some(warmup) = spec.warmup
+        && warmup > config.profile.runtime_max_warmup
+    {
+        return Err(McpError::invalid_params(
+            format!(
+                "benchmarkSpec.warmup must be at most {}",
+                config.profile.runtime_max_warmup
+            ),
+            None,
+        ));
+    }
+    let Some(gate) = input.correctness_gate.as_ref() else {
+        return Err(McpError::invalid_params(
+            "action=runtime_compare requires correctnessGate",
+            None,
+        ));
+    };
+    let target = profile_gate_target(gate.target)?;
+    gate.options
+        .validate(target)
+        .map_err(|message| McpError::invalid_params(message, None))?;
+    if let Some(hypothesis) = input.hypothesis.as_deref() {
+        validate_string(hypothesis, "hypothesis")?;
     }
     Ok(())
 }
@@ -2420,6 +2659,7 @@ fn profile_terminal(
             action: input.action.as_str().to_owned(),
             analysis: None,
             comparison: None,
+            runtime: None,
             reason,
         },
     )
@@ -4597,6 +4837,11 @@ mod tests {
             configuration: ProfileConfigurationInput::default(),
             change_id: Some(oversized.clone()),
             baseline_evidence: Vec::new(),
+            baseline_revision: None,
+            candidate_revision: None,
+            benchmark_spec: None,
+            correctness_gate: None,
+            hypothesis: None,
             budget: ProfileBudgetInput::default(),
         };
         assert!(validate_profile(&config, &input).is_err());
@@ -4604,6 +4849,67 @@ mod tests {
         input.baseline_evidence = vec![oversized];
         assert!(validate_profile(&config, &input).is_err());
         assert!(validate_string(&"y".repeat(MAX_VALIDATED_STRING_BYTES), "field").is_ok());
+    }
+
+    #[test]
+    fn runtime_compare_validation_requires_a_declared_threshold_and_multiple_samples() {
+        let config = Config::defaults_at("/workspace");
+        let base = || {
+            let mut input = ProfileInput {
+                action: ProfileAction::RuntimeCompare,
+                dir: None,
+                configuration: ProfileConfigurationInput::default(),
+                change_id: Some("ch-abc".to_owned()),
+                baseline_evidence: Vec::new(),
+                baseline_revision: Some(0),
+                candidate_revision: None,
+                benchmark_spec: None,
+                correctness_gate: Some(RuntimeCorrectnessGateInput::default()),
+                hypothesis: Some("clones are removed".to_owned()),
+                budget: ProfileBudgetInput::default(),
+            };
+            input.benchmark_spec = Some(RuntimeBenchmarkSpecInput {
+                adapter: Some("sleepy".to_owned()),
+                workload: Some("tiny".to_owned()),
+                threshold_percent: 5.0,
+                samples: Some(3),
+                warmup: Some(1),
+            });
+            input
+        };
+        assert!(validate_profile(&config, &base()).is_ok());
+
+        let mut zero_threshold = base();
+        if let Some(spec) = zero_threshold.benchmark_spec.as_mut() {
+            spec.threshold_percent = 0.0;
+        }
+        assert!(validate_profile(&config, &zero_threshold).is_err());
+
+        let mut single_sample = base();
+        if let Some(spec) = single_sample.benchmark_spec.as_mut() {
+            spec.samples = Some(1);
+        }
+        assert!(validate_profile(&config, &single_sample).is_err());
+
+        let mut missing_gate = base();
+        missing_gate.correctness_gate = None;
+        assert!(validate_profile(&config, &missing_gate).is_err());
+
+        let mut wrong_action = base();
+        wrong_action.action = ProfileAction::BuildAnalyze;
+        wrong_action.configuration.target = CheckTarget::Check;
+        assert!(validate_profile(&config, &wrong_action).is_err());
+
+        let declared: Result<ProfileInput, _> = serde_json::from_value(serde_json::json!({
+            "action": "runtime_compare",
+            "changeId": "ch-abc",
+            "benchmarkSpec": {"adapter": "sleepy", "workload": "tiny"},
+            "correctnessGate": {}
+        }));
+        assert!(
+            declared.is_err(),
+            "a benchmarkSpec without thresholdPercent must be rejected at parse time"
+        );
     }
 
     #[test]

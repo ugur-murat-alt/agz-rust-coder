@@ -13,7 +13,7 @@ use std::{
 };
 
 use clap::{ArgAction, Parser};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const ENV_PREFIX: &str = "AGZ_RUST_CODER_";
@@ -196,6 +196,56 @@ pub struct ProfileConfig {
     pub max_report_bytes: u64,
     pub max_runs: u64,
     pub compare_samples: u64,
+    /// Maximum measured samples per side for `profile(action=runtime_compare)`.
+    pub runtime_max_samples: u64,
+    /// Minimum measured samples per side before any runtime speed claim.
+    pub runtime_min_samples: u64,
+    /// Maximum discarded warmup runs per side before measurement.
+    pub runtime_max_warmup: u64,
+    /// Hard timeout for one operator-authorized runtime adapter process.
+    pub runtime_run_timeout_ms: u64,
+    /// Operator-authorized, revision-bound runtime benchmark adapters. An empty
+    /// list keeps `runtime_compare` fail-closed.
+    pub runtime_adapters: Vec<RuntimeAdapterConfig>,
+}
+
+/// One operator-authorized runtime benchmark adapter. The fixed `command` and
+/// the workload argv below are the only executables `runtime_compare` may run;
+/// tool input selects an adapter and workload by name and never supplies argv.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeAdapterConfig {
+    pub name: String,
+    pub command: PathBuf,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Optional argv run once per side before warmup; its wall time is recorded
+    /// separately as preparation/compile time and never as workload time.
+    #[serde(default)]
+    pub prepare_args: Vec<String>,
+    #[serde(default)]
+    pub workloads: Vec<RuntimeWorkloadConfig>,
+    #[serde(default)]
+    pub metric: RuntimeMetric,
+}
+
+/// One named workload accepted by an adapter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeWorkloadConfig {
+    pub name: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+/// Metric actually measured by an adapter. MVP supports wall duration only;
+/// allocation, peak-RSS, and hardware counters stay `unavailable` unless a
+/// future adapter measures them for real.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeMetric {
+    #[default]
+    Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,6 +348,11 @@ impl Config {
                 max_report_bytes: 4 * 1024 * 1024,
                 max_runs: 4,
                 compare_samples: 3,
+                runtime_max_samples: 8,
+                runtime_min_samples: 3,
+                runtime_max_warmup: 2,
+                runtime_run_timeout_ms: 120_000,
+                runtime_adapters: Vec::new(),
             },
             telemetry: TelemetryConfig {
                 enabled: true,
@@ -441,6 +496,31 @@ impl Config {
             1,
             8,
         )?;
+        check_range(
+            "profile.runtime_max_samples",
+            self.profile.runtime_max_samples,
+            1,
+            32,
+        )?;
+        check_range(
+            "profile.runtime_min_samples",
+            self.profile.runtime_min_samples,
+            2,
+            self.profile.runtime_max_samples,
+        )?;
+        check_range(
+            "profile.runtime_max_warmup",
+            self.profile.runtime_max_warmup,
+            0,
+            16,
+        )?;
+        check_range(
+            "profile.runtime_run_timeout_ms",
+            self.profile.runtime_run_timeout_ms,
+            1,
+            86_400_000,
+        )?;
+        validate_runtime_adapters(&self.profile.runtime_adapters)?;
         check_range(
             "limits.tool_output_bytes",
             self.limits.tool_output_bytes,
@@ -697,6 +777,14 @@ pub struct CliOptions {
     pub profile_max_runs: Option<u64>,
     #[arg(long = "profile-compare-samples")]
     pub profile_compare_samples: Option<u64>,
+    #[arg(long = "profile-runtime-max-samples")]
+    pub profile_runtime_max_samples: Option<u64>,
+    #[arg(long = "profile-runtime-min-samples")]
+    pub profile_runtime_min_samples: Option<u64>,
+    #[arg(long = "profile-runtime-max-warmup")]
+    pub profile_runtime_max_warmup: Option<u64>,
+    #[arg(long = "profile-runtime-run-timeout-ms")]
+    pub profile_runtime_run_timeout_ms: Option<u64>,
     #[arg(long = "max-rename-edits")]
     pub max_rename_edits: Option<u64>,
     #[arg(long = "max-refactor-edits")]
@@ -909,6 +997,17 @@ struct FileProfileConfig {
     max_report_bytes: Option<u64>,
     max_runs: Option<u64>,
     compare_samples: Option<u64>,
+    runtime: Option<FileRuntimeConfig>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct FileRuntimeConfig {
+    max_samples: Option<u64>,
+    min_samples: Option<u64>,
+    max_warmup: Option<u64>,
+    run_timeout_ms: Option<u64>,
+    adapters: Option<Vec<RuntimeAdapterConfig>>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1064,6 +1163,18 @@ fn apply_file(config: &mut Config, file: FileConfig) {
         );
         apply_opt(&mut config.profile.max_runs, profile.max_runs);
         apply_opt(&mut config.profile.compare_samples, profile.compare_samples);
+        if let Some(runtime) = profile.runtime {
+            apply_opt(&mut config.profile.runtime_max_samples, runtime.max_samples);
+            apply_opt(&mut config.profile.runtime_min_samples, runtime.min_samples);
+            apply_opt(&mut config.profile.runtime_max_warmup, runtime.max_warmup);
+            apply_opt(
+                &mut config.profile.runtime_run_timeout_ms,
+                runtime.run_timeout_ms,
+            );
+            if let Some(adapters) = runtime.adapters {
+                config.profile.runtime_adapters = adapters;
+            }
+        }
     }
     if let Some(telemetry) = file.telemetry {
         apply_opt(&mut config.telemetry.enabled, telemetry.enabled);
@@ -1180,6 +1291,18 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
         "PROFILE__MAX_RUNS" => config.profile.max_runs = parse_u64(value).map_err(invalid)?,
         "PROFILE__COMPARE_SAMPLES" => {
             config.profile.compare_samples = parse_u64(value).map_err(invalid)?;
+        }
+        "PROFILE__RUNTIME_MAX_SAMPLES" => {
+            config.profile.runtime_max_samples = parse_u64(value).map_err(invalid)?;
+        }
+        "PROFILE__RUNTIME_MIN_SAMPLES" => {
+            config.profile.runtime_min_samples = parse_u64(value).map_err(invalid)?;
+        }
+        "PROFILE__RUNTIME_MAX_WARMUP" => {
+            config.profile.runtime_max_warmup = parse_u64(value).map_err(invalid)?;
+        }
+        "PROFILE__RUNTIME_RUN_TIMEOUT_MS" => {
+            config.profile.runtime_run_timeout_ms = parse_u64(value).map_err(invalid)?;
         }
         "LIMITS__MAX_RENAME_EDITS" => {
             config.limits.max_rename_edits = parse_u64(value).map_err(invalid)?;
@@ -1339,6 +1462,22 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
         &mut config.profile.compare_samples,
         cli.profile_compare_samples,
     );
+    apply_opt(
+        &mut config.profile.runtime_max_samples,
+        cli.profile_runtime_max_samples,
+    );
+    apply_opt(
+        &mut config.profile.runtime_min_samples,
+        cli.profile_runtime_min_samples,
+    );
+    apply_opt(
+        &mut config.profile.runtime_max_warmup,
+        cli.profile_runtime_max_warmup,
+    );
+    apply_opt(
+        &mut config.profile.runtime_run_timeout_ms,
+        cli.profile_runtime_run_timeout_ms,
+    );
     apply_opt(&mut config.limits.max_rename_edits, cli.max_rename_edits);
     apply_opt(
         &mut config.limits.max_refactor_edits,
@@ -1405,6 +1544,120 @@ fn check_range(field: &'static str, value: u64, min: u64, max: u64) -> Result<()
         });
     }
     Ok(())
+}
+
+/// Operator-declared runtime adapters are the only executables and argv that
+/// `runtime_compare` may launch. Names, argv, and workload lists are bounded
+/// here so a malformed config can never widen the runner surface silently.
+fn validate_runtime_adapters(adapters: &[RuntimeAdapterConfig]) -> Result<(), ConfigError> {
+    if adapters.len() > 16 {
+        return Err(ConfigError::InvalidField {
+            field: "profile.runtime.adapters",
+            message: "at most 16 adapters are allowed".to_owned(),
+        });
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for adapter in adapters {
+        if !is_bounded_identifier(&adapter.name, 64) {
+            return Err(ConfigError::InvalidField {
+                field: "profile.runtime.adapters.name",
+                message: format!(
+                    "adapter name {:?} must be a bounded printable identifier",
+                    adapter.name
+                ),
+            });
+        }
+        if !names.insert(adapter.name.as_str()) {
+            return Err(ConfigError::InvalidField {
+                field: "profile.runtime.adapters.name",
+                message: format!("duplicate adapter name {:?}", adapter.name),
+            });
+        }
+        if adapter.command.as_os_str().is_empty() {
+            return Err(ConfigError::InvalidField {
+                field: "profile.runtime.adapters.command",
+                message: "command cannot be empty".to_owned(),
+            });
+        }
+        if adapter
+            .command
+            .to_string_lossy()
+            .chars()
+            .any(char::is_control)
+        {
+            return Err(ConfigError::InvalidField {
+                field: "profile.runtime.adapters.command",
+                message: "command cannot contain control characters".to_owned(),
+            });
+        }
+        validate_adapter_args("profile.runtime.adapters.args", &adapter.args)?;
+        validate_adapter_args(
+            "profile.runtime.adapters.prepare_args",
+            &adapter.prepare_args,
+        )?;
+        if adapter.workloads.is_empty() {
+            return Err(ConfigError::InvalidField {
+                field: "profile.runtime.adapters.workloads",
+                message: format!("adapter {:?} declares no workload", adapter.name),
+            });
+        }
+        if adapter.workloads.len() > 16 {
+            return Err(ConfigError::InvalidField {
+                field: "profile.runtime.adapters.workloads",
+                message: "at most 16 workloads per adapter are allowed".to_owned(),
+            });
+        }
+        let mut workloads = std::collections::BTreeSet::new();
+        for workload in &adapter.workloads {
+            if !is_bounded_identifier(&workload.name, 64) {
+                return Err(ConfigError::InvalidField {
+                    field: "profile.runtime.adapters.workloads.name",
+                    message: format!(
+                        "workload name {:?} must be a bounded printable identifier",
+                        workload.name
+                    ),
+                });
+            }
+            if !workloads.insert(workload.name.as_str()) {
+                return Err(ConfigError::InvalidField {
+                    field: "profile.runtime.adapters.workloads.name",
+                    message: format!(
+                        "adapter {:?} declares workload {:?} more than once",
+                        adapter.name, workload.name
+                    ),
+                });
+            }
+            validate_adapter_args("profile.runtime.adapters.workloads.args", &workload.args)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_adapter_args(field: &'static str, args: &[String]) -> Result<(), ConfigError> {
+    if args.len() > 64 {
+        return Err(ConfigError::InvalidField {
+            field,
+            message: "at most 64 argv entries are allowed".to_owned(),
+        });
+    }
+    for arg in args {
+        if arg.len() > 1_024 || arg.chars().any(char::is_control) {
+            return Err(ConfigError::InvalidField {
+                field,
+                message: "argv entries must be at most 1024 printable bytes".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn is_bounded_identifier(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_bytes
+        && !value.chars().any(char::is_control)
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
 }
 
 fn reject_path_overlap(
@@ -1738,12 +1991,19 @@ mod tests {
     fn profile_config_accepts_toml_environment_and_cli_layers() {
         let mut cli = cli();
         cli.profile_max_runs = Some(3);
+        cli.profile_runtime_max_samples = Some(5);
         let config = Config::from_sources(
             "/workspace",
             Some(
-                "[tools]\nprofile = false\n[profile]\nmax_report_bytes = 8192\ncompare_samples = 2\n",
+                "[tools]\nprofile = false\n[profile]\nmax_report_bytes = 8192\ncompare_samples = 2\n\
+                 [profile.runtime]\nmin_samples = 2\nmax_warmup = 1\n\
+                 adapters = [{ name = \"sleepy\", command = \"/bin/sleep\", workloads = [\
+                 { name = \"tiny\", args = [\"0.01\"] }] }]\n",
             ),
-            [("AGZ_RUST_CODER_PROFILE__MAX_RUNS", "5")],
+            [(
+                "AGZ_RUST_CODER_PROFILE__RUNTIME_RUN_TIMEOUT_MS",
+                "9000",
+            ), ("AGZ_RUST_CODER_PROFILE__MAX_RUNS", "5")],
             &cli,
         )
         .unwrap();
@@ -1752,6 +2012,16 @@ mod tests {
         assert_eq!(config.profile.max_report_bytes, 8_192);
         assert_eq!(config.profile.max_runs, 3);
         assert_eq!(config.profile.compare_samples, 2);
+        assert_eq!(config.profile.runtime_max_samples, 5);
+        assert_eq!(config.profile.runtime_min_samples, 2);
+        assert_eq!(config.profile.runtime_max_warmup, 1);
+        assert_eq!(config.profile.runtime_run_timeout_ms, 9_000);
+        assert_eq!(config.profile.runtime_adapters.len(), 1);
+        assert_eq!(config.profile.runtime_adapters[0].name, "sleepy");
+        assert_eq!(
+            config.profile.runtime_adapters[0].workloads[0].args,
+            ["0.01"]
+        );
 
         let out_of_range = Config::from_sources(
             "/workspace",
@@ -1761,6 +2031,20 @@ mod tests {
         );
         assert!(matches!(
             out_of_range,
+            Err(ConfigError::InvalidField { .. })
+        ));
+
+        let unmeasured_adapter = Config::from_sources(
+            "/workspace",
+            Some(
+                "[profile.runtime]\nadapters = [{ name = \"broken\", command = \"/bin/true\", \
+                 workloads = [] }]\n",
+            ),
+            std::iter::empty::<(String, String)>(),
+            &cli,
+        );
+        assert!(matches!(
+            unmeasured_adapter,
             Err(ConfigError::InvalidField { .. })
         ));
     }

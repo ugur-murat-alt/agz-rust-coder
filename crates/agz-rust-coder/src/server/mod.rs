@@ -43,7 +43,10 @@ use crate::{
     lsp::RustAnalyzerManager,
     process::{ProcessJournal, ProcessSupervisor},
     telemetry::ActivityLog,
-    tools::{AuditLimits, AuditService, CheckService, ProfileService, VerifyService},
+    tools::{
+        AuditLimits, AuditService, CheckService, ProfileService, RuntimeCompareService,
+        VerifyService,
+    },
     workspace::{AuthorizedRoot, MetadataService, RootGuard},
 };
 use admission::AdmissionController;
@@ -61,6 +64,7 @@ pub struct AppState {
     /// validates, creates, or touches the scratch directory at startup.
     change: Option<Arc<ChangeService>>,
     profile: ProfileService,
+    runtime: RuntimeCompareService,
     verify: Arc<VerifyService>,
     audit: AuditService,
     docs: Arc<DocsResolver>,
@@ -163,6 +167,7 @@ impl AppState {
             Duration::from_millis(config.context.capsule_ttl_ms),
         ));
         let profile = ProfileService::new(config.clone(), Arc::clone(&check), processes.clone());
+        let runtime = RuntimeCompareService::new(config.clone(), processes.clone());
         let verify = Arc::new(VerifyService::new(
             Arc::clone(&check),
             config.verify.clone(),
@@ -190,6 +195,7 @@ impl AppState {
             check,
             change,
             profile,
+            runtime,
             verify,
             audit,
             docs: Arc::new(DocsResolver::with_authorized_supervisor(processes)),
@@ -319,6 +325,10 @@ impl AppState {
 
     pub(crate) fn profile_service(&self) -> &ProfileService {
         &self.profile
+    }
+
+    pub(crate) fn runtime_service(&self) -> &RuntimeCompareService {
+        &self.runtime
     }
 
     pub(crate) fn verify_service(&self) -> &Arc<VerifyService> {
