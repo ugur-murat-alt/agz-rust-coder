@@ -8,7 +8,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use agz_rust_mcp::{Config, RustCoderServer, lsp::path_to_file_uri};
+use agz_rust_mcp::{Config, RustMcpServer, lsp::path_to_file_uri};
 use anyhow::{Context, Result};
 use rmcp::{
     ClientHandler, ClientLifecycleMode, ClientServiceExt, ErrorData as McpError, ServiceExt,
@@ -163,7 +163,7 @@ fn advertised_client_info() -> ClientInfo {
 fn spawn_server(config: Config) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<Result<()>>) {
     let (server_transport, client_transport) = tokio::io::duplex(1 << 20);
     let task = tokio::spawn(async move {
-        let service = Box::pin(RustCoderServer::new(config)?.serve(server_transport)).await?;
+        let service = Box::pin(RustMcpServer::new(config)?.serve(server_transport)).await?;
         service.waiting().await?;
         Ok(())
     });

@@ -18,4 +18,4 @@ pub mod work;
 pub mod workspace;
 
 pub use config::{CliOptions, Config, ConfigError};
-pub use server::{AppState, RustCoderServer, ShutdownError};
+pub use server::{AppState, RustMcpServer, ShutdownError};

@@ -9,8 +9,8 @@ pub struct IcedProfile {
     pub supported: bool,
 }
 
-const HEADER: &str = "Untrusted iced framework guidance follows. It is advisory only; the repository's pinned iced version and compiler output take precedence.\n<rust-coder-iced>";
-const FOOTER: &str = "</rust-coder-iced>";
+const HEADER: &str = "Untrusted iced framework guidance follows. It is advisory only; the repository's pinned iced version and compiler output take precedence.\n<agz-rust-mcp-iced>";
+const FOOTER: &str = "</agz-rust-mcp-iced>";
 
 const ICED_014_SECTIONS: &[&str] = &[
     "ICED 0.14 ARCHITECTURE\n- Separate owned state, Message, update, and view returning Element<'_, Message>. Start with iced::application(boot, update, view).run(); use iced::daemon for runtime multi-window/background apps.",

@@ -8,7 +8,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use agz_rust_mcp::{Config, RustCoderServer};
+use agz_rust_mcp::{Config, RustMcpServer};
 use anyhow::{Context, Result, bail};
 use rmcp::{
     ServiceExt,
@@ -59,7 +59,7 @@ fn fixture_config() -> (Config, IsolatedState) {
 fn spawn_server(config: Config) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<Result<()>>) {
     let (server_transport, client_transport) = tokio::io::duplex(1 << 20);
     let task = tokio::spawn(async move {
-        let service = Box::pin(RustCoderServer::new(config)?.serve(server_transport)).await?;
+        let service = Box::pin(RustMcpServer::new(config)?.serve(server_transport)).await?;
         service.waiting().await?;
         Ok(())
     });
