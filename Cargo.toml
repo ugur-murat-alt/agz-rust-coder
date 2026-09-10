@@ -8,8 +8,8 @@ edition = "2024"
 rust-version = "1.88"
 license = "MIT"
 authors = ["Ugur Murat Altintas"]
-repository = "https://github.com/ugur-murat-alt/agz-rust-coder"
-homepage = "https://github.com/ugur-murat-alt/agz-rust-coder"
+repository = "https://github.com/ugur-murat-alt/rust-code-mcp"
+homepage = "https://github.com/ugur-murat-alt/rust-code-mcp"
 
 [workspace.dependencies]
 anyhow = "1.0"

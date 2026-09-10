@@ -25,7 +25,7 @@ kaldırabilir, uyarı verebilir, katılımı geçici sınırlayabilir ya da hesa
 olarak engelleyebilir. Kararlar bilgi ifşasını ve çıkar çatışmasını azaltmalıdır.
 
 Davranış olaylarını repository maintainer'ına özel kanaldan veya ayrı kanal yoksa
-[GitHub özel advisory formu](https://github.com/ugur-murat-alt/agz-rust-coder/security/advisories/new)
+[GitHub özel advisory formu](https://github.com/ugur-murat-alt/rust-code-mcp/security/advisories/new)
 üzerinden bildirin. Acil güvenlik için zorunlu değilse davranış bildirimine açık
 ayrıntısı eklemeyin.
 

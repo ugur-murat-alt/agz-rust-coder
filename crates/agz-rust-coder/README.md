@@ -24,7 +24,7 @@ evidence and type-checks candidate snippets only in a discarded candidate copy.
 The `change` tool keeps a revision-bound candidate copy with validation evidence
 and never writes workspace source.
 
-See the [project repository](https://github.com/ugur-murat-alt/agz-rust-coder)
+See the [project repository](https://github.com/ugur-murat-alt/rust-code-mcp)
 for client configuration, security boundaries, and release artifacts.
 
 [MIT](LICENSE)

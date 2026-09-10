@@ -297,7 +297,7 @@ fn assert_contract(english: &str, turkish: &str) -> Result<(), String> {
     }
 
     for link in [
-        "https://github.com/ugur-murat-alt/agz-rust-coder",
+        "https://github.com/ugur-murat-alt/rust-code-mcp",
         "https://docs.rs/rmcp/3.1.4/rmcp/",
         "https://modelcontextprotocol.io/specification/2025-11-25",
         "https://modelcontextprotocol.io/specification/2026-07-28",
@@ -369,7 +369,7 @@ fn mcp_registry_metadata_matches_the_cargo_package() {
         "title": "AGZ Rust Coder",
         "description": "Bounded, source-write-free Rust correctness tools grounded in Cargo and rustc output.",
         "repository": {
-            "url": "https://github.com/ugur-murat-alt/agz-rust-coder",
+            "url": "https://github.com/ugur-murat-alt/rust-code-mcp",
             "source": "github"
         },
         "version": env!("CARGO_PKG_VERSION"),

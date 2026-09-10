@@ -240,7 +240,7 @@ jobs:
     timeout-minutes: 20
     environment:
       name: release
-      url: https://github.com/ugur-murat-alt/agz-rust-coder/releases
+      url: https://github.com/ugur-murat-alt/rust-code-mcp/releases
     permissions:
       contents: write
       actions: read

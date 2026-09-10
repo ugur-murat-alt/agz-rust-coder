@@ -4,7 +4,7 @@
   "title": "AGZ Rust Coder",
   "description": "Bounded, source-write-free Rust correctness tools grounded in Cargo and rustc output.",
   "repository": {
-    "url": "https://github.com/ugur-murat-alt/agz-rust-coder",
+    "url": "https://github.com/ugur-murat-alt/rust-code-mcp",
     "source": "github"
   },
   "version": "0.2.0",
