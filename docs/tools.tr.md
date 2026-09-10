@@ -27,6 +27,7 @@ işaretini korur.
 | `hierarchy` | Rust Analyzer | Workspace-code politikasına bağlı | Sınırlı gelen/giden çağrı grafiği. |
 | `rename` | Rust Analyzer | Kaynağa asla yazmaz | Doğrulanmış `old_string`/`new_string` edit paketi. |
 | `refactor` | Rust Analyzer | Kaynağa asla yazmaz | Doğrulanmış, yazmasız refactor paketi. |
+| `change` | Sunucuya ait scratch + aday doğrulaması için Cargo/rustc | Workspace'e asla yazmaz; yalnız aday kopyayı derler | Aday hash'leri, doğrulama kanıtı ve doğrulanmış/doğrulanmamış export paketi içeren revizyona bağlı change kaydı. |
 
 `check` hedefleri `check`, `clippy`, `test`, `doc`, `fmt` ve `all` değerleridir.
 Biçimlendirme yalnız kontrol kipinde çalışır. Tamamlanmış açık bir doğrulama daha
@@ -36,6 +37,33 @@ sonraki istek için yetki kanıtı olarak yeniden kullanılmaz; yalnız aynı an
 Tüm araçlar `limits.tool_output_bytes` içinde eşdeğer belirli yapıdaki veri ve
 metin döndürür. Uzak gövdeler ve alıntılar ayrıştırmadan önce sınırlandırılır.
 Dış içerik `untrustedData` altında verilir ve sunucu talimatına eklenmez.
+
+## Changeset Scratch Alanı
+
+`change`, izinli çalışma ağacının tamamını (değiştirilmiş takipli dosyalar ve
+izlenmeyen dosyalar dahil) sunucuya ait scratch dizinine kopyalar; Git gerekmez.
+Özgün workspace'e asla yazılmaz. Yakalama çıktısı sınırlı bir `excluded` listesi
+(örneğin `.git`, Cargo target dizini ve sunucu scratch alanı) bildirir; böylece
+dışlanan bir dizine bağlı girdi sessizce tam sayılmaz. `stage`, her yamayı ve
+yeni dosyayı uygulamadan önce doğrular; ilk aday yazımından önce kalıcı bir
+"applying" işareti yayınlar ve uygulanan her dosyanın geri okunan hash'lerini
+kaydeder (tam tek eşleşme, UTF-8, CRLF'e duyarlı byte karşılaştırması, aday
+içinde göreli yol, çakışma reddi). `validate`, `expectedRevision` ve
+`baseIdentity` alanlarını zorunlu tutar (revizyon 0 geçerlidir), hiçbir Cargo
+süreci başlamadan önce kayıtlı aday dosyalarını yeniden hash'ler ve `check` ile
+aynı Cargo hedeflerini aday kopya üzerinde ayrı bir root guard ve izole target
+diziniyle çalıştırır; yalnız güncel revizyona ait, iptal edilmemiş ve kimliği
+eşleşen PASS/FAIL taze kanıt sayılır. `export` güncel yetkilendirme epoch'unu ve
+aynı hash kontrolünü zorunlu tutar, revizyona bağlı paketi dürüst bir `verified`
+işaretiyle döndürür; `discard` scratch alanını symlink izlemeden kaldırır.
+Symlink, özel dosya türü veya sınır aşımı yakalamayı `INCOMPLETE_INPUTS` olarak
+kapalı biçimde başarısız kılar; yakalanan ağaç dışındaki göreli path
+bağımlılıkları için de `create`, aday kopya `path = "..."` referanslarını
+yeniden üretemeyeceğinden bu yolları listeleyerek `INCOMPLETE_INPUTS` ile kapalı
+başarısız olur. Uygulama sırasında G/Ç hatası, "applying" işareti ile son yayın
+arasında çökme veya kayıtlı revizyonla eşleşmeyen aday byte'ları change'i
+`FAILED_INCONSISTENT` işaretler ve sonraki stage/validate/export istekleri
+reddedilir.
 
 ## Sonuç Anlamları
 
@@ -80,6 +108,7 @@ platformun path-list ayırıcısını kullanır.
 | `tools.lsp` | `true` | Semantik gezinme araçları kaydı. |
 | `tools.rename` | `true` | LSP açıksa `rename` kaydı. |
 | `tools.refactor` | `true` | LSP açıksa `refactor` kaydı. |
+| `tools.change` | `true` | `change` kaydı. |
 | `cargo.path` | PATH `cargo` | İsteğe bağlı Cargo binary değişimi. |
 | `gate.hard_timeout_ms` | `600000` | Tek Cargo işlemi son süresi. |
 | `gate.debounce_ms` | `500` | Kararlı girdi bekleme süresi. |
@@ -99,6 +128,12 @@ platformun path-list ayırıcısını kullanır.
 | `docs.timeout_ms` | `300000` | Belge çözümleme son süresi. |
 | `docs.fallback` | `auto` | `auto`, `local`, `network` veya `off`. |
 | `docs.cache_dir` | platform `agz-rust-coder/docs` | Sunucuya ait docs cache. |
+| `change.scratch_dir` | platform `agz-rust-coder/state/change` | Yetkili köklerin dışındaki sunucuya ait changeset scratch alanı. |
+| `change.max_active` | `4` | Sunucu başına eşzamanlı etkin change. |
+| `change.max_files` | `20000` | Change başına yakalanan dosya. |
+| `change.max_bytes` | `268435456` | Change başına yakalanan aday byte. |
+| `change.ttl_ms` | `86400000` | Açılış taramasından önce orphan ve discarded scratch saklama süresi. |
+| `change.max_revisions` | `32` | Change başına stage revizyonu. |
 | `limits.max_rename_edits` | `200` | Rename edit sınırı. |
 | `limits.max_refactor_edits` | `200` | Refactor edit sınırı. |
 | `limits.process_output_bytes` | `8388608` | Birleşik alt süreç çıktı sınırı. |

@@ -46,6 +46,7 @@ pub struct Config {
     pub tools: ToolConfig,
     pub cargo: CargoConfig,
     pub gate: GateConfig,
+    pub change: ChangeConfig,
     pub rust_analyzer: RustAnalyzerConfig,
     pub docs: DocsConfig,
     pub limits: LimitsConfig,
@@ -68,6 +69,7 @@ pub struct ToolConfig {
     pub lsp: bool,
     pub rename: bool,
     pub refactor: bool,
+    pub change: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +104,17 @@ pub enum GateCache {
     Auto,
     Project,
     Isolated,
+}
+
+/// Bounds and paths for the revision-bound changeset scratch area.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeConfig {
+    pub scratch_dir: PathBuf,
+    pub max_active: u64,
+    pub max_files: u64,
+    pub max_bytes: u64,
+    pub ttl_ms: u64,
+    pub max_revisions: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,6 +200,7 @@ impl Config {
                 lsp: true,
                 rename: true,
                 refactor: true,
+                change: true,
             },
             cargo: CargoConfig { path: None },
             gate: GateConfig {
@@ -199,6 +213,14 @@ impl Config {
                 min_available_memory_mb: 512,
                 cache_dir: state_dir.join("gate"),
                 lease_dir: state_dir.join("leases"),
+            },
+            change: ChangeConfig {
+                scratch_dir: state_dir.join("change"),
+                max_active: 4,
+                max_files: 20_000,
+                max_bytes: 268_435_456,
+                ttl_ms: 86_400_000,
+                max_revisions: 32,
             },
             rust_analyzer: RustAnalyzerConfig {
                 path: None,
@@ -341,6 +363,11 @@ impl Config {
             16,
         )?;
         check_range("docs.timeout_ms", self.docs.timeout_ms, 1, 3_600_000)?;
+        check_range("change.max_active", self.change.max_active, 1, 64)?;
+        check_range("change.max_files", self.change.max_files, 1, 1_000_000)?;
+        check_range("change.max_bytes", self.change.max_bytes, 1_024, u64::MAX)?;
+        check_range("change.ttl_ms", self.change.ttl_ms, 1, u64::MAX)?;
+        check_range("change.max_revisions", self.change.max_revisions, 1, 4_096)?;
         check_range(
             "limits.tool_output_bytes",
             self.limits.tool_output_bytes,
@@ -414,6 +441,11 @@ impl Config {
             ("gate.lease_dir", self.gate.lease_dir.as_path(), true),
             ("docs.cache_dir", self.docs.cache_dir.as_path(), true),
             (
+                "change.scratch_dir",
+                self.change.scratch_dir.as_path(),
+                self.tools.change,
+            ),
+            (
                 "telemetry.path",
                 self.telemetry.path.as_path(),
                 self.telemetry.enabled,
@@ -463,6 +495,9 @@ impl Config {
                 names.push("refactor");
             }
         }
+        if self.tools.change {
+            names.push("change");
+        }
         names
     }
 
@@ -501,6 +536,8 @@ pub struct CliOptions {
     pub tools_rename: Option<bool>,
     #[arg(long = "tools-refactor")]
     pub tools_refactor: Option<bool>,
+    #[arg(long = "tools-change")]
+    pub tools_change: Option<bool>,
     #[arg(long = "cargo-path")]
     pub cargo_path: Option<PathBuf>,
     #[arg(long = "gate-hard-timeout-ms")]
@@ -521,6 +558,18 @@ pub struct CliOptions {
     pub gate_cache_dir: Option<PathBuf>,
     #[arg(long = "gate-lease-dir")]
     pub gate_lease_dir: Option<PathBuf>,
+    #[arg(long = "change-scratch-dir")]
+    pub change_scratch_dir: Option<PathBuf>,
+    #[arg(long = "change-max-active")]
+    pub change_max_active: Option<u64>,
+    #[arg(long = "change-max-files")]
+    pub change_max_files: Option<u64>,
+    #[arg(long = "change-max-bytes")]
+    pub change_max_bytes: Option<u64>,
+    #[arg(long = "change-ttl-ms")]
+    pub change_ttl_ms: Option<u64>,
+    #[arg(long = "change-max-revisions")]
+    pub change_max_revisions: Option<u64>,
     #[arg(long = "rust-analyzer-path")]
     pub rust_analyzer_path: Option<PathBuf>,
     #[arg(long = "rust-analyzer-timeout-ms")]
@@ -592,6 +641,7 @@ struct FileConfig {
     tools: Option<FileToolConfig>,
     cargo: Option<FileCargoConfig>,
     gate: Option<FileGateConfig>,
+    change: Option<FileChangeConfig>,
     rust_analyzer: Option<FileRustAnalyzerConfig>,
     docs: Option<FileDocsConfig>,
     limits: Option<FileLimitsConfig>,
@@ -615,6 +665,7 @@ struct FileToolConfig {
     lsp: Option<bool>,
     rename: Option<bool>,
     refactor: Option<bool>,
+    change: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -651,6 +702,17 @@ enum GateCacheFile {
     Auto,
     Project,
     Isolated,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct FileChangeConfig {
+    scratch_dir: Option<PathBuf>,
+    max_active: Option<u64>,
+    max_files: Option<u64>,
+    max_bytes: Option<u64>,
+    ttl_ms: Option<u64>,
+    max_revisions: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -748,6 +810,7 @@ fn apply_file(config: &mut Config, file: FileConfig) {
         apply_opt(&mut config.tools.lsp, tools.lsp);
         apply_opt(&mut config.tools.rename, tools.rename);
         apply_opt(&mut config.tools.refactor, tools.refactor);
+        apply_opt(&mut config.tools.change, tools.change);
     }
     if let Some(cargo) = file.cargo {
         if let Some(path) = cargo.path {
@@ -771,6 +834,14 @@ fn apply_file(config: &mut Config, file: FileConfig) {
         );
         apply_opt(&mut config.gate.cache_dir, gate.cache_dir);
         apply_opt(&mut config.gate.lease_dir, gate.lease_dir);
+    }
+    if let Some(change) = file.change {
+        apply_opt(&mut config.change.scratch_dir, change.scratch_dir);
+        apply_opt(&mut config.change.max_active, change.max_active);
+        apply_opt(&mut config.change.max_files, change.max_files);
+        apply_opt(&mut config.change.max_bytes, change.max_bytes);
+        apply_opt(&mut config.change.ttl_ms, change.ttl_ms);
+        apply_opt(&mut config.change.max_revisions, change.max_revisions);
     }
     if let Some(ra) = file.rust_analyzer {
         if let Some(path) = ra.path {
@@ -870,6 +941,7 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
         "TOOLS__LSP" => config.tools.lsp = parse_bool(value).map_err(invalid)?,
         "TOOLS__RENAME" => config.tools.rename = parse_bool(value).map_err(invalid)?,
         "TOOLS__REFACTOR" => config.tools.refactor = parse_bool(value).map_err(invalid)?,
+        "TOOLS__CHANGE" => config.tools.change = parse_bool(value).map_err(invalid)?,
         "CARGO__PATH" => config.cargo.path = Some(nonempty_path(value).map_err(invalid)?),
         "GATE__HARD_TIMEOUT_MS" => {
             config.gate.hard_timeout_ms = parse_u64(value).map_err(invalid)?;
@@ -888,6 +960,24 @@ fn apply_environment(config: &mut Config, key: &str, value: &str) -> Result<(), 
         }
         "GATE__CACHE_DIR" => config.gate.cache_dir = nonempty_path(value).map_err(invalid)?,
         "GATE__LEASE_DIR" => config.gate.lease_dir = nonempty_path(value).map_err(invalid)?,
+        "CHANGE__SCRATCH_DIR" => {
+            config.change.scratch_dir = nonempty_path(value).map_err(invalid)?;
+        }
+        "CHANGE__MAX_ACTIVE" => {
+            config.change.max_active = parse_u64(value).map_err(invalid)?;
+        }
+        "CHANGE__MAX_FILES" => {
+            config.change.max_files = parse_u64(value).map_err(invalid)?;
+        }
+        "CHANGE__MAX_BYTES" => {
+            config.change.max_bytes = parse_u64(value).map_err(invalid)?;
+        }
+        "CHANGE__TTL_MS" => {
+            config.change.ttl_ms = parse_u64(value).map_err(invalid)?;
+        }
+        "CHANGE__MAX_REVISIONS" => {
+            config.change.max_revisions = parse_u64(value).map_err(invalid)?;
+        }
         "RUST_ANALYZER__PATH" => {
             config.rust_analyzer.path = Some(nonempty_path(value).map_err(invalid)?);
         }
@@ -991,6 +1081,7 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
     apply_opt(&mut config.tools.lsp, cli.tools_lsp);
     apply_opt(&mut config.tools.rename, cli.tools_rename);
     apply_opt(&mut config.tools.refactor, cli.tools_refactor);
+    apply_opt(&mut config.tools.change, cli.tools_change);
     if let Some(path) = cli.cargo_path.clone() {
         config.cargo.path = Some(path);
     }
@@ -1010,6 +1101,15 @@ fn apply_cli(config: &mut Config, cli: &CliOptions) -> Result<(), ConfigError> {
     );
     apply_opt(&mut config.gate.cache_dir, cli.gate_cache_dir.clone());
     apply_opt(&mut config.gate.lease_dir, cli.gate_lease_dir.clone());
+    apply_opt(
+        &mut config.change.scratch_dir,
+        cli.change_scratch_dir.clone(),
+    );
+    apply_opt(&mut config.change.max_active, cli.change_max_active);
+    apply_opt(&mut config.change.max_files, cli.change_max_files);
+    apply_opt(&mut config.change.max_bytes, cli.change_max_bytes);
+    apply_opt(&mut config.change.ttl_ms, cli.change_ttl_ms);
+    apply_opt(&mut config.change.max_revisions, cli.change_max_revisions);
     if let Some(path) = cli.rust_analyzer_path.clone() {
         config.rust_analyzer.path = Some(path);
     }

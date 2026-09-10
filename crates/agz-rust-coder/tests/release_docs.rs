@@ -78,6 +78,8 @@ fn paired_public_docs_preserve_machine_readable_contracts() {
             "`hierarchy`",
             "`rename`",
             "`refactor`",
+            "`change`",
+            "`change.scratch_dir`",
             "`gate.scope`",
             "`rust_analyzer.workspace_code`",
             "`telemetry.enabled`",
@@ -147,6 +149,7 @@ fn assert_contract(english: &str, turkish: &str) -> Result<(), String> {
             "hierarchy",
             "rename",
             "refactor",
+            "change",
         ],
     )?;
     let turkish_tools = keyed_table(
@@ -164,6 +167,7 @@ fn assert_contract(english: &str, turkish: &str) -> Result<(), String> {
             "hierarchy",
             "rename",
             "refactor",
+            "change",
         ],
     )?;
     for (tool, english_row) in &english_tools {
@@ -187,6 +191,7 @@ fn assert_contract(english: &str, turkish: &str) -> Result<(), String> {
         "rust_hierarchy",
         "rust_rename",
         "rust_refactor",
+        "rust_change",
     ] {
         if english.matches(direct_name).count() != turkish.matches(direct_name).count() {
             return Err(format!("OpenCode direct tool drift: {direct_name}"));
@@ -202,6 +207,7 @@ fn assert_contract(english: &str, turkish: &str) -> Result<(), String> {
         "rust_analyzer.workspace_code",
         "docs.fallback",
         "limits.tool_output_bytes",
+        "change.max_bytes",
         "telemetry.enabled",
     ];
     let english_config = keyed_table(english, &config_keys)?;

@@ -83,6 +83,7 @@ OpenCode commonly exposes grouped MCP tools as `rust_*`.
 | `hierarchy` | `rust_hierarchy` | `enabled` | Trace a bounded call hierarchy. |
 | `rename` | `rust_rename` | `enabled` | Produce a verified rename edit package without applying it. |
 | `refactor` | `rust_refactor` | `enabled` | Produce a verified refactor edit package without applying it. |
+| `change` | `rust_change` | `enabled` | Create, stage, and validate a revision-bound changeset in server-owned scratch without writing the workspace. |
 
 Every tool returns deterministic structured data plus an equivalent bounded text
 fallback. External data stays under `untrustedData`. Expected domain outcomes
@@ -106,6 +107,7 @@ sections, for example `AGZ_RUST_CODER_GATE__HARD_TIMEOUT_MS=600000`.
 | `rust_analyzer.workspace_code` | `deny` | Reject RA startup unless workspace code is disabled. |
 | `docs.fallback` | `auto` | Documentation source policy. |
 | `limits.tool_output_bytes` | `49152` | Maximum serialized tool result size. |
+| `change.max_bytes` | `268435456` | Maximum captured candidate bytes per changeset. |
 | `telemetry.enabled` | `true` | Bounded local activity records without prompts or source. |
 
 Run `agz-rust-coder --help` for every CLI field. The complete behavior and

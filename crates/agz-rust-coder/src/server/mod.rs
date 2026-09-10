@@ -6,11 +6,11 @@ mod response;
 mod tasks;
 
 pub use handler::{
-    AuditData, AuditInput, AuditOutput, CheckData, CheckDetail, CheckInput, CheckOutput,
-    CheckTarget, CrateLookupData, CrateLookupInput, CrateLookupOutput, DocsData, DocsInput,
-    DocsOutput, EditData, EditOutput, HierarchyDirection, HierarchyInput, ImplementationsInput,
-    RefactorInput, RenameInput, RustCoderServer, SemanticData, SemanticInput, SemanticOutput,
-    SymbolInput, SymbolsInput, tool_definitions,
+    AuditData, AuditInput, AuditOutput, ChangeData, ChangeInput, ChangeOutput, CheckData,
+    CheckDetail, CheckInput, CheckOutput, CheckTarget, CrateLookupData, CrateLookupInput,
+    CrateLookupOutput, DocsData, DocsInput, DocsOutput, EditData, EditOutput, HierarchyDirection,
+    HierarchyInput, ImplementationsInput, RefactorInput, RenameInput, RustCoderServer,
+    SemanticData, SemanticInput, SemanticOutput, SymbolInput, SymbolsInput, tool_definitions,
 };
 pub use progress::ProgressReporter;
 pub use response::{ToolData, ToolOutput, WorkspaceInfo};
@@ -30,6 +30,7 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    change::ChangeService,
     config::{Config, ConfigError},
     docs::DocsResolver,
     lsp::RustAnalyzerManager,
@@ -49,6 +50,9 @@ pub struct AppState {
     client_roots: ClientRootsCoordinator,
     processes: ProcessSupervisor,
     check: Arc<CheckService>,
+    /// Present only when `tools.change` is enabled so a disabled tool never
+    /// validates, creates, or touches the scratch directory at startup.
+    change: Option<Arc<ChangeService>>,
     audit: AuditService,
     docs: Arc<DocsResolver>,
     cargo_home: Option<Arc<AuthorizedRoot>>,
@@ -70,6 +74,7 @@ impl fmt::Debug for AppState {
             .field("client_roots", &self.client_roots)
             .field("processes", &self.processes)
             .field("check", &self.check)
+            .field("change", &self.change)
             .field("lsp_available", &self.lsp.is_some())
             .field("tasks", &self.tasks)
             .field("shutting_down", &self.is_shutting_down())
@@ -128,6 +133,18 @@ impl AppState {
             Arc::clone(&roots),
             processes.clone(),
         ));
+        let change = if config.tools.change {
+            Some(Arc::new(
+                ChangeService::new(config.clone(), Arc::clone(&roots), processes.clone()).map_err(
+                    |error| ConfigError::InvalidField {
+                        field: "change.scratch_dir",
+                        message: error,
+                    },
+                )?,
+            ))
+        } else {
+            None
+        };
         let audit = AuditService::new(AuditLimits::from_u64(
             config.limits.audit_files,
             config.limits.audit_file_bytes,
@@ -149,6 +166,7 @@ impl AppState {
             client_roots,
             processes: processes.clone(),
             check,
+            change,
             audit,
             docs: Arc::new(DocsResolver::with_authorized_supervisor(processes)),
             cargo_home,
@@ -269,6 +287,10 @@ impl AppState {
         &self.check
     }
 
+    pub(crate) fn change_service(&self) -> Option<&Arc<ChangeService>> {
+        self.change.as_ref()
+    }
+
     pub(crate) fn audit_service(&self) -> &AuditService {
         &self.audit
     }
@@ -323,4 +345,42 @@ pub enum ShutdownError {
     Telemetry(String),
     #[error("shutdown worker failed: {0}")]
     Worker(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn disabled_change_tool_is_absent_and_does_not_validate_scratch() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let base = std::env::temp_dir().join(format!(
+            "agz-change-disabled-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&base).expect("create base");
+        // A regular file can never become the scratch directory.
+        let blocker = base.join("scratch-file");
+        fs::write(&blocker, b"not a directory").expect("write blocker");
+
+        let mut config = Config::defaults_at(&base);
+        config.tools.change = false;
+        config.change.scratch_dir = blocker.clone();
+        config.telemetry.enabled = false;
+        config.telemetry.path = base.join("activity.jsonl");
+        let state = AppState::new(config.clone()).expect("disabled tool must not build scratch");
+        assert!(state.change_service().is_none());
+        assert!(!config.enabled_tool_names().contains(&"change"));
+
+        let mut enabled = config;
+        enabled.tools.change = true;
+        assert!(
+            AppState::new(enabled).is_err(),
+            "enabled tool must validate the scratch path"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
 }

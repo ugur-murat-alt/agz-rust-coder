@@ -155,5 +155,54 @@
     },
     "required": ["dir", "path", "symbol"],
     "additionalProperties": false
+  },
+  "change": {
+    "type": "object",
+    "properties": {
+      "action": { "type": "string", "enum": ["create", "stage", "inspect", "validate", "export", "discard"] },
+      "dir": {
+        "type": "string",
+        "description": "Absolute path to the Rust project/workspace, or to a parent containing one unambiguous nested Cargo project."
+      },
+      "changeId": { "type": "string", "minLength": 1 },
+      "expectedRevision": { "type": "integer", "minimum": 0 },
+      "baseIdentity": { "type": "string", "minLength": 1 },
+      "patches": {
+        "type": "array",
+        "maxItems": 512,
+        "items": {
+          "type": "object",
+          "properties": {
+            "file": { "type": "string", "minLength": 1 },
+            "oldString": { "type": "string", "minLength": 1 },
+            "newString": { "type": "string" }
+          },
+          "required": ["file", "oldString", "newString"],
+          "additionalProperties": false
+        }
+      },
+      "newFiles": {
+        "type": "array",
+        "maxItems": 512,
+        "items": {
+          "type": "object",
+          "properties": {
+            "file": { "type": "string", "minLength": 1 },
+            "content": { "type": "string" }
+          },
+          "required": ["file", "content"],
+          "additionalProperties": false
+        }
+      },
+      "options": {
+        "type": "object",
+        "description": "Typed Cargo validation options for action=validate."
+      },
+      "target": { "type": "string", "enum": ["check", "clippy", "test", "doc", "fmt", "all"] },
+      "timings": { "type": "boolean" },
+      "detail": { "type": "string", "enum": ["compact", "standard", "full"] }
+    },
+    "required": ["action"],
+    "additionalProperties": false
   }
 }

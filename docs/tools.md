@@ -26,6 +26,7 @@ Failed compilations are revalidated before offering edit/context evidence. Trunc
 | `hierarchy` | Rust Analyzer | Depends on workspace-code policy | Bounded incoming/outgoing call graph. |
 | `rename` | Rust Analyzer | Never writes source | Verified `old_string`/`new_string` edit package. |
 | `refactor` | Rust Analyzer | Never writes source | Verified write-free refactor package. |
+| `change` | Server-owned scratch + Cargo/rustc for candidate validation | Never writes the workspace; compiles only the candidate copy | Revision-bound change record with candidate hashes, validation evidence, and a verified/unverified export package. |
 
 `check` targets are `check`, `clippy`, `test`, `doc`, `fmt`, and `all`. Formatting
 uses check-only behavior. A completed explicit validation is never reused as
@@ -35,6 +36,33 @@ All tools return equivalent structured and text representations within
 `limits.tool_output_bytes`. Remote bodies and excerpts are bounded before
 parsing. External content is emitted under `untrustedData` and is never added to
 server instructions.
+
+## Changeset Scratch
+
+`change` copies the complete authorized working tree, including dirty tracked
+and untracked files, into a server-owned scratch directory; Git is not required.
+The original workspace is never written. Captures report a bounded `excluded`
+list (for example `.git`, the Cargo target directory, and server scratch), so an
+input that depends on an excluded directory is visible rather than silently
+assumed complete. `stage` validates every `oldString`/`newString` patch and new
+file before applying anything, then publishes a durable applying marker before
+the first candidate write and records the read-back hashes of every staged file
+(exact single match, UTF-8, CRLF-strict bytes, relative in-candidate paths,
+overlap rejection). `validate` requires `expectedRevision` and `baseIdentity`
+(revision 0 is valid), re-hashes the recorded candidate files before starting
+any Cargo process, and runs the same Cargo targets as `check` against the
+candidate with a dedicated root guard and an isolated target directory; only a
+current-revision, non-cancelled, identity-matched PASS/FAIL is fresh evidence.
+`export` requires a current authorization epoch and the same hash check, returns
+a revision-bound package with an honest `verified` flag, and `discard` removes
+the scratch without following symlinks. Symlinks, special file types, or limit
+overflows fail the capture closed as `INCOMPLETE_INPUTS`; a workspace with
+relative path dependencies outside the captured tree also fails `create` closed
+with `INCOMPLETE_INPUTS` and lists them, because the candidate copy cannot
+reproduce their relative `path = "..."` references. A mid-apply I/O failure, a
+crash between the applying marker and the final publish, or candidate bytes
+that no longer match the recorded revision mark the change
+`FAILED_INCONSISTENT` and refuse further stage/validate/export requests.
 
 ## Result Semantics
 
@@ -80,6 +108,7 @@ use the platform path-list separator.
 | `tools.lsp` | `true` | Register semantic navigation tools. |
 | `tools.rename` | `true` | Register `rename` when LSP is enabled. |
 | `tools.refactor` | `true` | Register `refactor` when LSP is enabled. |
+| `tools.change` | `true` | Register `change`. |
 | `cargo.path` | PATH `cargo` | Optional Cargo executable override. |
 | `gate.hard_timeout_ms` | `600000` | One Cargo operation deadline. |
 | `gate.debounce_ms` | `500` | Stable-input debounce. |
@@ -99,6 +128,12 @@ use the platform path-list separator.
 | `docs.timeout_ms` | `300000` | Documentation resolution deadline. |
 | `docs.fallback` | `auto` | `auto`, `local`, `network`, or `off`. |
 | `docs.cache_dir` | platform `agz-rust-coder/docs` | Server-owned docs cache. |
+| `change.scratch_dir` | platform `agz-rust-coder/state/change` | Server-owned changeset scratch outside authorized roots. |
+| `change.max_active` | `4` | Concurrent active changes per server. |
+| `change.max_files` | `20000` | Captured files per change. |
+| `change.max_bytes` | `268435456` | Captured candidate bytes per change. |
+| `change.ttl_ms` | `86400000` | Orphan and discarded scratch retention before the startup sweep. |
+| `change.max_revisions` | `32` | Stage revisions per change. |
 | `limits.max_rename_edits` | `200` | Rename edit cap. |
 | `limits.max_refactor_edits` | `200` | Refactor edit cap. |
 | `limits.process_output_bytes` | `8388608` | Combined child-output cap. |

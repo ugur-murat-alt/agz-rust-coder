@@ -28,6 +28,7 @@ use super::{
     client_roots::{CancellationBridge, WorkspaceRequest},
 };
 use crate::{
+    change::{ChangeAction, ChangeOutcome, ChangeRequest, NewFileInput, PatchInput},
     config::{Config, ConfigError, DocsFallback as ConfigDocsFallback, WorkspaceCode},
     docs::{
         DocsFallback as DomainDocsFallback, DocsInput as DomainDocsInput, DocsOptions,
@@ -116,6 +117,42 @@ pub struct CheckInput {
     #[serde(default)]
     pub detail: CheckDetail,
 }
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChangeInput {
+    pub action: ChangeAction,
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub dir: Option<String>,
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub change_id: Option<String>,
+    #[serde(default)]
+    #[schemars(range(min = 0))]
+    pub expected_revision: Option<u64>,
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub base_identity: Option<String>,
+    #[serde(default)]
+    #[schemars(length(max = 512))]
+    pub patches: Vec<PatchInput>,
+    #[serde(default)]
+    #[schemars(length(max = 512))]
+    pub new_files: Vec<NewFileInput>,
+    #[serde(default)]
+    pub options: crate::gate::ValidationOptions,
+    #[serde(default)]
+    pub target: CheckTarget,
+    #[serde(default)]
+    pub timings: bool,
+    #[serde(default)]
+    pub detail: CheckDetail,
+}
+
+pub type ChangeOutput = ToolOutput<ChangeData>;
+
+pub use crate::change::ChangeData;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -568,6 +605,13 @@ pub fn tool_definitions(config: &Config) -> Vec<Tool> {
                 semantic_annotations(),
             ));
         }
+    }
+    if config.tools.change {
+        tools.push(tool::<ChangeInput, ChangeData>(
+            "change",
+            "Create, stage, validate, export, and discard a revision-bound changeset in server-owned scratch.",
+            ToolAnnotations::new().destructive(true).open_world(true),
+        ));
     }
     tools
 }
@@ -1359,6 +1403,46 @@ impl ServerHandler for RustCoderServer {
                     .await,
                 ))
             }
+            "change" => {
+                let input: ChangeInput = parse_input(arguments)?;
+                validate_change(&input)?;
+                let Ok(_permit) = self.state.try_admit() else {
+                    return Ok(CallToolResponse::Complete(resource_blocked_change(
+                        &self.state,
+                        input.action,
+                    )));
+                };
+                if self.state.is_shutting_down() {
+                    return Ok(CallToolResponse::Complete(resource_blocked_change(
+                        &self.state,
+                        input.action,
+                    )));
+                }
+                let workspace = match self.resolve_workspace(input.dir.as_deref(), &context).await {
+                    Ok(workspace) => workspace,
+                    Err(reason) => {
+                        return Ok(CallToolResponse::Complete(inconclusive_change(
+                            &self.state,
+                            input.action,
+                            reason,
+                        )));
+                    }
+                };
+                let cancellation =
+                    workspace.cancellation(context.ct.clone(), self.state.shutdown_token());
+                let request = change_request(&input);
+                let Some(service) = self.state.change_service() else {
+                    return Err(McpError::method_not_found::<CallToolRequestMethod>());
+                };
+                let outcome = service
+                    .execute(request, &workspace.root, cancellation.token(), None)
+                    .await;
+                Ok(CallToolResponse::Complete(change_result(
+                    &self.state,
+                    outcome,
+                    &workspace.root,
+                )))
+            }
             _ => Err(McpError::method_not_found::<CallToolRequestMethod>()),
         }
     }
@@ -1656,18 +1740,202 @@ fn validate_refactor(input: &RefactorInput) -> Result<(), McpError> {
         .try_for_each(|item| validate_string(item, "only item"))
 }
 
+fn validate_change(input: &ChangeInput) -> Result<(), McpError> {
+    validate_dir(input.dir.as_deref())?;
+    let rejects_extra = |condition: bool, message: &str| -> Result<(), McpError> {
+        if condition {
+            return Err(McpError::invalid_params(message.to_owned(), None));
+        }
+        Ok(())
+    };
+    match input.action {
+        ChangeAction::Create => {
+            rejects_extra(
+                input.change_id.is_some()
+                    || input.expected_revision.is_some()
+                    || input.base_identity.is_some()
+                    || !input.patches.is_empty()
+                    || !input.new_files.is_empty(),
+                "action=create accepts only dir",
+            )?;
+        }
+        ChangeAction::Stage => {
+            if input.change_id.is_none() {
+                return Err(McpError::invalid_params(
+                    "action=stage requires changeId",
+                    None,
+                ));
+            }
+            if input.expected_revision.is_none() {
+                return Err(McpError::invalid_params(
+                    "action=stage requires expectedRevision",
+                    None,
+                ));
+            }
+            if input.base_identity.is_none() {
+                return Err(McpError::invalid_params(
+                    "action=stage requires baseIdentity",
+                    None,
+                ));
+            }
+            if input.patches.is_empty() && input.new_files.is_empty() {
+                return Err(McpError::invalid_params(
+                    "action=stage requires at least one patch or new file",
+                    None,
+                ));
+            }
+            for patch in &input.patches {
+                validate_string(&patch.file, "patches.file")?;
+                if patch.old_string.trim().is_empty() {
+                    return Err(McpError::invalid_params(
+                        "patches.oldString cannot be empty",
+                        None,
+                    ));
+                }
+            }
+            for file in &input.new_files {
+                validate_string(&file.file, "newFiles.file")?;
+                if file.content.len() > 1_048_576 {
+                    return Err(McpError::invalid_params(
+                        "newFiles.content is limited to 1 MiB per file",
+                        None,
+                    ));
+                }
+            }
+        }
+        ChangeAction::Inspect | ChangeAction::Export | ChangeAction::Discard => {
+            if input.change_id.is_none() {
+                return Err(McpError::invalid_params(
+                    "this action requires changeId",
+                    None,
+                ));
+            }
+        }
+        ChangeAction::Validate => {
+            if input.change_id.is_none() {
+                return Err(McpError::invalid_params(
+                    "action=validate requires changeId",
+                    None,
+                ));
+            }
+            if input.expected_revision.is_none() {
+                return Err(McpError::invalid_params(
+                    "action=validate requires expectedRevision",
+                    None,
+                ));
+            }
+            if input.base_identity.is_none() {
+                return Err(McpError::invalid_params(
+                    "action=validate requires baseIdentity",
+                    None,
+                ));
+            }
+            input
+                .options
+                .validate(map_check_target(input.target))
+                .map_err(|message| McpError::invalid_params(message, None))?;
+        }
+    }
+    if !matches!(input.action, ChangeAction::Validate)
+        && (input.timings
+            || input.target != CheckTarget::Check
+            || input.detail != CheckDetail::Compact)
+    {
+        return Err(McpError::invalid_params(
+            "target, timings, and detail are accepted only for action=validate",
+            None,
+        ));
+    }
+    if !matches!(input.action, ChangeAction::Validate)
+        && input.options != crate::gate::ValidationOptions::default()
+    {
+        return Err(McpError::invalid_params(
+            "options is accepted only for action=validate",
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn change_request(input: &ChangeInput) -> ChangeRequest {
+    ChangeRequest {
+        action: input.action,
+        change_id: input.change_id.clone(),
+        expected_revision: input.expected_revision,
+        base_identity: input.base_identity.clone(),
+        patches: input.patches.clone(),
+        new_files: input.new_files.clone(),
+        target: map_check_target(input.target),
+        options: input.options.clone(),
+        detail: match input.detail {
+            CheckDetail::Compact => crate::gate::GateDetail::Compact,
+            CheckDetail::Standard => crate::gate::GateDetail::Standard,
+            CheckDetail::Full => crate::gate::GateDetail::Full,
+        },
+        timings: input.timings,
+    }
+}
+
+fn map_check_target(target: CheckTarget) -> GateTargetId {
+    match target {
+        CheckTarget::Check => GateTargetId::Check,
+        CheckTarget::Clippy => GateTargetId::Clippy,
+        CheckTarget::Test => GateTargetId::Test,
+        CheckTarget::Doc => GateTargetId::Doc,
+        CheckTarget::Fmt => GateTargetId::Fmt,
+        CheckTarget::All => GateTargetId::All,
+    }
+}
+
+fn change_result(state: &AppState, outcome: ChangeOutcome, root: &WorkspaceRoot) -> CallToolResult {
+    ToolOutput::new("change", outcome.status, outcome.summary, outcome.data)
+        .with_workspace(super::WorkspaceInfo {
+            requested_dir: root.path().display().to_string(),
+            package_root: root.path().display().to_string(),
+            workspace_root: root.authority_path().display().to_string(),
+            manifest_path: String::new(),
+        })
+        .with_untrusted_data()
+        .into_call_tool_result(state.max_output_bytes(), outcome.is_error)
+}
+
+fn empty_change_data(action: ChangeAction) -> ChangeData {
+    ChangeData {
+        action: action.as_str().to_owned(),
+        state: "absent".to_owned(),
+        ..ChangeData::default()
+    }
+}
+
+fn resource_blocked_change(state: &AppState, action: ChangeAction) -> CallToolResult {
+    let mut data = empty_change_data(action);
+    data.reason = RESOURCE_BLOCKED_REASON.to_owned();
+    ToolOutput::new(
+        "change",
+        "RESOURCE_BLOCKED",
+        "The change request could not be admitted.",
+        data,
+    )
+    .into_call_tool_result(state.max_output_bytes(), true)
+}
+
+fn inconclusive_change(state: &AppState, action: ChangeAction, reason: String) -> CallToolResult {
+    let mut data = empty_change_data(action);
+    data.reason = reason;
+    ToolOutput::new(
+        "change",
+        "INCONCLUSIVE",
+        "The change workspace could not be resolved.",
+        data,
+    )
+    .into_call_tool_result(state.max_output_bytes(), true)
+}
+
 fn gate_request(input: &CheckInput, client_roots: ClientRoots, root_epoch: u64) -> GateRequest {
     GateRequest {
         options: input.options.clone(),
         directory: input.dir.as_deref().map(PathBuf::from),
-        target: match input.target {
-            CheckTarget::Check => GateTargetId::Check,
-            CheckTarget::Clippy => GateTargetId::Clippy,
-            CheckTarget::Test => GateTargetId::Test,
-            CheckTarget::Doc => GateTargetId::Doc,
-            CheckTarget::Fmt => GateTargetId::Fmt,
-            CheckTarget::All => GateTargetId::All,
-        },
+        target: map_check_target(input.target),
         timings: input.timings,
         detail: match input.detail {
             CheckDetail::Compact => GateDetail::Compact,
@@ -2513,6 +2781,86 @@ mod tests {
                 Some(status.as_str().to_ascii_uppercase().as_str())
             );
         }
+    }
+
+    #[test]
+    fn change_actions_validate_required_fields_without_echoing_input() {
+        let base = ChangeInput {
+            action: ChangeAction::Create,
+            dir: Some("/workspace".to_owned()),
+            change_id: None,
+            expected_revision: None,
+            base_identity: None,
+            patches: Vec::new(),
+            new_files: Vec::new(),
+            options: crate::gate::ValidationOptions::default(),
+            target: CheckTarget::Check,
+            timings: false,
+            detail: CheckDetail::Compact,
+        };
+        assert!(validate_change(&base).is_ok());
+
+        let mut create_with_patch = base.clone();
+        create_with_patch.patches = vec![PatchInput {
+            file: "src/lib.rs".to_owned(),
+            old_string: "a".to_owned(),
+            new_string: "b".to_owned(),
+        }];
+        assert!(validate_change(&create_with_patch).is_err());
+
+        let mut stage_without_revision = base.clone();
+        stage_without_revision.action = ChangeAction::Stage;
+        stage_without_revision.change_id = Some("ch-1-1-1".to_owned());
+        stage_without_revision.base_identity = Some("base".to_owned());
+        stage_without_revision.patches = vec![PatchInput {
+            file: "src/lib.rs".to_owned(),
+            old_string: "a".to_owned(),
+            new_string: "b".to_owned(),
+        }];
+        assert!(validate_change(&stage_without_revision).is_err());
+        stage_without_revision.expected_revision = Some(1);
+        assert!(validate_change(&stage_without_revision).is_ok());
+
+        let mut inspect_without_id = base.clone();
+        inspect_without_id.action = ChangeAction::Inspect;
+        assert!(validate_change(&inspect_without_id).is_err());
+
+        let mut validate_without_pins = base.clone();
+        validate_without_pins.action = ChangeAction::Validate;
+        validate_without_pins.change_id = Some("ch-1-1-1".to_owned());
+        assert!(
+            validate_change(&validate_without_pins).is_err(),
+            "validate must require expectedRevision and baseIdentity"
+        );
+
+        let mut validate_with_filter = validate_without_pins.clone();
+        validate_with_filter.expected_revision = Some(0);
+        validate_with_filter.base_identity = Some("base".to_owned());
+        validate_with_filter.options.test_filter = Some("only_a_unit_test".to_owned());
+        assert!(validate_change(&validate_with_filter).is_err());
+        validate_with_filter.target = CheckTarget::Test;
+        assert!(validate_change(&validate_with_filter).is_ok());
+
+        let request = change_request(&validate_with_filter);
+        assert_eq!(request.action, ChangeAction::Validate);
+        assert_eq!(request.target, GateTargetId::Test);
+    }
+
+    #[test]
+    fn change_input_accepts_expected_revision_zero() {
+        let input: ChangeInput = serde_json::from_value(serde_json::json!({
+            "action": "stage",
+            "changeId": "ch-1-1-1",
+            "expectedRevision": 0,
+            "baseIdentity": "base",
+            "patches": [
+                { "file": "src/lib.rs", "oldString": "a", "newString": "b" }
+            ]
+        }))
+        .expect("revision 0 must deserialize");
+        assert_eq!(input.expected_revision, Some(0));
+        assert!(validate_change(&input).is_ok());
+        assert_eq!(change_request(&input).expected_revision, Some(0));
     }
 
     #[tokio::test]

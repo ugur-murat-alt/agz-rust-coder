@@ -15,7 +15,8 @@
     "implementations",
     "hierarchy",
     "rename",
-    "refactor"
+    "refactor",
+    "change"
   ],
   "prompts": ["workflow"],
   "resource_count": 4,

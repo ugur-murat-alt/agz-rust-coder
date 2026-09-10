@@ -8,6 +8,14 @@
     "inputSchemaHash": "fnv1a64:ca577e7aa95df8a5",
     "outputSchemaHash": "fnv1a64:70e2a6fdc654e1e8"
   },
+  "change": {
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": true
+    },
+    "inputSchemaHash": "fnv1a64:8d56e1362cc12877",
+    "outputSchemaHash": "fnv1a64:cd3c05d1a2347ba8"
+  },
   "check": {
     "annotations": {
       "destructiveHint": true,

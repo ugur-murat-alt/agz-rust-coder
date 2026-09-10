@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod cache;
+pub mod change;
 pub mod config;
 pub mod diagnostics;
 pub mod docs;

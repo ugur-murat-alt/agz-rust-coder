@@ -1,0 +1,2132 @@
+//! Revision-bound changeset service.
+//!
+//! Source reads happen only during `create`, from the authorized original
+//! workspace. Every later action operates on the server-owned candidate copy.
+//! Candidate validation runs through the existing [`CheckService`] with a
+//! dedicated `RootGuard` and an isolated server-owned Cargo target directory,
+//! so a build never touches the original workspace or target directory.
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt, fs,
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
+use sha2::{Digest, Sha256};
+use tokio::sync::Mutex as AsyncMutex;
+use tokio_util::sync::CancellationToken;
+
+use crate::{
+    config::{ChangeConfig, Config, GateCache},
+    gate::{GateEvidence, GateRequest, GateStatus, ProgressCallback},
+    process::ProcessSupervisor,
+    tools::CheckService,
+    workspace::{
+        AuthorizedRoot, ClientRoots, MetadataService, RootGuard, WorkspaceRoot,
+        metadata::MetadataControl, select_in_root,
+    },
+};
+
+use super::capture::{
+    CaptureError, CaptureLimits, capture_tree, manifest_hash, relative_path_string, sha256_hex,
+};
+use super::model::{
+    CHANGE_ID_PREFIX, CHANGE_SCHEMA_VERSION, CaptureSummary, ChangeAction, ChangeCaptureData,
+    ChangeData, ChangeEvidenceData, ChangeNewFileData, ChangeOutcome, ChangePatchData,
+    ChangeRecord, ChangeRequest, ChangeSourceHashData, MAX_CHANGED_FILES_IN_RECORD,
+    MAX_COMMAND_CHARS, MAX_LISTED_CHANGED_FILES, MAX_LISTED_EVIDENCE, MAX_LISTED_HASHES,
+    MAX_RECORDED_EVIDENCE, NewFileInput, PatchInput, RecordState, StoredEvidence, StoredHash,
+    StoredNewFile, StoredPatch,
+};
+use super::patch::{CandidateLimits, apply_plan, plan_patches};
+use super::store::{
+    ChangeStore, MAX_CLEANUP_WARNINGS, is_valid_change_id, normalize_lexical, now_ms, truncate,
+};
+
+const LOCK_STRIPES: usize = 64;
+
+static CHANGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Action-specific failure carrying cleanup warnings for the caller.
+#[derive(Debug)]
+struct ChangeFailure {
+    status: &'static str,
+    reason: String,
+    warnings: Vec<String>,
+}
+
+impl ChangeFailure {
+    fn new(status: &'static str, reason: impl Into<String>) -> Self {
+        Self {
+            status,
+            reason: reason.into(),
+            warnings: Vec::new(),
+        }
+    }
+}
+
+pub struct ChangeService {
+    config: Config,
+    roots: Arc<RootGuard>,
+    supervisor: ProcessSupervisor,
+    store: ChangeStore,
+    locks: Vec<Arc<AsyncMutex<()>>>,
+    cleanup_warnings: Mutex<Vec<String>>,
+}
+
+impl fmt::Debug for ChangeService {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChangeService")
+            .field("scratch", &self.store.root())
+            .field("max_active", &self.store.max_active())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ChangeService {
+    /// Creates the service, sweeps orphan/expired scratch entries, and recovers
+    /// scratch left behind by an interrupted server process.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded reason when the scratch root cannot be created or is
+    /// a symlink.
+    pub fn new(
+        config: Config,
+        roots: Arc<RootGuard>,
+        supervisor: ProcessSupervisor,
+    ) -> Result<Self, String> {
+        let store = ChangeStore::new(&config.change)?;
+        let sweep = store.sweep();
+        let recovery = store.recover_interrupted();
+        let mut cleanup_warnings = Vec::new();
+        for warning in sweep.warnings.iter().chain(recovery.warnings.iter()) {
+            if cleanup_warnings.len() < MAX_CLEANUP_WARNINGS {
+                cleanup_warnings.push(warning.clone());
+            }
+            tracing::warn!(warning = %warning, "change scratch sweep left cleanup residue");
+        }
+        if sweep.removed > 0 {
+            tracing::info!(
+                removed = sweep.removed,
+                "change scratch sweep removed entries"
+            );
+        }
+        if recovery.failed > 0 || recovery.removed > 0 {
+            tracing::warn!(
+                failed = recovery.failed,
+                removed = recovery.removed,
+                "change scratch recovery handled interrupted work"
+            );
+        }
+        Ok(Self {
+            config,
+            roots,
+            supervisor,
+            store,
+            locks: (0..LOCK_STRIPES)
+                .map(|_| Arc::new(AsyncMutex::new(())))
+                .collect(),
+            cleanup_warnings: Mutex::new(cleanup_warnings),
+        })
+    }
+
+    pub fn scratch_root(&self) -> &Path {
+        self.store.root()
+    }
+
+    /// Executes one change action. `workspace` is the request-authorized root
+    /// used only to capture the original or to compare the authorization epoch.
+    pub async fn execute(
+        &self,
+        request: ChangeRequest,
+        workspace: &WorkspaceRoot,
+        cancellation: CancellationToken,
+        progress: Option<ProgressCallback>,
+    ) -> ChangeOutcome {
+        match request.action {
+            ChangeAction::Create => self.create(workspace, cancellation).await,
+            ChangeAction::Stage => self.stage(request, workspace, cancellation).await,
+            ChangeAction::Inspect => self.inspect(request),
+            ChangeAction::Validate => {
+                self.validate(request, workspace, cancellation, progress)
+                    .await
+            }
+            ChangeAction::Export => self.export(request, workspace),
+            ChangeAction::Discard => self.discard(request).await,
+        }
+    }
+
+    fn stripe(&self, id: &str) -> Arc<AsyncMutex<()>> {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for byte in id.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x1000_0000_01b3);
+        }
+        let index = usize::try_from(hash % LOCK_STRIPES as u64).unwrap_or(0);
+        Arc::clone(&self.locks[index])
+    }
+
+    fn take_cleanup_warnings(&self) -> Vec<String> {
+        self.cleanup_warnings
+            .lock()
+            .map(|warnings| warnings.clone())
+            .unwrap_or_default()
+    }
+
+    fn push_cleanup_warnings(&self, warnings: &[String]) {
+        if warnings.is_empty() {
+            return;
+        }
+        if let Ok(mut current) = self.cleanup_warnings.lock() {
+            for warning in warnings {
+                if current.len() >= MAX_CLEANUP_WARNINGS {
+                    break;
+                }
+                if !current.contains(warning) {
+                    current.push(warning.clone());
+                }
+            }
+        }
+    }
+
+    fn error_outcome(
+        &self,
+        action: ChangeAction,
+        status: &'static str,
+        summary: impl Into<String>,
+        reason: impl Into<String>,
+        change_id: Option<&str>,
+    ) -> ChangeOutcome {
+        let mut data = ChangeData {
+            action: action.as_str().to_owned(),
+            change_id: change_id.map(str::to_owned),
+            state: "absent".to_owned(),
+            ..ChangeData::default()
+        };
+        data.reason = reason.into();
+        data.cleanup_warnings = self.take_cleanup_warnings();
+        ChangeOutcome {
+            status,
+            summary: summary.into(),
+            is_error: true,
+            data,
+        }
+    }
+
+    fn finish(
+        &self,
+        status: &'static str,
+        summary: impl Into<String>,
+        is_error: bool,
+        mut data: ChangeData,
+    ) -> ChangeOutcome {
+        let mut warnings = self.take_cleanup_warnings();
+        for warning in &data.cleanup_warnings {
+            if !warnings.contains(warning) && warnings.len() < MAX_CLEANUP_WARNINGS {
+                warnings.push(warning.clone());
+            }
+        }
+        data.cleanup_warnings = warnings;
+        ChangeOutcome {
+            status,
+            summary: summary.into(),
+            is_error,
+            data,
+        }
+    }
+
+    /// Re-reads the pinned record while the per-change file lock is held.
+    ///
+    /// `validate` and `export` read the record before taking the lock so that a
+    /// missing or terminal change is refused without creating scratch. A stage
+    /// in another server process can publish a new revision in that window, so
+    /// the state candidate bytes are verified against must be re-read and
+    /// compared with the pinned record under the lock.
+    fn reload_pinned_record(
+        &self,
+        action: ChangeAction,
+        id: &str,
+        pinned: &ChangeRecord,
+    ) -> Result<ChangeRecord, Box<ChangeOutcome>> {
+        let record = match self.store.load(id) {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                return Err(Box::new(self.error_outcome(
+                    action,
+                    "NOT_FOUND",
+                    "The change id has no server-owned scratch.",
+                    "no change record exists",
+                    Some(id),
+                )));
+            }
+            Err(reason) => {
+                return Err(Box::new(self.error_outcome(
+                    action,
+                    "INVALID",
+                    "The change record could not be read.",
+                    reason,
+                    Some(id),
+                )));
+            }
+        };
+        let unchanged = record.revision == pinned.revision
+            && record.state == pinned.state
+            && record.base_identity == pinned.base_identity
+            && record.workspace_epoch == pinned.workspace_epoch
+            && record.applying_revision == pinned.applying_revision;
+        if unchanged {
+            return Ok(record);
+        }
+        let status = match record.state {
+            RecordState::FailedInconsistent => "FAILED_INCONSISTENT",
+            RecordState::Discarded => "DISCARDED",
+            RecordState::Applying | RecordState::Capturing => "FAILED_INCONSISTENT",
+            RecordState::Ready => "STALE",
+        };
+        let reason = format!(
+            "the change moved from {} revision {} to {} revision {} before its bytes could be verified",
+            pinned.state.as_str(),
+            pinned.revision,
+            record.state.as_str(),
+            record.revision
+        );
+        Err(Box::new(self.finish(
+            status,
+            "The change changed before verification; no evidence was recorded.",
+            true,
+            refused_data(action, &record, reason),
+        )))
+    }
+
+    fn failure_outcome(
+        &self,
+        action: ChangeAction,
+        change_id: Option<&str>,
+        failure: ChangeFailure,
+    ) -> ChangeOutcome {
+        self.push_cleanup_warnings(&failure.warnings);
+        let mut data = ChangeData {
+            action: action.as_str().to_owned(),
+            change_id: change_id.map(str::to_owned),
+            state: "absent".to_owned(),
+            ..ChangeData::default()
+        };
+        data.reason = failure.reason;
+        let summary = match failure.status {
+            "INCOMPLETE_INPUTS" => "The workspace could not be captured completely.",
+            "CANCELLED" => "The action was cancelled before completion.",
+            "TIMEOUT" => "The action timed out before completion.",
+            "RESOURCE_BLOCKED" => "The active change limit was reached.",
+            "PATCH_REJECTED" => "No patch was applied; a patch failed pre-validation.",
+            "STALE" => "The change revision/base identity is stale.",
+            "FAILED_INCONSISTENT" => {
+                "The candidate copy is inconsistent and further work is refused."
+            }
+            _ => "The change action did not complete.",
+        };
+        let is_error = true;
+        self.finish(failure.status, summary, is_error, data)
+    }
+
+    async fn create(
+        &self,
+        workspace: &WorkspaceRoot,
+        cancellation: CancellationToken,
+    ) -> ChangeOutcome {
+        if self.store.active_count() >= self.store.max_active() {
+            return self.error_outcome(
+                ChangeAction::Create,
+                "RESOURCE_BLOCKED",
+                "The active change limit was reached.",
+                format!(
+                    "at most {} active changes are allowed; discard or let one expire",
+                    self.store.max_active()
+                ),
+                None,
+            );
+        }
+        let roots = Arc::clone(&self.roots);
+        let config = self.config.change.clone();
+        let cargo = crate::tools::check::resolve_cargo(self.config.cargo.path.as_deref());
+        let store = self.store.clone();
+        let workspace = workspace.clone();
+        let cancellation_for_task = cancellation.clone();
+        let deadline = Instant::now() + Duration::from_millis(self.config.gate.hard_timeout_ms);
+        let control = MetadataControl::new(
+            deadline,
+            cancellation.clone(),
+            self.supervisor.clone(),
+            tokio::runtime::Handle::current(),
+        );
+        let joined = tokio::task::spawn_blocking(move || {
+            create_blocking(
+                roots,
+                &config,
+                &cargo,
+                &store,
+                &workspace,
+                &cancellation_for_task,
+                &control,
+            )
+        })
+        .await;
+        match joined {
+            Ok(Ok(record)) => {
+                let data = data_for_record(ChangeAction::Create, &record, None);
+                self.finish(
+                    "CREATED",
+                    "Captured the complete workspace into server-owned scratch.",
+                    false,
+                    data,
+                )
+            }
+            Ok(Err(failure)) => self.failure_outcome(ChangeAction::Create, None, failure),
+            Err(error) => self.error_outcome(
+                ChangeAction::Create,
+                "UNAVAILABLE",
+                "The bounded capture worker did not complete.",
+                error.to_string(),
+                None,
+            ),
+        }
+    }
+
+    async fn stage(
+        &self,
+        request: ChangeRequest,
+        workspace: &WorkspaceRoot,
+        cancellation: CancellationToken,
+    ) -> ChangeOutcome {
+        let Some(id) = request.change_id.clone() else {
+            return self.error_outcome(
+                ChangeAction::Stage,
+                "INVALID",
+                "action=stage requires changeId.",
+                "changeId is required",
+                None,
+            );
+        };
+        if !is_valid_change_id(&id) {
+            return self.error_outcome(
+                ChangeAction::Stage,
+                "INVALID",
+                "The change id is not valid.",
+                "changeId is not a valid server-issued id",
+                Some(&id),
+            );
+        }
+        let _stripe = self.stripe(&id).lock_owned().await;
+        let store = self.store.clone();
+        let config = self.config.change.clone();
+        let expected = request.expected_revision;
+        let base = request.base_identity.clone();
+        let patches = request.patches.clone();
+        let new_files = request.new_files.clone();
+        let cancellation_for_task = cancellation.clone();
+        let id_for_task = id.clone();
+        let workspace_epoch = workspace.epoch();
+        let joined = tokio::task::spawn_blocking(move || {
+            stage_blocking(
+                &store,
+                &config,
+                &id_for_task,
+                workspace_epoch,
+                expected,
+                base.as_deref(),
+                &patches,
+                &new_files,
+                &cancellation_for_task,
+            )
+        })
+        .await;
+        match joined {
+            Ok(Ok(record)) => {
+                let data = data_for_record(ChangeAction::Stage, &record, None);
+                self.finish(
+                    "STAGED",
+                    "Patches were validated and applied to the candidate copy.",
+                    false,
+                    data,
+                )
+            }
+            Ok(Err(failure)) => self.failure_outcome(ChangeAction::Stage, Some(&id), failure),
+            Err(error) => self.error_outcome(
+                ChangeAction::Stage,
+                "UNAVAILABLE",
+                "The bounded patch worker did not complete.",
+                error.to_string(),
+                Some(&id),
+            ),
+        }
+    }
+
+    fn inspect(&self, request: ChangeRequest) -> ChangeOutcome {
+        let Some(id) = request.change_id.clone() else {
+            return self.error_outcome(
+                ChangeAction::Inspect,
+                "INVALID",
+                "action=inspect requires changeId.",
+                "changeId is required",
+                None,
+            );
+        };
+        let record = match self.store.load(&id) {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                return self.error_outcome(
+                    ChangeAction::Inspect,
+                    "NOT_FOUND",
+                    "The change id has no server-owned scratch.",
+                    "no change record exists",
+                    Some(&id),
+                );
+            }
+            Err(reason) => {
+                return self.error_outcome(
+                    ChangeAction::Inspect,
+                    "INVALID",
+                    "The change record could not be read.",
+                    reason,
+                    Some(&id),
+                );
+            }
+        };
+        let data = data_for_record(ChangeAction::Inspect, &record, None);
+        self.finish(
+            "INSPECTED",
+            "Returned the bounded change record.",
+            false,
+            data,
+        )
+    }
+
+    async fn validate(
+        &self,
+        request: ChangeRequest,
+        workspace: &WorkspaceRoot,
+        cancellation: CancellationToken,
+        progress: Option<ProgressCallback>,
+    ) -> ChangeOutcome {
+        let Some(id) = request.change_id.clone() else {
+            return self.error_outcome(
+                ChangeAction::Validate,
+                "INVALID",
+                "action=validate requires changeId.",
+                "changeId is required",
+                None,
+            );
+        };
+        if !is_valid_change_id(&id) {
+            return self.error_outcome(
+                ChangeAction::Validate,
+                "INVALID",
+                "The change id is not valid.",
+                "changeId is not a valid server-issued id",
+                Some(&id),
+            );
+        }
+        let _stripe = self.stripe(&id).lock_owned().await;
+        let record = match self.store.load(&id) {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                return self.error_outcome(
+                    ChangeAction::Validate,
+                    "NOT_FOUND",
+                    "The change id has no server-owned scratch.",
+                    "no change record exists",
+                    Some(&id),
+                );
+            }
+            Err(reason) => {
+                return self.error_outcome(
+                    ChangeAction::Validate,
+                    "INVALID",
+                    "The change record could not be read.",
+                    reason,
+                    Some(&id),
+                );
+            }
+        };
+        match record.state {
+            RecordState::FailedInconsistent => {
+                return self.finish(
+                    "FAILED_INCONSISTENT",
+                    "A failed partial apply cannot be validated.",
+                    true,
+                    refused_data(
+                        ChangeAction::Validate,
+                        &record,
+                        "the candidate may be partially applied; validation is refused",
+                    ),
+                );
+            }
+            RecordState::Discarded => {
+                return self.finish(
+                    "DISCARDED",
+                    "The change scratch was discarded.",
+                    true,
+                    refused_data(
+                        ChangeAction::Validate,
+                        &record,
+                        "the candidate copy was discarded",
+                    ),
+                );
+            }
+            RecordState::Applying | RecordState::Capturing => {
+                let reason = format!(
+                    "the change is still {}; no completed revision was recorded",
+                    record.state.as_str()
+                );
+                return self.finish(
+                    "FAILED_INCONSISTENT",
+                    "An unrecorded candidate state cannot be validated.",
+                    true,
+                    refused_data(ChangeAction::Validate, &record, reason),
+                );
+            }
+            RecordState::Ready => {}
+        }
+        // Pinning is required for validate: the returned evidence must identify
+        // the exact revision and base it was produced for.
+        let Some(expected_revision) = request.expected_revision else {
+            return self.error_outcome(
+                ChangeAction::Validate,
+                "INVALID",
+                "action=validate requires expectedRevision.",
+                "expectedRevision is required",
+                Some(&id),
+            );
+        };
+        if expected_revision != record.revision {
+            let reason = format!(
+                "expectedRevision {} does not match current revision {}",
+                expected_revision, record.revision
+            );
+            return self.finish(
+                "STALE",
+                "The requested revision is not current; no fresh evidence was recorded.",
+                true,
+                refused_data(ChangeAction::Validate, &record, reason),
+            );
+        }
+        let Some(base_identity) = request.base_identity.as_deref() else {
+            return self.error_outcome(
+                ChangeAction::Validate,
+                "INVALID",
+                "action=validate requires baseIdentity.",
+                "baseIdentity is required",
+                Some(&id),
+            );
+        };
+        if base_identity != record.base_identity {
+            return self.finish(
+                "STALE",
+                "The requested base identity is stale; no fresh evidence was recorded.",
+                true,
+                refused_data(
+                    ChangeAction::Validate,
+                    &record,
+                    "baseIdentity does not match the captured base",
+                ),
+            );
+        }
+        if record.workspace_epoch != workspace.epoch() {
+            let reason = format!(
+                "authorization root epoch changed from {} to {}; no fresh evidence was recorded",
+                record.workspace_epoch,
+                workspace.epoch()
+            );
+            return self.finish(
+                "STALE",
+                "The authorization epoch changed; evidence is not usable.",
+                true,
+                refused_data(ChangeAction::Validate, &record, reason),
+            );
+        }
+        if cancellation.is_cancelled() {
+            return self.finish(
+                "CANCELLED",
+                "Validation was cancelled before any Cargo process started.",
+                true,
+                refused_data(
+                    ChangeAction::Validate,
+                    &record,
+                    "the validation request was cancelled before it started",
+                ),
+            );
+        }
+        let _file_lock = match self.store.try_lock(&id) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                return self.finish(
+                    "CHANGE_BUSY",
+                    "The change scratch is locked by another process.",
+                    true,
+                    refused_data(
+                        ChangeAction::Validate,
+                        &record,
+                        "another server process holds this change lock",
+                    ),
+                );
+            }
+            Err(reason) => {
+                return self.error_outcome(
+                    ChangeAction::Validate,
+                    "UNAVAILABLE",
+                    "The change lock could not be opened.",
+                    reason,
+                    Some(&id),
+                );
+            }
+        };
+        // The record was read before the file lock; a stage in another server
+        // process may have published a new revision since. Re-read under the
+        // lock so verification and evidence bind to the locked revision.
+        let record = match self.reload_pinned_record(ChangeAction::Validate, &id, &record) {
+            Ok(record) => record,
+            Err(outcome) => return *outcome,
+        };
+
+        let candidate_root = self.store.candidate_dir(&id);
+        if fs::symlink_metadata(&candidate_root)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return self.error_outcome(
+                ChangeAction::Validate,
+                "FAILED_INCONSISTENT",
+                "The candidate copy is a symlink and will not be compiled.",
+                "candidate copy was replaced by a symlink",
+                Some(&id),
+            );
+        }
+        if record.applying_revision.is_some() {
+            return self.finish(
+                "FAILED_INCONSISTENT",
+                "An interrupted stage cannot be validated.",
+                true,
+                refused_data(
+                    ChangeAction::Validate,
+                    &record,
+                    "an interrupted stage left the candidate state unrecorded",
+                ),
+            );
+        }
+        let mut activity = record.clone();
+        if let Err(error) = self.store.save(&mut activity) {
+            self.push_cleanup_warnings(&[error]);
+        }
+        if let Err(reason) = verify_candidate_bytes(&self.store, &id, &record) {
+            let mut failed = record.clone();
+            failed.state = RecordState::FailedInconsistent;
+            failed.applying_revision = None;
+            failed.evidence.iter_mut().for_each(|evidence| {
+                evidence.fresh = false;
+                evidence.authoritative = false;
+            });
+            if failed.cleanup_warnings.len() < MAX_CLEANUP_WARNINGS {
+                failed.cleanup_warnings.push(truncate(&reason, 512));
+            }
+            let _ = self.store.save(&mut failed);
+            return self.finish(
+                "FAILED_INCONSISTENT",
+                "The candidate bytes do not match the recorded revision; no evidence was recorded.",
+                true,
+                refused_data(ChangeAction::Validate, &failed, reason),
+            );
+        }
+        for root in &record.external_paths {
+            if !root.is_dir() {
+                return self.error_outcome(
+                    ChangeAction::Validate,
+                    "UNVERIFIABLE_DEPENDENCY",
+                    "An authorized external path dependency disappeared.",
+                    format!(
+                        "external path dependency {} is no longer an existing directory",
+                        root.display()
+                    ),
+                    Some(&id),
+                );
+            }
+        }
+        let mut dependency_roots = record
+            .dependency_roots
+            .iter()
+            .filter(|root| root.is_dir())
+            .cloned()
+            .collect::<Vec<_>>();
+        for root in &record.external_paths {
+            if !dependency_roots.contains(root) {
+                dependency_roots.push(root.clone());
+            }
+        }
+        let guard = match RootGuard::new([candidate_root.clone()], dependency_roots) {
+            Ok(guard) => Arc::new(guard),
+            Err(error) => {
+                return self.error_outcome(
+                    ChangeAction::Validate,
+                    "UNVERIFIABLE_DEPENDENCY",
+                    "External path dependencies could not be authorized for the candidate.",
+                    format!("candidate root guard failed: {error}"),
+                    Some(&id),
+                );
+            }
+        };
+        let mut config = self.config.clone();
+        config.gate.cache = GateCache::Isolated;
+        config.gate.cache_dir = self.store.cache_dir(&id);
+        let service = CheckService::new(config, Arc::clone(&guard));
+        let gate_request = GateRequest::new(candidate_root.clone(), request.target)
+            .with_options(request.options.clone())
+            .with_detail(request.detail)
+            .with_timings(request.timings)
+            .with_root_epoch(0);
+        let evidence = service
+            .run(gate_request, progress, Some(cancellation.clone()))
+            .await;
+        service.close().await;
+
+        let updated = match self.store.load(&id) {
+            Ok(Some(updated)) if updated.revision == record.revision => updated,
+            _ => {
+                let mut stale = record.clone();
+                stale.evidence.iter_mut().for_each(|evidence| {
+                    evidence.fresh = false;
+                    evidence.authoritative = false;
+                });
+                stale
+            }
+        };
+        let fresh = evidence_freshness(&evidence, &cancellation)
+            && updated.revision == record.revision
+            && workspace.epoch() == record.workspace_epoch;
+        let rows = evidence_rows(record.revision, fresh, &evidence);
+        let mut updated = updated;
+        updated.evidence.extend(rows);
+        if updated.evidence.len() > MAX_RECORDED_EVIDENCE {
+            let excess = updated.evidence.len() - MAX_RECORDED_EVIDENCE;
+            updated.evidence.drain(0..excess);
+        }
+        let mut save_error = None;
+        if let Err(error) = self.store.save(&mut updated) {
+            save_error = Some(error);
+        }
+        self.push_cleanup_warnings(&save_error.iter().cloned().collect::<Vec<_>>());
+        let status = if fresh {
+            match evidence.status {
+                GateStatus::FastPass | GateStatus::FullPass => "PASS",
+                GateStatus::Fail => "FAIL",
+                other => other.as_str(),
+            }
+        } else {
+            match evidence.status {
+                GateStatus::Cancelled => "CANCELLED",
+                GateStatus::Timeout => "TIMEOUT",
+                _ => "INCONCLUSIVE",
+            }
+        };
+        let verified = updated.current_revision_fresh_pass();
+        let mut data = data_for_record(ChangeAction::Validate, &updated, None);
+        data.verified = verified;
+        data.reason = match (&save_error, fresh) {
+            (Some(error), _) => format!("evidence could not be persisted: {error}"),
+            (None, true) => format!("{status} with fresh candidate evidence"),
+            (None, false) => "evidence is not usable for the current revision".to_owned(),
+        };
+        self.finish(
+            status,
+            "Candidate validation finished against the isolated copy.",
+            !matches!(status, "PASS" | "FAIL"),
+            data,
+        )
+    }
+
+    fn export(&self, request: ChangeRequest, workspace: &WorkspaceRoot) -> ChangeOutcome {
+        let Some(id) = request.change_id.clone() else {
+            return self.error_outcome(
+                ChangeAction::Export,
+                "INVALID",
+                "action=export requires changeId.",
+                "changeId is required",
+                None,
+            );
+        };
+        if !is_valid_change_id(&id) {
+            return self.error_outcome(
+                ChangeAction::Export,
+                "INVALID",
+                "The change id is not valid.",
+                "changeId is not a valid server-issued id",
+                Some(&id),
+            );
+        }
+        let record = match self.store.load(&id) {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                return self.error_outcome(
+                    ChangeAction::Export,
+                    "NOT_FOUND",
+                    "The change id has no server-owned scratch.",
+                    "no change record exists",
+                    Some(&id),
+                );
+            }
+            Err(reason) => {
+                return self.error_outcome(
+                    ChangeAction::Export,
+                    "INVALID",
+                    "The change record could not be read.",
+                    reason,
+                    Some(&id),
+                );
+            }
+        };
+        match record.state {
+            RecordState::FailedInconsistent => {
+                return self.finish(
+                    "FAILED_INCONSISTENT",
+                    "A failed partial apply cannot be exported as a verified package.",
+                    true,
+                    refused_data(
+                        ChangeAction::Export,
+                        &record,
+                        "the candidate may be partially applied; export is refused",
+                    ),
+                );
+            }
+            RecordState::Discarded => {
+                return self.finish(
+                    "DISCARDED",
+                    "The change scratch was discarded.",
+                    true,
+                    refused_data(
+                        ChangeAction::Export,
+                        &record,
+                        "the candidate copy was discarded",
+                    ),
+                );
+            }
+            RecordState::Applying | RecordState::Capturing => {
+                let reason = format!(
+                    "the change is still {}; no completed revision was recorded",
+                    record.state.as_str()
+                );
+                return self.finish(
+                    "FAILED_INCONSISTENT",
+                    "An unrecorded candidate state cannot be exported.",
+                    true,
+                    refused_data(ChangeAction::Export, &record, reason),
+                );
+            }
+            RecordState::Ready => {}
+        }
+        if record.workspace_epoch != workspace.epoch() {
+            let reason = format!(
+                "authorization root epoch changed from {} to {}; the recorded candidate is stale",
+                record.workspace_epoch,
+                workspace.epoch()
+            );
+            return self.finish(
+                "STALE",
+                "The authorization epoch changed; the change record is not exportable.",
+                true,
+                refused_data(ChangeAction::Export, &record, reason),
+            );
+        }
+        let _file_lock = match self.store.try_lock(&id) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                return self.finish(
+                    "CHANGE_BUSY",
+                    "The change scratch is locked by another process.",
+                    true,
+                    refused_data(
+                        ChangeAction::Export,
+                        &record,
+                        "another server process holds this change lock",
+                    ),
+                );
+            }
+            Err(reason) => {
+                return self.error_outcome(
+                    ChangeAction::Export,
+                    "UNAVAILABLE",
+                    "The change lock could not be opened.",
+                    reason,
+                    Some(&id),
+                );
+            }
+        };
+        // The record was read before the file lock; a stage in another server
+        // process may have published a new revision since. Re-read under the
+        // lock so verification and the exported package bind to the locked
+        // revision.
+        let record = match self.reload_pinned_record(ChangeAction::Export, &id, &record) {
+            Ok(record) => record,
+            Err(outcome) => return *outcome,
+        };
+        if record.applying_revision.is_some() {
+            return self.finish(
+                "FAILED_INCONSISTENT",
+                "An interrupted stage cannot be exported.",
+                true,
+                refused_data(
+                    ChangeAction::Export,
+                    &record,
+                    "an interrupted stage left the candidate state unrecorded",
+                ),
+            );
+        }
+        if let Err(reason) = verify_candidate_bytes(&self.store, &id, &record) {
+            let mut failed = record.clone();
+            failed.state = RecordState::FailedInconsistent;
+            failed.applying_revision = None;
+            failed.evidence.iter_mut().for_each(|evidence| {
+                evidence.fresh = false;
+                evidence.authoritative = false;
+            });
+            if failed.cleanup_warnings.len() < MAX_CLEANUP_WARNINGS {
+                failed.cleanup_warnings.push(truncate(&reason, 512));
+            }
+            let _ = self.store.save(&mut failed);
+            return self.finish(
+                "FAILED_INCONSISTENT",
+                "The candidate bytes do not match the recorded revision; export is refused.",
+                true,
+                refused_data(ChangeAction::Export, &failed, reason),
+            );
+        }
+        let budget = usize::try_from(self.config.limits.tool_output_bytes).unwrap_or(49_152);
+        let content_budget = budget.saturating_div(2);
+        let mut data = data_for_record(ChangeAction::Export, &record, Some(content_budget));
+        let verified = record.current_revision_fresh_pass();
+        data.verified = verified;
+        self.finish(
+            if verified {
+                "EXPORTED"
+            } else {
+                "EXPORTED_UNVERIFIED"
+            },
+            "Returned a revision-bound change package without writing the workspace.",
+            false,
+            data,
+        )
+    }
+
+    async fn discard(&self, request: ChangeRequest) -> ChangeOutcome {
+        let Some(id) = request.change_id.clone() else {
+            return self.error_outcome(
+                ChangeAction::Discard,
+                "INVALID",
+                "action=discard requires changeId.",
+                "changeId is required",
+                None,
+            );
+        };
+        if !is_valid_change_id(&id) {
+            return self.error_outcome(
+                ChangeAction::Discard,
+                "INVALID",
+                "The change id is not valid.",
+                "changeId is not a valid server-issued id",
+                Some(&id),
+            );
+        }
+        let _stripe = self.stripe(&id).lock_owned().await;
+        let Some(mut record) = self.store.load(&id).ok().flatten() else {
+            let mut data = ChangeData {
+                action: ChangeAction::Discard.as_str().to_owned(),
+                change_id: Some(id.clone()),
+                discarded: true,
+                state: "discarded".to_owned(),
+                ..ChangeData::default()
+            };
+            data.reason = "no scratch exists; discard is already complete".to_owned();
+            return self.finish(
+                "DISCARDED",
+                "The change scratch is already absent.",
+                false,
+                data,
+            );
+        };
+        if record.state == RecordState::Discarded {
+            let data = data_for_record(ChangeAction::Discard, &record, None);
+            return self.finish(
+                "DISCARDED",
+                "The change scratch was already discarded.",
+                false,
+                data,
+            );
+        }
+        let _file_lock = match self.store.try_lock(&id) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                let mut data = data_for_record(ChangeAction::Discard, &record, None);
+                data.reason = "another server process holds this change lock".to_owned();
+                return self.finish(
+                    "CHANGE_BUSY",
+                    "The change scratch is locked by another process.",
+                    true,
+                    data,
+                );
+            }
+            Err(reason) => {
+                return self.error_outcome(
+                    ChangeAction::Discard,
+                    "UNAVAILABLE",
+                    "The change lock could not be opened.",
+                    reason,
+                    Some(&id),
+                );
+            }
+        };
+        let warnings = self.store.discard_worktree(&id);
+        record.state = RecordState::Discarded;
+        record.evidence.iter_mut().for_each(|evidence| {
+            evidence.fresh = false;
+            evidence.authoritative = false;
+        });
+        for warning in &warnings {
+            if record.cleanup_warnings.len() < MAX_CLEANUP_WARNINGS {
+                record.cleanup_warnings.push(warning.clone());
+            }
+        }
+        if let Err(error) = self.store.save(&mut record) {
+            self.push_cleanup_warnings(&[error]);
+        }
+        self.push_cleanup_warnings(&warnings);
+        let mut data = data_for_record(ChangeAction::Discard, &record, None);
+        data.discarded = true;
+        data.reason = if warnings.is_empty() {
+            "server-owned scratch removed".to_owned()
+        } else {
+            "server-owned scratch removal was incomplete; see cleanupWarnings".to_owned()
+        };
+        self.finish(
+            "DISCARDED",
+            "The candidate copy was removed and the record was marked discarded.",
+            false,
+            data,
+        )
+    }
+}
+
+fn evidence_freshness(evidence: &GateEvidence, cancellation: &CancellationToken) -> bool {
+    let terminal = matches!(
+        evidence.status,
+        GateStatus::FastPass | GateStatus::FullPass | GateStatus::Fail
+    );
+    let clean = evidence.steps.iter().all(|step| {
+        step.drain_complete && step.cleanup_complete && !step.cancelled && !step.timed_out
+    });
+    terminal && clean && !cancellation.is_cancelled()
+}
+
+fn evidence_rows(revision: u64, fresh: bool, evidence: &GateEvidence) -> Vec<StoredEvidence> {
+    let status = evidence.status;
+    let recorded_at = now_ms();
+    if evidence.steps.is_empty() {
+        return vec![StoredEvidence {
+            revision,
+            target: status.as_str().to_owned(),
+            command: String::new(),
+            status: status.as_str().to_owned(),
+            exit_code: None,
+            first_diagnostic_ms: evidence.first_diagnostic_ms,
+            total_ms: evidence.response_ms,
+            fresh,
+            authoritative: fresh,
+            recorded_at_ms: recorded_at,
+        }];
+    }
+    evidence
+        .steps
+        .iter()
+        .take(16)
+        .map(|step| StoredEvidence {
+            revision,
+            target: step.target.as_str().to_owned(),
+            command: truncate(&step.command, MAX_COMMAND_CHARS),
+            status: status.as_str().to_owned(),
+            exit_code: Some(step.exit_code),
+            first_diagnostic_ms: step.first_diagnostic_ms,
+            total_ms: step.duration_ms,
+            fresh,
+            authoritative: fresh
+                && matches!(
+                    status,
+                    GateStatus::FastPass | GateStatus::FullPass | GateStatus::Fail
+                ),
+            recorded_at_ms: recorded_at,
+        })
+        .collect()
+}
+
+fn data_for_record(
+    action: ChangeAction,
+    record: &ChangeRecord,
+    content_budget: Option<usize>,
+) -> ChangeData {
+    let changed_files = record
+        .changed_files
+        .iter()
+        .take(MAX_LISTED_CHANGED_FILES)
+        .cloned()
+        .collect::<Vec<_>>();
+    let source_hashes = record
+        .source_hashes
+        .iter()
+        .take(MAX_LISTED_HASHES)
+        .map(|(file, hash)| ChangeSourceHashData {
+            file: file.clone(),
+            sha256: hash.sha256.clone(),
+            bytes: hash.bytes,
+        })
+        .collect::<Vec<_>>();
+    let mut evidence = record
+        .evidence
+        .iter()
+        .rev()
+        .take(MAX_LISTED_EVIDENCE)
+        .map(|evidence| ChangeEvidenceData {
+            revision: evidence.revision,
+            target: evidence.target.clone(),
+            command: evidence.command.clone(),
+            status: evidence.status.clone(),
+            exit_code: evidence.exit_code,
+            first_diagnostic_ms: evidence.first_diagnostic_ms,
+            total_ms: evidence.total_ms,
+            fresh: evidence.fresh,
+            authoritative: evidence.authoritative,
+        })
+        .collect::<Vec<_>>();
+    evidence.reverse();
+    let patches = record
+        .patches
+        .iter()
+        .take(MAX_LISTED_HASHES)
+        .map(|patch| ChangePatchData {
+            file: patch.file.clone(),
+            old_string: patch.old_string.clone(),
+            new_string: patch.new_string.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut used = 0usize;
+    let mut omitted = false;
+    let mut new_files = Vec::new();
+    for file in record.new_files.iter().take(MAX_LISTED_HASHES) {
+        let content = content_budget.and_then(|budget| {
+            if used.saturating_add(file.content.len()) <= budget {
+                used = used.saturating_add(file.content.len());
+                Some(file.content.clone())
+            } else {
+                omitted = true;
+                None
+            }
+        });
+        new_files.push(ChangeNewFileData {
+            file: file.file.clone(),
+            sha256: file.sha256.clone(),
+            bytes: file.bytes,
+            content,
+        });
+    }
+    if record.new_files.len() > MAX_LISTED_HASHES {
+        omitted = true;
+    }
+    ChangeData {
+        action: action.as_str().to_owned(),
+        change_id: Some(record.id.clone()),
+        base_identity: Some(record.base_identity.clone()),
+        revision: record.revision,
+        patch_hash: Some(record.patch_hash.clone()),
+        state: record.state.as_str().to_owned(),
+        verified: record.current_revision_fresh_pass(),
+        discarded: record.state == RecordState::Discarded,
+        changed_files,
+        changed_files_total: record.changed_files.len().try_into().unwrap_or(u64::MAX),
+        source_hashes,
+        source_hashes_total: record.source_hashes.len().try_into().unwrap_or(u64::MAX),
+        evidence,
+        evidence_total: record.evidence.len().try_into().unwrap_or(u64::MAX),
+        capture: Some(ChangeCaptureData {
+            files: record.capture.files,
+            bytes: record.capture.bytes,
+            manifest_hash: record.capture.manifest_hash.clone(),
+            complete: record.capture.complete,
+            excluded: record.capture.excluded.clone(),
+        }),
+        patches_total: record.patches.len().try_into().unwrap_or(u64::MAX),
+        patches,
+        new_files_total: record.new_files.len().try_into().unwrap_or(u64::MAX),
+        new_files,
+        new_files_content_omitted: omitted,
+        cleanup_warnings: record.cleanup_warnings.clone(),
+        reason: String::new(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_blocking(
+    roots: Arc<RootGuard>,
+    config: &ChangeConfig,
+    cargo: &Path,
+    store: &ChangeStore,
+    workspace: &WorkspaceRoot,
+    cancellation: &CancellationToken,
+    control: &MetadataControl,
+) -> Result<ChangeRecord, ChangeFailure> {
+    if cancellation.is_cancelled() {
+        return Err(ChangeFailure::new("CANCELLED", "capture was cancelled"));
+    }
+    let selection = select_in_root(workspace).map_err(|error| {
+        ChangeFailure::new(
+            "INCOMPLETE_INPUTS",
+            format!("workspace selection failed: {error}"),
+        )
+    })?;
+    let configured_dependencies = roots
+        .dependency_roots()
+        .iter()
+        .map(|root| root.path().to_owned())
+        .collect::<Vec<_>>();
+    let metadata = MetadataService::new(Arc::clone(&roots));
+    let load = metadata
+        .acquire_controlled(&selection, cargo, control)
+        .map_err(|error| match error {
+            crate::workspace::MetadataError::Cancelled => {
+                ChangeFailure::new("CANCELLED", "capture was cancelled during metadata")
+            }
+            crate::workspace::MetadataError::TimedOut => ChangeFailure::new(
+                "TIMEOUT",
+                "workspace metadata exceeded the configured deadline",
+            ),
+            error => ChangeFailure::new(
+                "INCOMPLETE_INPUTS",
+                format!("workspace metadata could not be captured: {error}"),
+            ),
+        })?;
+    let snapshot = load.snapshot;
+    if !snapshot.dependency_closure.complete {
+        return Err(ChangeFailure::new(
+            "INCOMPLETE_INPUTS",
+            "the dependency closure is incomplete; capture would be unsafe",
+        ));
+    }
+    let capture_root = snapshot.workspace_root.clone();
+    let capture_authority = if selection.worktree_authority().path() == capture_root {
+        selection.worktree_authority().clone()
+    } else {
+        selection
+            .worktree_authority()
+            .authorize_dir(&capture_root)
+            .map_err(|error| {
+                ChangeFailure::new(
+                    "INCOMPLETE_INPUTS",
+                    format!("workspace capture could not be authorized: {error}"),
+                )
+            })?
+    };
+
+    let scratch_root = store.root();
+    if path_is_within(scratch_root, &capture_root) || path_is_within(&capture_root, scratch_root) {
+        return Err(ChangeFailure::new(
+            "INCOMPLETE_INPUTS",
+            "server-owned scratch overlaps the captured workspace",
+        ));
+    }
+    reject_escaping_cargo_target(&capture_root)?;
+    let mut excluded = BTreeSet::new();
+    if let Ok(relative) = snapshot.target_directory.strip_prefix(&capture_root) {
+        excluded.insert(relative.to_owned());
+    }
+    if let Ok(relative) = scratch_root.strip_prefix(&capture_root) {
+        excluded.insert(relative.to_owned());
+    }
+    reject_external_path_dependencies(&snapshot, &capture_root)?;
+
+    let id = next_change_id();
+    let change_dir = store.change_dir(&id);
+    // Create and lock the fresh change before writing any candidate byte. The
+    // open lock file is the durable ownership marker that keeps a concurrent
+    // sweep in another process from deleting a live capture.
+    let lock = match store.try_lock(&id) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            return Err(ChangeFailure::new(
+                "CHANGE_BUSY",
+                "another process holds the fresh change lock",
+            ));
+        }
+        Err(reason) => return Err(ChangeFailure::new("RESOURCE_BLOCKED", reason)),
+    };
+    let mut placeholder = placeholder_record(&id, &capture_root, workspace.epoch());
+    if let Err(error) = store.save(&mut placeholder) {
+        drop(lock);
+        let _ = store.remove_path(&change_dir);
+        return Err(ChangeFailure::new(
+            "RESOURCE_BLOCKED",
+            format!("the capture marker could not be published: {error}"),
+        ));
+    }
+    match capture_into(
+        store,
+        &id,
+        &capture_root,
+        &capture_authority,
+        &excluded,
+        config,
+        configured_dependencies,
+        workspace.epoch(),
+        cancellation,
+    ) {
+        Ok(record) => Ok(record),
+        Err(mut failure) => {
+            drop(lock);
+            if let Err(error) = store.remove_path(&change_dir) {
+                failure.warnings.push(truncate(&error, 512));
+            }
+            Err(failure)
+        }
+    }
+}
+
+fn placeholder_record(id: &str, capture_root: &Path, workspace_epoch: u64) -> ChangeRecord {
+    let timestamp = now_ms();
+    ChangeRecord {
+        schema_version: CHANGE_SCHEMA_VERSION,
+        id: id.to_owned(),
+        created_at_ms: timestamp,
+        updated_at_ms: timestamp,
+        workspace_root: capture_root.to_owned(),
+        capture_root: capture_root.to_owned(),
+        workspace_epoch,
+        candidate_epoch: 0,
+        base_identity: String::new(),
+        state: RecordState::Capturing,
+        capture: CaptureSummary {
+            files: 0,
+            bytes: 0,
+            manifest_hash: String::new(),
+            complete: false,
+            excluded: Vec::new(),
+        },
+        external_paths: Vec::new(),
+        dependency_roots: Vec::new(),
+        revision: 0,
+        applying_revision: None,
+        patches: Vec::new(),
+        new_files: Vec::new(),
+        changed_files: Vec::new(),
+        candidate_files: 0,
+        candidate_bytes: 0,
+        patch_hash: String::new(),
+        source_hashes: BTreeMap::new(),
+        evidence: Vec::new(),
+        cleanup_warnings: Vec::new(),
+    }
+}
+
+/// Path dependencies outside the captured workspace are not materialized into
+/// the candidate scratch copy, so their relative `path = "..."` references
+/// cannot resolve there. Such a capture can never be validated honestly, so
+/// `create` fails closed and lists the paths it cannot reproduce.
+fn reject_external_path_dependencies(
+    snapshot: &crate::workspace::WorkspaceSnapshot,
+    capture_root: &Path,
+) -> Result<(), ChangeFailure> {
+    let mut roots = Vec::new();
+    for root in snapshot
+        .external_paths
+        .iter()
+        .chain(snapshot.dependency_closure.package_roots.iter())
+    {
+        if path_is_within(capture_root, root) {
+            continue;
+        }
+        if !root.is_dir() {
+            return Err(ChangeFailure::new(
+                "INCOMPLETE_INPUTS",
+                format!(
+                    "external path dependency {} is not an existing directory",
+                    root.display()
+                ),
+            ));
+        }
+        if !roots.contains(root) {
+            roots.push(root.clone());
+        }
+    }
+    if roots.is_empty() {
+        return Ok(());
+    }
+    let listed = roots
+        .iter()
+        .take(8)
+        .map(|root| truncate(&root.display().to_string(), 256))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = roots.len().saturating_sub(8);
+    let suffix = if more > 0 {
+        format!(" and {more} more")
+    } else {
+        String::new()
+    };
+    Err(ChangeFailure::new(
+        "INCOMPLETE_INPUTS",
+        format!(
+            "path dependencies outside the captured workspace cannot be reproduced in the server-owned candidate copy ({listed}{suffix}); create is refused so an incomplete capture cannot be validated"
+        ),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_into(
+    store: &ChangeStore,
+    id: &str,
+    capture_root: &Path,
+    capture_authority: &AuthorizedRoot,
+    excluded: &BTreeSet<PathBuf>,
+    config: &ChangeConfig,
+    dependency_roots: Vec<PathBuf>,
+    workspace_epoch: u64,
+    cancellation: &CancellationToken,
+) -> Result<ChangeRecord, ChangeFailure> {
+    let candidate_root = store.candidate_dir(id);
+    let limits = CaptureLimits {
+        max_files: config.max_files,
+        max_bytes: config.max_bytes,
+    };
+    let manifest = match capture_tree(
+        capture_authority,
+        &candidate_root,
+        excluded,
+        limits,
+        cancellation,
+    ) {
+        Ok(manifest) => manifest,
+        Err(CaptureError::Cancelled) => {
+            return Err(ChangeFailure::new("CANCELLED", "capture was cancelled"));
+        }
+        Err(CaptureError::Incomplete(reason)) => {
+            return Err(ChangeFailure::new(
+                "INCOMPLETE_INPUTS",
+                format!("capture is incomplete: {reason}"),
+            ));
+        }
+    };
+    let manifest_bytes = serde_json::to_vec(&manifest).map_err(|error| {
+        ChangeFailure::new(
+            "INCOMPLETE_INPUTS",
+            format!("capture manifest could not be serialized: {error}"),
+        )
+    })?;
+    store
+        .write_manifest(id, &manifest_bytes)
+        .map_err(|error| ChangeFailure::new("INCOMPLETE_INPUTS", error))?;
+    let manifest_digest = manifest_hash(&manifest);
+    let base_identity = base_identity(workspace_epoch, &manifest_digest, capture_root);
+    let candidate_epoch = match RootGuard::new([candidate_root.clone()], dependency_roots.clone())
+        .and_then(|guard| guard.snapshot(ClientRoots::unsupported()))
+    {
+        Ok(snapshot) => snapshot.epoch(),
+        Err(error) => {
+            return Err(ChangeFailure::new(
+                "INCOMPLETE_INPUTS",
+                format!("candidate root could not be authorized: {error}"),
+            ));
+        }
+    };
+    let candidate_files = manifest.files.len().try_into().unwrap_or(u64::MAX);
+    let mut record = ChangeRecord {
+        schema_version: CHANGE_SCHEMA_VERSION,
+        id: id.to_owned(),
+        created_at_ms: now_ms(),
+        updated_at_ms: now_ms(),
+        workspace_root: capture_root.to_owned(),
+        capture_root: capture_root.to_owned(),
+        workspace_epoch,
+        candidate_epoch,
+        base_identity,
+        state: RecordState::Ready,
+        capture: CaptureSummary {
+            files: candidate_files,
+            bytes: manifest.total_bytes,
+            manifest_hash: manifest_digest,
+            complete: true,
+            excluded: manifest.excluded.clone(),
+        },
+        external_paths: Vec::new(),
+        dependency_roots,
+        revision: 0,
+        applying_revision: None,
+        patches: Vec::new(),
+        new_files: Vec::new(),
+        changed_files: Vec::new(),
+        candidate_files,
+        candidate_bytes: manifest.total_bytes,
+        patch_hash: String::new(),
+        source_hashes: BTreeMap::new(),
+        evidence: Vec::new(),
+        cleanup_warnings: Vec::new(),
+    };
+    store
+        .save(&mut record)
+        .map_err(|error| ChangeFailure::new("INCOMPLETE_INPUTS", error))?;
+    Ok(record)
+}
+
+fn base_identity(epoch: u64, manifest_digest: &str, capture_root: &Path) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"agz-rust-coder-change-base\0");
+    hasher.update(epoch.to_string().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(manifest_digest.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(capture_root.to_string_lossy().as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn next_change_id() -> String {
+    let sequence = CHANGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "{CHANGE_ID_PREFIX}{:x}-{:x}-{:x}",
+        now_ms(),
+        std::process::id(),
+        sequence
+    )
+}
+
+fn path_is_within(root: &Path, candidate: &Path) -> bool {
+    candidate == root
+        || candidate
+            .strip_prefix(root)
+            .is_ok_and(|relative| !relative.is_absolute())
+}
+
+fn reject_escaping_cargo_target(candidate_root: &Path) -> Result<(), ChangeFailure> {
+    for relative in [".cargo/config.toml", ".cargo/config"] {
+        let path = candidate_root.join(relative);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(ChangeFailure::new(
+                    "INCOMPLETE_INPUTS",
+                    format!("could not read {}: {error}", path.display()),
+                ));
+            }
+        };
+        let text = std::str::from_utf8(&bytes).map_err(|_| {
+            ChangeFailure::new(
+                "INCOMPLETE_INPUTS",
+                format!("{} is not valid UTF-8", path.display()),
+            )
+        })?;
+        let value: toml::Value = toml::from_str(text).map_err(|error| {
+            ChangeFailure::new(
+                "INCOMPLETE_INPUTS",
+                format!("{} could not be parsed: {error}", path.display()),
+            )
+        })?;
+        for candidate in cargo_target_candidates(&value) {
+            let resolved = if Path::new(&candidate).is_absolute() {
+                normalize_lexical(Path::new(&candidate))
+            } else {
+                normalize_lexical(&candidate_root.join(&candidate))
+            };
+            if !path_is_within(candidate_root, &resolved) {
+                return Err(ChangeFailure::new(
+                    "INCOMPLETE_INPUTS",
+                    format!(
+                        "{} redirects the Cargo target directory outside the candidate copy",
+                        path.display()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cargo_target_candidates(value: &toml::Value) -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Some(target_dir) = value
+        .get("build")
+        .and_then(|build| build.get("target-dir"))
+        .and_then(toml::Value::as_str)
+    {
+        candidates.push(target_dir.to_owned());
+    }
+    if let Some(target_dir) = value
+        .get("env")
+        .and_then(|env| env.get("CARGO_TARGET_DIR"))
+        .and_then(toml::Value::as_str)
+    {
+        candidates.push(target_dir.to_owned());
+    }
+    candidates
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage_blocking(
+    store: &ChangeStore,
+    config: &ChangeConfig,
+    id: &str,
+    workspace_epoch: u64,
+    expected_revision: Option<u64>,
+    base_identity: Option<&str>,
+    patches: &[PatchInput],
+    new_files: &[NewFileInput],
+    cancellation: &CancellationToken,
+) -> Result<ChangeRecord, ChangeFailure> {
+    let Some(_lock) = store
+        .try_lock(id)
+        .map_err(|reason| ChangeFailure::new("UNAVAILABLE", reason))?
+    else {
+        return Err(ChangeFailure::new(
+            "CHANGE_BUSY",
+            "another server process holds this change lock",
+        ));
+    };
+    let Some(mut record) = store
+        .load(id)
+        .map_err(|reason| ChangeFailure::new("INVALID", reason))?
+    else {
+        return Err(ChangeFailure::new(
+            "NOT_FOUND",
+            "no change record exists for this change id",
+        ));
+    };
+    if record.state != RecordState::Ready {
+        return Err(ChangeFailure::new(
+            match record.state {
+                RecordState::FailedInconsistent => "FAILED_INCONSISTENT",
+                RecordState::Discarded => "DISCARDED",
+                RecordState::Capturing | RecordState::Applying => "FAILED_INCONSISTENT",
+                RecordState::Ready => "INVALID",
+            },
+            format!("change state is {}", record.state.as_str()),
+        ));
+    }
+    if record.workspace_epoch != workspace_epoch {
+        return Err(ChangeFailure::new(
+            "STALE",
+            format!(
+                "authorization root epoch changed from {} to {}; the change is stale",
+                record.workspace_epoch, workspace_epoch
+            ),
+        ));
+    }
+    let expected_revision = expected_revision.ok_or_else(|| {
+        ChangeFailure::new("INVALID", "expectedRevision is required for action=stage")
+    })?;
+    if expected_revision != record.revision {
+        return Err(ChangeFailure::new(
+            "STALE",
+            format!(
+                "expectedRevision {} does not match current revision {}",
+                expected_revision, record.revision
+            ),
+        ));
+    }
+    let base_identity = base_identity.ok_or_else(|| {
+        ChangeFailure::new("INVALID", "baseIdentity is required for action=stage")
+    })?;
+    if base_identity != record.base_identity {
+        return Err(ChangeFailure::new(
+            "STALE",
+            "baseIdentity does not match the captured base",
+        ));
+    }
+    if cancellation.is_cancelled() {
+        return Err(ChangeFailure::new("CANCELLED", "stage was cancelled"));
+    }
+    if record.revision.saturating_add(1) > config.max_revisions {
+        return Err(ChangeFailure::new(
+            "REVISION_LIMIT",
+            format!(
+                "the change reached the configured revision limit {}",
+                config.max_revisions
+            ),
+        ));
+    }
+    let candidate_root = store.candidate_dir(id);
+    let limits = CandidateLimits {
+        current_files: record.candidate_files,
+        current_bytes: record.candidate_bytes,
+        max_files: config.max_files,
+        max_bytes: config.max_bytes,
+    };
+    let plan = plan_patches(&candidate_root, patches, new_files, limits)
+        .map_err(|reason| ChangeFailure::new("PATCH_REJECTED", reason))?;
+    if cancellation.is_cancelled() {
+        return Err(ChangeFailure::new("CANCELLED", "stage was cancelled"));
+    }
+    // Publish the durable applying marker before the first candidate write.
+    // A crash or a failed final publish leaves this marker (or a `FailedInconsistent`
+    // record) on disk, so `validate`/`export` can never treat bytes from an
+    // unrecorded revision as verified.
+    record.state = RecordState::Applying;
+    record.applying_revision = Some(record.revision.saturating_add(1));
+    if let Err(reason) = store.save(&mut record) {
+        record.state = RecordState::Ready;
+        record.applying_revision = None;
+        return Err(ChangeFailure::new(
+            "UNAVAILABLE",
+            format!(
+                "the applying marker could not be published; no candidate byte was written: {reason}"
+            ),
+        ));
+    }
+    if let Err(error) = apply_plan(&candidate_root, &plan) {
+        record.state = RecordState::FailedInconsistent;
+        record.applying_revision = None;
+        if record.cleanup_warnings.len() < MAX_CLEANUP_WARNINGS {
+            record.cleanup_warnings.push(truncate(&error, 512));
+        }
+        let _ = store.save(&mut record);
+        return Err(ChangeFailure::new(
+            "FAILED_INCONSISTENT",
+            format!("a candidate write failed after validation: {error}"),
+        ));
+    }
+    // Record the hashes of the bytes actually on disk. A read-back mismatch
+    // means the candidate no longer matches the plan and must never be
+    // reported as a completed revision.
+    let mut applied_hashes = BTreeMap::new();
+    for file in &plan.files {
+        let relative = relative_path_string(&file.relative);
+        let bytes = match fs::read(candidate_root.join(&file.relative)) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                record.state = RecordState::FailedInconsistent;
+                record.applying_revision = None;
+                if record.cleanup_warnings.len() < MAX_CLEANUP_WARNINGS {
+                    record.cleanup_warnings.push(format!(
+                        "candidate file {relative} could not be re-read after apply: {error}"
+                    ));
+                }
+                let _ = store.save(&mut record);
+                return Err(ChangeFailure::new(
+                    "FAILED_INCONSISTENT",
+                    format!("candidate file {relative} could not be re-read after apply"),
+                ));
+            }
+        };
+        if bytes != file.contents {
+            record.state = RecordState::FailedInconsistent;
+            record.applying_revision = None;
+            if record.cleanup_warnings.len() < MAX_CLEANUP_WARNINGS {
+                record.cleanup_warnings.push(format!(
+                    "candidate file {relative} does not match the planned bytes"
+                ));
+            }
+            let _ = store.save(&mut record);
+            return Err(ChangeFailure::new(
+                "FAILED_INCONSISTENT",
+                format!("candidate file {relative} does not match the planned bytes"),
+            ));
+        }
+        applied_hashes.insert(
+            relative,
+            StoredHash {
+                sha256: sha256_hex(&bytes),
+                bytes: bytes.len().try_into().unwrap_or(u64::MAX),
+            },
+        );
+    }
+    let inserted_new_files = plan
+        .new_files
+        .iter()
+        .map(|file| StoredNewFile {
+            file: relative_path_string(&file.relative),
+            content: file.content.clone(),
+            sha256: sha256_hex(file.content.as_bytes()),
+            bytes: file.content.len().try_into().unwrap_or(u64::MAX),
+        })
+        .collect::<Vec<_>>();
+    let inserted_patches = plan
+        .patches
+        .iter()
+        .map(|patch| StoredPatch {
+            file: normalize_patch_file(&patch.file),
+            old_string: patch.old_string.clone(),
+            new_string: patch.new_string.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut candidate_bytes = i128::from(record.candidate_bytes);
+    for file in &plan.files {
+        candidate_bytes -= i128::from(file.previous_bytes);
+        candidate_bytes += i128::from(file.contents.len() as u64);
+    }
+    if candidate_bytes < 0 {
+        record.state = RecordState::FailedInconsistent;
+        record.applying_revision = None;
+        if record.cleanup_warnings.len() < MAX_CLEANUP_WARNINGS {
+            record.cleanup_warnings.push(
+                "candidate byte accounting became negative after applying patches".to_owned(),
+            );
+        }
+        let _ = store.save(&mut record);
+        return Err(ChangeFailure::new(
+            "FAILED_INCONSISTENT",
+            "candidate byte accounting failed after apply",
+        ));
+    }
+    record.source_hashes.extend(applied_hashes);
+    record.candidate_files = record
+        .candidate_files
+        .saturating_add(inserted_new_files.len() as u64);
+    record.candidate_bytes = u64::try_from(candidate_bytes).unwrap_or(u64::MAX);
+    record.revision = record.revision.saturating_add(1);
+    record.patches.extend(inserted_patches);
+    record.new_files.extend(inserted_new_files);
+    for file in &plan.files {
+        let relative = relative_path_string(&file.relative);
+        if !record.changed_files.contains(&relative) {
+            record.changed_files.push(relative);
+        }
+    }
+    if record.changed_files.len() > MAX_CHANGED_FILES_IN_RECORD {
+        record.changed_files.truncate(MAX_CHANGED_FILES_IN_RECORD);
+    }
+    record.patch_hash = compute_patch_hash(record.revision, &record.patches, &record.new_files);
+    record.evidence.iter_mut().for_each(|evidence| {
+        evidence.fresh = false;
+        evidence.authoritative = false;
+    });
+    record.state = RecordState::Ready;
+    record.applying_revision = None;
+    if let Err(reason) = store.save(&mut record) {
+        let mut failed = record.clone();
+        failed.state = RecordState::FailedInconsistent;
+        failed.applying_revision = None;
+        if failed.cleanup_warnings.len() < MAX_CLEANUP_WARNINGS {
+            failed.cleanup_warnings.push(truncate(&reason, 512));
+        }
+        let _ = store.save(&mut failed);
+        return Err(ChangeFailure::new(
+            "FAILED_INCONSISTENT",
+            format!("the change record could not be published: {reason}"),
+        ));
+    }
+    Ok(record)
+}
+
+/// Re-reads every candidate file whose bytes were recorded for the current
+/// revision and fails when the on-disk bytes differ. This is the read-side of
+/// the applying marker: a `Ready` record can never be validated or exported
+/// against bytes that belong to an unrecorded revision.
+/// Builds refusal data whose `verified` flag and evidence rows never claim a
+/// fresh verification for a request that was rejected before re-checking bytes.
+fn refused_data(
+    action: ChangeAction,
+    record: &ChangeRecord,
+    reason: impl Into<String>,
+) -> ChangeData {
+    let mut data = data_for_record(action, record, None);
+    data.verified = false;
+    data.evidence.iter_mut().for_each(|evidence| {
+        evidence.fresh = false;
+        evidence.authoritative = false;
+    });
+    data.reason = reason.into();
+    data
+}
+
+fn verify_candidate_bytes(
+    store: &ChangeStore,
+    id: &str,
+    record: &ChangeRecord,
+) -> Result<(), String> {
+    let candidate_root = store.candidate_dir(id);
+    for (file, recorded) in &record.source_hashes {
+        let relative = super::patch::normalize_relative(file)
+            .map_err(|error| format!("recorded candidate path {file} is invalid: {error}"))?;
+        let path = candidate_root.join(&relative);
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("recorded candidate file {file} is unavailable: {error}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(format!(
+                "recorded candidate file {file} is not a regular file"
+            ));
+        }
+        let bytes = fs::read(&path).map_err(|error| {
+            format!("recorded candidate file {file} could not be read: {error}")
+        })?;
+        if sha256_hex(&bytes) != recorded.sha256 || bytes.len() as u64 != recorded.bytes {
+            return Err(format!(
+                "candidate file {file} does not match the recorded revision bytes"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_patch_file(file: &str) -> String {
+    super::patch::normalize_relative(file)
+        .map(|path| relative_path_string(&path))
+        .unwrap_or_else(|_| file.to_owned())
+}
+
+fn compute_patch_hash(
+    revision: u64,
+    patches: &[StoredPatch],
+    new_files: &[StoredNewFile],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"agz-rust-coder-change-patches\0");
+    hasher.update(revision.to_string().as_bytes());
+    hasher.update(b"\0");
+    for patch in patches {
+        hasher.update(patch.file.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(patch.old_string.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(patch.new_string.as_bytes());
+        hasher.update(b"\0");
+    }
+    for file in new_files {
+        hasher.update(file.file.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(file.sha256.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(file.bytes.to_string().as_bytes());
+        hasher.update(b"\0");
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gate::GateTargetId;
+
+    #[test]
+    fn change_id_and_patch_hash_are_deterministic_and_bounded() {
+        let first = next_change_id();
+        let second = next_change_id();
+        assert_ne!(first, second);
+        assert!(is_valid_change_id(&first));
+        assert!(is_valid_change_id(&second));
+
+        let patches = vec![StoredPatch {
+            file: "src/lib.rs".to_owned(),
+            old_string: "a".to_owned(),
+            new_string: "b".to_owned(),
+        }];
+        let new_files = vec![StoredNewFile {
+            file: "src/new.rs".to_owned(),
+            content: "pub fn new() {}".to_owned(),
+            sha256: sha256_hex(b"pub fn new() {}"),
+            bytes: 15,
+        }];
+        assert_eq!(
+            compute_patch_hash(1, &patches, &new_files),
+            compute_patch_hash(1, &patches, &new_files)
+        );
+        assert_ne!(
+            compute_patch_hash(1, &patches, &new_files),
+            compute_patch_hash(2, &patches, &new_files)
+        );
+    }
+
+    #[test]
+    fn pinned_record_reload_detects_a_cross_process_revision_bump() {
+        let base = std::env::temp_dir().join(format!(
+            "agz-change-reload-{}-{}",
+            std::process::id(),
+            CHANGE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&base).expect("create reload base");
+        let mut config = Config::defaults_at(&base);
+        config.change.scratch_dir = base.join("scratch");
+        config.gate.cache_dir = base.join("gate");
+        config.gate.lease_dir = base.join("leases");
+        config.docs.cache_dir = base.join("docs");
+        config.telemetry.enabled = false;
+        config.telemetry.path = base.join("activity.jsonl");
+        let guard =
+            Arc::new(RootGuard::new([base.clone()], std::iter::empty()).expect("root guard"));
+        let service = ChangeService::new(config, guard, ProcessSupervisor::without_journal())
+            .expect("change service");
+        let id = "ch-reload-1";
+        let mut record = placeholder_record(id, &base, 1);
+        record.state = RecordState::Ready;
+        record.base_identity = "base".to_owned();
+        record.revision = 1;
+        service.store.save(&mut record).expect("save record");
+        let pinned = service.store.load(id).expect("load").expect("present");
+
+        let unchanged = service
+            .reload_pinned_record(ChangeAction::Validate, id, &pinned)
+            .expect("unchanged record");
+        assert_eq!(unchanged.revision, 1);
+
+        let mut bumped = pinned.clone();
+        bumped.revision = 2;
+        service.store.save(&mut bumped).expect("save bump");
+        let outcome = service
+            .reload_pinned_record(ChangeAction::Validate, id, &pinned)
+            .expect_err("a bumped revision must not be verified as pinned");
+        assert_eq!(outcome.status, "STALE");
+        assert!(!outcome.data.verified);
+        fs::remove_dir_all(&base).expect("cleanup");
+    }
+
+    #[test]
+    fn cargo_target_config_candidates_are_detected() {
+        let value: toml::Value = toml::from_str(
+            "[build]\ntarget-dir = \"/outside/target\"\n\n[env]\nCARGO_TARGET_DIR = \"relative\"\n",
+        )
+        .expect("parse toml");
+        let candidates = cargo_target_candidates(&value);
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().any(|value| value == "/outside/target"));
+    }
+
+    #[test]
+    fn evidence_freshness_requires_terminal_clean_uncancelled_steps() {
+        let mut evidence = GateEvidence::pending(
+            "test-job",
+            &GateRequest::without_directory(GateTargetId::Check),
+        );
+        evidence.status = GateStatus::FastPass;
+        evidence.steps.push(crate::gate::GateStepResult {
+            evidence: crate::diagnostics::EvidenceStats::default(),
+            diagnostics_omitted: 0,
+            contexts: Vec::new(),
+            target: GateTargetId::Check,
+            command: "cargo check".to_owned(),
+            exit_code: 0,
+            signal: None,
+            timed_out: false,
+            cancelled: false,
+            duration_ms: 1,
+            first_diagnostic_ms: None,
+            diagnostics: Vec::new(),
+            suggestion_package: None,
+            tail: String::new(),
+            stdout: String::new(),
+            stderr: String::new(),
+            output_truncated: false,
+            drain_complete: true,
+            cleanup_complete: true,
+            build: None,
+        });
+        let token = CancellationToken::new();
+        assert!(evidence_freshness(&evidence, &token));
+        token.cancel();
+        assert!(!evidence_freshness(&evidence, &token));
+        evidence.steps[0].drain_complete = false;
+        assert!(!evidence_freshness(&evidence, &CancellationToken::new()));
+    }
+}
