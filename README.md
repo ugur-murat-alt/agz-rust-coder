@@ -1,48 +1,43 @@
-# agz-rust-mcp
+# AGZ Rust MCP
 
 [![CI](https://github.com/ugur-murat-alt/agz-rust-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ugur-murat-alt/agz-rust-mcp/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/agz-rust-mcp.svg)](https://crates.io/crates/agz-rust-mcp)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-English | [Turkce](README.tr.md)
+English | [Türkçe](README.tr.md)
 
-`agz-rust-mcp` is a standalone stdio MCP server for compiler-grounded Rust
-work. It runs bounded Cargo validation, audits source, resolves exact-version
-crate documentation, provides Rust Analyzer navigation, and returns write-free
-rename/refactor packages.
-
-## Identity
-
-| Contract | Value |
-| --- | --- |
-| Crate, binary, server | `agz-rust-mcp` |
-| MCP Registry | `io.github.ugur-murat-alt/agz-rust-mcp` |
-| Current release | `0.2.0` |
-| First release | `0.1.0` |
-| Release tag | `agz-rust-mcp-v<version>` |
-| Rust edition / MSRV | `2024` / `1.88.0` |
-| Rust MCP SDK | `rmcp` `3.1.4` |
-| Default / discovered protocol | `2025-11-25` / `2026-07-28` |
-
-MCP package ownership marker: `mcp-name: io.github.ugur-murat-alt/agz-rust-mcp`.
+**An AGZ Yazılım product.** `agz-rust-mcp` is a standalone stdio MCP server for
+bounded Rust correctness grounded in Cargo and rustc. It runs bounded Cargo
+validation, audits source, resolves exact-version crate documentation, provides
+Rust Analyzer navigation, and returns write-free rename/refactor packages.
 
 ## Install
 
 ```bash
+# npm wrapper (requires Node.js; resolves the matching release binary)
+npx -y @agz-yazilim/agz-rust-mcp --version
+
+# installer script (Linux x86_64): download install.sh and SHA256SUMS from the
+# latest release, verify the script, then run it
+bash install.sh
+
+# crates.io (requires Rust 1.88.0 or newer)
 cargo install agz-rust-mcp --locked
 agz-rust-mcp --version
 ```
 
-The package is source-distributed through crates.io. Release pages also provide
-prebuilt archives and SHA-256 checksums.
+Prebuilt `.tar.gz` archives with `.sha256` files are available for Linux
+x86_64, macOS arm64, and Windows x86_64. Releases up to `0.2.0` use the legacy
+`agz-rust-coder-*` asset names; from `0.3.0` onward the names are
+`agz-rust-mcp-*`.
 
-## MCP client setup (OpenCode2 example)
+**Step-by-step instructions, per-OS notes, checksum verification, and
+troubleshooting: [docs/install.md](docs/install.md) ·
+[Türkçe](docs/install.tr.md).**
 
-`agz-rust-mcp` is a standalone stdio MCP server; any MCP-capable client can
-run it. The pinned OpenCode2 host is exercised by the repository's
-compatibility smoke.
+## MCP Client Setup
 
-OpenCode2 example configuration (`opencode.jsonc`):
+Minimal OpenCode2 configuration (`opencode.jsonc`):
 
 ```jsonc
 {
@@ -65,9 +60,51 @@ OpenCode2 example configuration (`opencode.jsonc`):
 }
 ```
 
+Minimal Codex configuration (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.rust]
+command = "agz-rust-mcp"
+args = []
+```
+
 The canonical current directory is the default authorized root. Add explicit
-roots with repeated `--allow-root` arguments when the client starts elsewhere.
-Client-provided MCP roots may narrow configured access but never widen it.
+roots with repeated `--allow-root` arguments when the client starts elsewhere;
+client-provided MCP roots may narrow configured access but never widen it. See
+[docs/install.md](docs/install.md#mcp-client-setup) for wrapper-managed client
+variants.
+
+## Documentation
+
+Read the documentation in this order:
+
+1. [Install and client setup](docs/install.md) - every install method and
+   client configuration.
+2. [Tool and configuration reference](docs/tools.md) - tools, actions, result
+   semantics, and all configuration keys.
+3. [Architecture](docs/architecture.md) - process model, protocol lifecycle,
+   and authority boundaries.
+4. [Validation and benchmark protocol](docs/benchmark.md) - smokes, gates, and
+   evidence.
+5. [Security policy](SECURITY.md) and [Contributing](CONTRIBUTING.md).
+
+The bilingual index with the full reading path is
+[docs/README.md](docs/README.md) / [docs/README.tr.md](docs/README.tr.md).
+
+## Identity
+
+| Contract | Value |
+| --- | --- |
+| Crate, binary, server | `agz-rust-mcp` |
+| MCP Registry | `io.github.ugur-murat-alt/agz-rust-mcp` |
+| Current release | `0.2.0` |
+| First release | `0.1.0` |
+| Release tag | `agz-rust-mcp-v<version>` |
+| Rust edition / MSRV | `2024` / `1.88.0` |
+| Rust MCP SDK | `rmcp` `3.1.4` |
+| Default / discovered protocol | `2025-11-25` / `2026-07-28` |
+
+MCP package ownership marker: `mcp-name: io.github.ugur-murat-alt/agz-rust-mcp`.
 
 ## Tools
 
@@ -138,43 +175,19 @@ are pruned after 24 hours or beyond 64 files. The `profile` result reports this
 retention policy, so expired evidence is visible instead of silently reused.
 
 Run `agz-rust-mcp --help` for every CLI field. The complete behavior and
-default table is in [docs/tools.md](docs/tools.md).
+default table is in [docs/tools.md](docs/tools.md#configuration-reference).
 
 ## Security
 
 The server does not modify workspace source, but it is not an operating-system
 sandbox. Cargo build scripts, tests, procedural macros, local rustdoc, and
 opted-in Rust Analyzer workspace code execute with the server user's authority.
-Use a container or OS sandbox when that boundary is required.
+Use a container or OS sandbox when that boundary is required. Workspace,
+dependency, cache, lease, journal, docs, and telemetry paths are canonicalized,
+bounded, and fail closed, and stdout is reserved for MCP framing. Report
+vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
-- Workspace and dependency paths are canonicalized and fail closed.
-- Cache, lease, journal, docs, and telemetry paths cannot overlap authorized
-  roots.
-- Child output, HTTP bodies, directory walks, edits, tasks, and telemetry are
-  bounded.
-- `rename`, `refactor`, and formatting checks return data only.
-- Stdout is reserved for MCP framing; logs and panic output use stderr.
-
-Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
-
-## Development
-
-```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-targets --all-features --locked --no-fail-fast
-cargo +1.88.0 check --workspace --all-targets --all-features --locked
-cargo build --release --locked
-cargo run -p xtask -- protocol-smoke
-cargo run -p xtask -- opencode-smoke
-cargo run -p xtask -- benchmark-smoke
-```
-
-See [CONTRIBUTING.md](CONTRIBUTING.md), [architecture](docs/architecture.md),
-[tool reference](docs/tools.md), [benchmark protocol](docs/benchmark.md), and
-[CHANGELOG.md](CHANGELOG.md).
-
-## Canonical Links
+## Links
 
 - Repository: https://github.com/ugur-murat-alt/agz-rust-mcp
 - Crate: https://crates.io/crates/agz-rust-mcp
@@ -185,5 +198,3 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), [architecture](docs/architecture.md),
 ## License
 
 [MIT](LICENSE), Copyright (c) 2026 Ugur Murat Altintas.
-
-Unreleased: see [six-part correctness/efficiency work](docs/rust-efficiency-plan.md) for streaming diagnostics, explicit validation options and opt-in acceleration.

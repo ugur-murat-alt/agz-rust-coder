@@ -1,5 +1,11 @@
 # Doğrulama ve Benchmark Protokolü
 
+**AGZ Yazılım ürünüdür.** Bu belge
+[belge okuma yolunun](README.tr.md) 4. adımıdır: release iddialarının belirli
+yerel kapılar ve isteğe bağlı canlı benchmark'larla nasıl doğrulandığını
+tanımlar. Sonraki adım [güvenlik politikası](../SECURITY.md) ve
+[katkı kılavuzudur](../CONTRIBUTING.md).
+
 Release iddiaları önce belirli yerel kapıları kullanır. Canlı model
 benchmark'ları isteğe bağlı ölçümlerdir; derleyici, protokol, paket veya güvenlik
 kontrollerinin yerine geçmez.

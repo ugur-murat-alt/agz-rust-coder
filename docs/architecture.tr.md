@@ -1,5 +1,10 @@
 # Mimari
 
+**AGZ Yazılım ürünüdür.** Bu belge
+[belge okuma yolunun](README.tr.md) 3. adımıdır:
+[araç ve yapılandırma referansının](tools.tr.md) arkasındaki süreç modelini
+açıklar. [Doğrulama ve benchmark protokolü](benchmark.tr.md) ile devam edin.
+
 `agz-rust-mcp`; RMCP stdio adaptörü, sınırlı alan servisleri ve denetimli dış
 süreçlerden oluşan tek bir Rust sürecidir. Uzak transport bağlantısı kabul etmez
 ve workspace kaynağına yazmaz.

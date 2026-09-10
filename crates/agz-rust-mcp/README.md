@@ -1,5 +1,7 @@
 # agz-rust-mcp
 
+_An AGZ Yazılım product._
+
 `agz-rust-mcp` is a bounded, source-write-free Rust correctness MCP server.
 Cargo and rustc remain the authority; Rust Analyzer and static audit results are
 advisory.

@@ -1,7 +1,10 @@
 # Changelog
 
-All notable changes to `agz-rust-coder` are documented here. The project uses
-Semantic Versioning and follows the Keep a Changelog structure.
+_An AGZ Yazılım product._
+
+All notable changes to `agz-rust-mcp` (formerly `agz-rust-coder`) are
+documented here. The project uses Semantic Versioning and follows the Keep a
+Changelog structure.
 
 ## [Unreleased]
 

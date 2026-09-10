@@ -366,7 +366,7 @@ fn mcp_registry_metadata_matches_the_cargo_package() {
     let expected = serde_json::json!({
         "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
         "name": "io.github.ugur-murat-alt/agz-rust-mcp",
-        "title": "AGZ Rust Coder",
+        "title": "AGZ Rust MCP",
         "description": "Bounded, source-write-free Rust correctness tools grounded in Cargo and rustc output.",
         "repository": {
             "url": "https://github.com/ugur-murat-alt/agz-rust-mcp",

@@ -1,5 +1,7 @@
 # Contributing
 
+_An AGZ Yazılım product._
+
 Contributions to `agz-rust-mcp` should preserve its bounded, source-write-free
 MCP contract.
 
