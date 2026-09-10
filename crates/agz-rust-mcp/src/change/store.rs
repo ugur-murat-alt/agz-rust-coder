@@ -593,7 +593,22 @@ mod tests {
     }
 
     fn make_stale(path: &Path) {
-        let file = File::open(path).expect("open directory for mtime");
+        // Windows cannot open a directory for timestamp updates with the
+        // default options (`PermissionDenied`); backup semantics plus write
+        // attributes are required. A file path keeps the same behavior on both
+        // platforms because `read(true)` is the only Unix access requested.
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            const FILE_WRITE_ATTRIBUTES: u32 = 0x0000_0100;
+            options
+                .access_mode(FILE_WRITE_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+        }
+        let file = options.open(path).expect("open directory for mtime");
         file.set_modified(std::time::UNIX_EPOCH)
             .expect("set stale mtime");
     }

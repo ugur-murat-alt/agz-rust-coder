@@ -3223,6 +3223,10 @@ mod tests {
             .expect_err("a bumped revision must not be verified as pinned");
         assert_eq!(outcome.status, "STALE");
         assert!(!outcome.data.verified);
+        // Windows: cap-std opens an authorized root without FILE_SHARE_DELETE,
+        // so the guard's directory handle (owned by the service) must be closed
+        // before the scratch tree can be removed.
+        drop(service);
         fs::remove_dir_all(&base).expect("cleanup");
     }
 

@@ -1765,8 +1765,10 @@ mod tests {
     #[test]
     fn direct_toolchain_binding_pins_rustc_toolchain_and_path() {
         let bin_dir = PathBuf::from("/rustup/toolchains/1.88.0-x86_64-unknown-linux-gnu/bin");
+        let ambient_path = std::env::join_paths([Path::new("/usr/bin"), Path::new("/bin")])
+            .expect("join fixture PATH");
         let mut environment = BTreeMap::from([
-            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+            (OsString::from("PATH"), ambient_path),
             (
                 OsString::from("RUSTC"),
                 OsString::from("/ambient/bin/rustc"),
@@ -1795,12 +1797,22 @@ mod tests {
             .get(OsStr::new("PATH"))
             .expect("pinned PATH")
             .clone();
+        // The ambient PATH was joined with the platform separator, so both
+        // original entries survive the split/join round-trip on Unix and
+        // Windows alike.
         let entries = std::env::split_paths(&path).collect::<Vec<_>>();
         assert_eq!(
             entries.first().map(PathBuf::as_path),
             Some(bin_dir.as_path())
         );
-        assert!(entries.iter().any(|entry| entry == Path::new("/usr/bin")));
+        assert_eq!(
+            entries.get(1).map(PathBuf::as_path),
+            Some(Path::new("/usr/bin"))
+        );
+        assert_eq!(
+            entries.get(2).map(PathBuf::as_path),
+            Some(Path::new("/bin"))
+        );
     }
 
     #[test]
