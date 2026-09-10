@@ -36,7 +36,7 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    change::ChangeService,
+    change::{ChangeService, RustAnalyzerMigrationAnalyzer},
     config::{Config, ConfigError},
     context::CapsuleStore,
     docs::DocsResolver,
@@ -145,15 +145,26 @@ impl AppState {
             Arc::clone(&roots),
             processes.clone(),
         ));
+        let lsp =
+            RustAnalyzerManager::from_config_authorized(&config.rust_analyzer, processes.clone())
+                .ok()
+                .map(Arc::new);
         let change = if config.tools.change {
-            Some(Arc::new(
+            let mut service =
                 ChangeService::new(config.clone(), Arc::clone(&roots), processes.clone()).map_err(
                     |error| ConfigError::InvalidField {
                         field: "change.scratch_dir",
                         message: error,
                     },
-                )?,
-            ))
+                )?;
+            if let Some(manager) = lsp.as_ref() {
+                service =
+                    service.with_migration_analyzer(Arc::new(RustAnalyzerMigrationAnalyzer::new(
+                        Arc::clone(manager),
+                        std::time::Duration::from_millis(config.rust_analyzer.timeout_ms),
+                    )));
+            }
+            Some(Arc::new(service))
         } else {
             None
         };
@@ -173,10 +184,6 @@ impl AppState {
             config.limits.audit_total_bytes,
             config.limits.audit_findings,
         ));
-        let lsp =
-            RustAnalyzerManager::from_config_authorized(&config.rust_analyzer, processes.clone())
-                .ok()
-                .map(Arc::new);
         let cargo_home = std::env::var_os("CARGO_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))

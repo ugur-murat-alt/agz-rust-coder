@@ -22,6 +22,7 @@ pub(crate) const CHANGE_ID_PREFIX: &str = "ch-";
 pub enum ChangeAction {
     Create,
     Stage,
+    Migrate,
     Inspect,
     Validate,
     Export,
@@ -33,6 +34,7 @@ impl ChangeAction {
         match self {
             Self::Create => "create",
             Self::Stage => "stage",
+            Self::Migrate => "migrate",
             Self::Inspect => "inspect",
             Self::Validate => "validate",
             Self::Export => "export",
@@ -61,6 +63,229 @@ pub struct NewFileInput {
     pub content: String,
 }
 
+/// Anchor definition requested for `action=migrate`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MigrateAnchorInput {
+    #[schemars(length(min = 1))]
+    pub file: String,
+    #[schemars(length(min = 1))]
+    pub symbol: String,
+    /// 1-based line selecting one occurrence when the symbol is ambiguous.
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub line: Option<u32>,
+}
+
+/// Supported parameter transformations for the migrate MVP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum MigrateTransformationKind {
+    AddParameter,
+    ChangeParameter,
+}
+
+impl MigrateTransformationKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AddParameter => "addParameter",
+            Self::ChangeParameter => "changeParameter",
+        }
+    }
+}
+
+/// One host-authoritative signature change. `argument` is never guessed: the
+/// host must supply the exact expression every migrated call site receives.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MigrateTransformationInput {
+    pub kind: MigrateTransformationKind,
+    /// New or replacement parameter declaration, for example `factor: u32`.
+    #[schemars(length(min = 1))]
+    pub parameter: String,
+    /// Exact argument expression inserted/replaced at every call site.
+    #[schemars(length(min = 1))]
+    pub argument: String,
+    /// 0-based index among declared parameters excluding a `self` receiver.
+    /// Omitted appends after the last declared parameter.
+    #[serde(default)]
+    #[schemars(range(min = 0))]
+    pub position: Option<u32>,
+}
+
+/// Per-request migration bounds.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MigrateConstraintsInput {
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub max_references: Option<u32>,
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub max_edits: Option<u32>,
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub max_identity_checks: Option<u32>,
+}
+
+/// Domain request for one `action=migrate` execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrateRequest {
+    pub anchor: MigrateAnchorInput,
+    pub transformation: MigrateTransformationInput,
+    /// Only `workspace` is supported today; other scopes are refused with a
+    /// typed reason instead of being silently widened or narrowed.
+    pub consumer_scope: Option<String>,
+    pub constraints: MigrateConstraintsInput,
+}
+
+pub(crate) const MAX_MIGRATION_REFERENCES: u64 = 256;
+pub(crate) const MAX_MIGRATION_EDITS: u64 = 512;
+pub(crate) const MAX_MIGRATION_IDENTITY_CHECKS: u64 = 128;
+pub(crate) const MAX_MIGRATION_SITES: usize = 64;
+pub(crate) const MAX_MIGRATION_OBLIGATIONS: usize = 32;
+pub(crate) const MAX_MIGRATION_NOTES: usize = 24;
+pub(crate) const MAX_MIGRATION_GROUPS: usize = 16;
+pub(crate) const MAX_MIGRATION_MESSAGE_CHARS: usize = 512;
+
+/// One affected definition, implementation, consumer, or re-export site.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationSiteData {
+    pub file: String,
+    pub line: u64,
+    pub column: u64,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feature_scope: Option<String>,
+}
+
+/// Bounded impact map for the requested change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationImpactData {
+    pub definitions: Vec<MigrationSiteData>,
+    pub definitions_total: u64,
+    pub implementations: Vec<MigrationSiteData>,
+    pub implementations_total: u64,
+    pub consumers: Vec<MigrationSiteData>,
+    pub consumers_total: u64,
+    pub reexports: Vec<MigrationSiteData>,
+    pub reexports_total: u64,
+    pub unrelated: Vec<MigrationSiteData>,
+    pub unrelated_total: u64,
+    pub packages: Vec<String>,
+    pub feature_hints: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationTransformationData {
+    pub kind: String,
+    pub parameter: String,
+    pub argument: String,
+    pub resolved_position: u64,
+    /// Always `hostProvided`; the server never synthesizes an argument value.
+    pub argument_source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationApiDiffData {
+    pub before: String,
+    pub after: String,
+    pub changed: bool,
+    pub visibility: String,
+    pub public_api: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationEditGroupData {
+    pub kind: String,
+    pub label: String,
+    pub sites: u64,
+}
+
+/// A site the engine refuses to rewrite mechanically. The host must resolve it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationObligationData {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u64>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationBudgetData {
+    pub max_references: u64,
+    pub references_total: u64,
+    pub max_identity_checks: u64,
+    pub identity_checks: u64,
+    pub max_edits: u64,
+    pub edits_planned: u64,
+    pub omitted_references: u64,
+    pub omitted_edits: u64,
+    /// True when any budget cut edits or references; omissions are never silent.
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationFlagsData {
+    pub behavior_change: bool,
+    pub behavior_change_reasons: Vec<String>,
+    pub evaluation_order_risk: bool,
+    pub move_borrow_risk: bool,
+    /// Compile-pass is not semantic equivalence; this stays `notClaimed`.
+    pub semantic_equivalence_claim: String,
+}
+
+/// Complete bounded report for one migration attempt. Persisted in the change
+/// record so `inspect`/`export` keep the impact map and obligations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationReportData {
+    pub anchor_file: String,
+    pub anchor_symbol: String,
+    pub definition_file: String,
+    pub definition_line: u64,
+    pub transformation: MigrationTransformationData,
+    pub impact: MigrationImpactData,
+    pub api_diff: MigrationApiDiffData,
+    pub edit_groups: Vec<MigrationEditGroupData>,
+    pub obligations: Vec<MigrationObligationData>,
+    pub obligations_total: u64,
+    pub budget: MigrationBudgetData,
+    pub flags: MigrationFlagsData,
+    /// False whenever any obligation, unrelated call site, or budget omission
+    /// remains; a partial migration is never reported as complete.
+    pub complete: bool,
+    /// Always `capturedWorkspaceOnly`: consumers outside the captured
+    /// workspace were not seen, so no global API compatibility is claimed.
+    pub compatibility_scope: String,
+    pub candidate_revision: u64,
+    pub notes: Vec<String>,
+}
+
+impl Default for MigrationTransformationData {
+    fn default() -> Self {
+        Self {
+            kind: String::new(),
+            parameter: String::new(),
+            argument: String::new(),
+            resolved_position: 0,
+            argument_source: "hostProvided".to_owned(),
+        }
+    }
+}
+
 /// Domain request assembled by the protocol boundary.
 #[derive(Debug, Clone)]
 pub struct ChangeRequest {
@@ -70,6 +295,7 @@ pub struct ChangeRequest {
     pub base_identity: Option<String>,
     pub patches: Vec<PatchInput>,
     pub new_files: Vec<NewFileInput>,
+    pub migration: Option<MigrateRequest>,
     pub target: crate::gate::GateTargetId,
     pub options: crate::gate::ValidationOptions,
     pub detail: crate::gate::GateDetail,
@@ -215,6 +441,8 @@ pub struct ChangeData {
     pub new_files: Vec<ChangeNewFileData>,
     pub new_files_total: u64,
     pub new_files_content_omitted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub migration: Option<MigrationReportData>,
     pub cleanup_warnings: Vec<String>,
     pub reason: String,
 }
@@ -242,6 +470,7 @@ impl Default for ChangeData {
             new_files: Vec::new(),
             new_files_total: 0,
             new_files_content_omitted: false,
+            migration: None,
             cleanup_warnings: Vec::new(),
             reason: String::new(),
         }
@@ -393,6 +622,9 @@ pub(crate) struct ChangeRecord {
     pub patch_hash: String,
     pub source_hashes: BTreeMap<String, StoredHash>,
     pub evidence: Vec<StoredEvidence>,
+    /// Latest migration report bound to the revision it was planned for.
+    #[serde(default)]
+    pub migration: Option<MigrationReportData>,
     pub cleanup_warnings: Vec<String>,
 }
 

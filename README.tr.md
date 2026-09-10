@@ -87,7 +87,7 @@ OpenCode gruplanmış MCP araçlarını çoğunlukla `rust_*` adıyla gösterir.
 | `hierarchy` | `rust_hierarchy` | `enabled` | Sınırlı çağrı hiyerarşisini izler. |
 | `rename` | `rust_rename` | `enabled` | Uygulamadan doğrulanmış yeniden adlandırma paketi üretir. |
 | `refactor` | `rust_refactor` | `enabled` | Uygulamadan doğrulanmış refactor paketi üretir. |
-| `change` | `rust_change` | `enabled` | Workspace'e yazmadan sunucuya ait scratch alanında revizyona bağlı changeset oluşturur, uygular ve doğrular. |
+| `change` | `rust_change` | `enabled` | Workspace'e yazmadan sunucuya ait scratch alanında revizyona bağlı changeset oluşturur, uygular, göç ettirir ve doğrular. |
 
 Her araç belirli yapıda veri ve ona eşdeğer, boyutu sınırlı metin döndürür. Dış
 veri `untrustedData` altında tutulur. Derleme hatası, bulunamayan crate veya

@@ -28,7 +28,11 @@ use super::{
     client_roots::{CancellationBridge, WorkspaceRequest},
 };
 use crate::{
-    change::{ChangeAction, ChangeOutcome, ChangeRequest, NewFileInput, PatchInput},
+    change::{
+        ChangeAction, ChangeOutcome, ChangeRequest, MigrateAnchorInput, MigrateConstraintsInput,
+        MigrateRequest, MigrateTransformationInput, MigrateTransformationKind, NewFileInput,
+        PatchInput,
+    },
     config::{Config, ConfigError, DocsFallback as ConfigDocsFallback, WorkspaceCode},
     context::{
         ContextAction, ContextAnchor, ContextData, MAX_ANCHORS, MAX_CHANGE_ID_CHARS,
@@ -151,6 +155,19 @@ pub struct ChangeInput {
     #[serde(default)]
     #[schemars(length(max = 512))]
     pub new_files: Vec<NewFileInput>,
+    /// Anchor definition for `action=migrate`.
+    #[serde(default)]
+    pub anchor: Option<MigrateAnchorInput>,
+    /// Host-authoritative parameter transformation for `action=migrate`.
+    #[serde(default)]
+    pub transformation: Option<MigrateTransformationInput>,
+    /// Only `workspace` is supported; other scopes are refused with a reason.
+    #[serde(default)]
+    #[schemars(length(max = 64))]
+    pub consumer_scope: Option<String>,
+    /// Per-request analysis and edit budgets.
+    #[serde(default)]
+    pub constraints: Option<MigrateConstraintsInput>,
     #[serde(default)]
     pub options: crate::gate::ValidationOptions,
     #[serde(default)]
@@ -883,7 +900,7 @@ pub fn tool_definitions(config: &Config) -> Vec<Tool> {
     if config.tools.change {
         tools.push(tool::<ChangeInput, ChangeData>(
             "change",
-            "Create, stage, validate, export, and discard a revision-bound changeset in server-owned scratch.",
+            "Create, stage, migrate, validate, export, and discard a revision-bound changeset in server-owned scratch.",
             ToolAnnotations::new().destructive(true).open_world(true),
         ));
     }
@@ -2081,9 +2098,9 @@ impl ServerHandler for RustCoderServer {
                 let Some(service) = self.state.change_service() else {
                     return Err(McpError::method_not_found::<CallToolRequestMethod>());
                 };
-                let outcome = service
-                    .execute(request, &workspace.root, cancellation.token(), None)
-                    .await;
+                let outcome =
+                    Box::pin(service.execute(request, &workspace.root, cancellation.token(), None))
+                        .await;
                 Ok(CallToolResponse::Complete(change_result(
                     &self.state,
                     outcome,
@@ -2766,6 +2783,70 @@ fn validate_change(input: &ChangeInput) -> Result<(), McpError> {
                 ));
             }
         }
+        ChangeAction::Migrate => {
+            if input.change_id.is_none() {
+                return Err(McpError::invalid_params(
+                    "action=migrate requires changeId",
+                    None,
+                ));
+            }
+            if input.expected_revision.is_none() {
+                return Err(McpError::invalid_params(
+                    "action=migrate requires expectedRevision",
+                    None,
+                ));
+            }
+            if input.base_identity.is_none() {
+                return Err(McpError::invalid_params(
+                    "action=migrate requires baseIdentity",
+                    None,
+                ));
+            }
+            let Some(anchor) = &input.anchor else {
+                return Err(McpError::invalid_params(
+                    "action=migrate requires anchor",
+                    None,
+                ));
+            };
+            validate_string(&anchor.file, "anchor.file")?;
+            validate_string(&anchor.symbol, "anchor.symbol")?;
+            let Some(transformation) = &input.transformation else {
+                return Err(McpError::invalid_params(
+                    "action=migrate requires transformation",
+                    None,
+                ));
+            };
+            if transformation.parameter.trim().is_empty() {
+                return Err(McpError::invalid_params(
+                    "transformation.parameter cannot be empty",
+                    None,
+                ));
+            }
+            if transformation.argument.trim().is_empty() {
+                return Err(McpError::invalid_params(
+                    "transformation.argument is required and cannot be empty",
+                    None,
+                ));
+            }
+            if transformation.kind == MigrateTransformationKind::ChangeParameter
+                && transformation.position.is_none()
+            {
+                return Err(McpError::invalid_params(
+                    "transformation.position is required for changeParameter",
+                    None,
+                ));
+            }
+            if transformation.parameter.len() > 4_096 || transformation.argument.len() > 8_192 {
+                return Err(McpError::invalid_params(
+                    "transformation parameter/argument exceeds the input bound",
+                    None,
+                ));
+            }
+            input
+                .options
+                .validate(map_check_target(input.target))
+                .map_err(|message| McpError::invalid_params(message, None))?;
+        }
         ChangeAction::Validate => {
             if input.change_id.is_none() {
                 return Err(McpError::invalid_params(
@@ -2791,21 +2872,47 @@ fn validate_change(input: &ChangeInput) -> Result<(), McpError> {
                 .map_err(|message| McpError::invalid_params(message, None))?;
         }
     }
-    if !matches!(input.action, ChangeAction::Validate)
+    if !matches!(input.action, ChangeAction::Validate | ChangeAction::Migrate)
         && (input.timings
             || input.target != CheckTarget::Check
             || input.detail != CheckDetail::Compact)
     {
         return Err(McpError::invalid_params(
-            "target, timings, and detail are accepted only for action=validate",
+            "target, timings, and detail are accepted only for action=validate or action=migrate",
             None,
         ));
     }
-    if !matches!(input.action, ChangeAction::Validate)
+    if !matches!(input.action, ChangeAction::Validate | ChangeAction::Migrate)
         && input.options != crate::gate::ValidationOptions::default()
     {
         return Err(McpError::invalid_params(
-            "options is accepted only for action=validate",
+            "options is accepted only for action=validate or action=migrate",
+            None,
+        ));
+    }
+    if !matches!(input.action, ChangeAction::Migrate)
+        && (input.anchor.is_some()
+            || input.transformation.is_some()
+            || input.consumer_scope.is_some()
+            || input.constraints.is_some())
+    {
+        return Err(McpError::invalid_params(
+            "anchor, transformation, consumerScope, and constraints are accepted only for action=migrate",
+            None,
+        ));
+    }
+    if let Some(scope) = input.consumer_scope.as_deref() {
+        validate_string(scope, "consumerScope")?;
+    }
+    if let Some(position) = input
+        .transformation
+        .as_ref()
+        .and_then(|transformation| transformation.position)
+        && input.anchor.is_some()
+        && position > 1_000
+    {
+        return Err(McpError::invalid_params(
+            "transformation.position is out of range",
             None,
         ));
     }
@@ -2813,6 +2920,15 @@ fn validate_change(input: &ChangeInput) -> Result<(), McpError> {
 }
 
 fn change_request(input: &ChangeInput) -> ChangeRequest {
+    let migration = match (input.anchor.clone(), input.transformation.clone()) {
+        (Some(anchor), Some(transformation)) => Some(MigrateRequest {
+            anchor,
+            transformation,
+            consumer_scope: input.consumer_scope.clone(),
+            constraints: input.constraints.clone().unwrap_or_default(),
+        }),
+        _ => None,
+    };
     ChangeRequest {
         action: input.action,
         change_id: input.change_id.clone(),
@@ -2820,6 +2936,7 @@ fn change_request(input: &ChangeInput) -> ChangeRequest {
         base_identity: input.base_identity.clone(),
         patches: input.patches.clone(),
         new_files: input.new_files.clone(),
+        migration,
         target: map_check_target(input.target),
         options: input.options.clone(),
         detail: match input.detail {
@@ -4680,6 +4797,10 @@ mod tests {
             base_identity: None,
             patches: Vec::new(),
             new_files: Vec::new(),
+            anchor: None,
+            transformation: None,
+            consumer_scope: None,
+            constraints: None,
             options: crate::gate::ValidationOptions::default(),
             target: CheckTarget::Check,
             timings: false,
@@ -4748,6 +4869,80 @@ mod tests {
         assert_eq!(input.expected_revision, Some(0));
         assert!(validate_change(&input).is_ok());
         assert_eq!(change_request(&input).expected_revision, Some(0));
+    }
+
+    #[test]
+    fn change_migrate_input_shape_validates_and_maps_to_the_domain_request() {
+        let input: ChangeInput = serde_json::from_value(serde_json::json!({
+            "action": "migrate",
+            "changeId": "ch-1-1-1",
+            "expectedRevision": 0,
+            "baseIdentity": "base",
+            "anchor": { "file": "api/src/lib.rs", "symbol": "compute", "line": 3 },
+            "transformation": {
+                "kind": "addParameter",
+                "parameter": "factor: u32",
+                "argument": "SCALE",
+                "position": 1
+            },
+            "consumerScope": "workspace",
+            "constraints": { "maxEdits": 8, "maxReferences": 4 },
+            "target": "test"
+        }))
+        .expect("migrate input must deserialize");
+        assert!(validate_change(&input).is_ok());
+        let request = change_request(&input);
+        assert_eq!(request.action, ChangeAction::Migrate);
+        assert_eq!(request.target, GateTargetId::Test);
+        let migration = request.migration.expect("migration inputs");
+        assert_eq!(migration.anchor.symbol, "compute");
+        assert_eq!(migration.transformation.position, Some(1));
+        assert_eq!(migration.constraints.max_edits, Some(8));
+
+        let mut missing_argument = input.clone();
+        missing_argument
+            .transformation
+            .as_mut()
+            .expect("transformation")
+            .argument = "   ".to_owned();
+        assert!(validate_change(&missing_argument).is_err());
+
+        let mut change_without_position = input.clone();
+        change_without_position
+            .transformation
+            .as_mut()
+            .expect("transformation")
+            .kind = MigrateTransformationKind::ChangeParameter;
+        change_without_position
+            .transformation
+            .as_mut()
+            .expect("transformation")
+            .position = None;
+        assert!(validate_change(&change_without_position).is_err());
+        change_without_position
+            .transformation
+            .as_mut()
+            .expect("transformation")
+            .position = Some(0);
+        assert!(validate_change(&change_without_position).is_ok());
+
+        let mut stage_with_anchor = input.clone();
+        stage_with_anchor.action = ChangeAction::Stage;
+        stage_with_anchor.expected_revision = Some(0);
+        stage_with_anchor.patches = vec![PatchInput {
+            file: "src/lib.rs".to_owned(),
+            old_string: "a".to_owned(),
+            new_string: "b".to_owned(),
+        }];
+        assert!(
+            validate_change(&stage_with_anchor).is_err(),
+            "stage must reject migrate-only fields"
+        );
+
+        let mut migrate_without_analyzer_defaults = input.clone();
+        migrate_without_analyzer_defaults.constraints = None;
+        migrate_without_analyzer_defaults.consumer_scope = None;
+        assert!(validate_change(&migrate_without_analyzer_defaults).is_ok());
     }
 
     #[test]

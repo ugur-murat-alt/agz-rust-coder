@@ -31,7 +31,7 @@ işaretini korur.
 | `hierarchy` | Rust Analyzer | Workspace-code politikasına bağlı | Sınırlı gelen/giden çağrı grafiği. |
 | `rename` | Rust Analyzer | Kaynağa asla yazmaz | Doğrulanmış `old_string`/`new_string` edit paketi. |
 | `refactor` | Rust Analyzer | Kaynağa asla yazmaz | Doğrulanmış, yazmasız refactor paketi. |
-| `change` | Sunucuya ait scratch + aday doğrulaması için Cargo/rustc | Workspace'e asla yazmaz; yalnız aday kopyayı derler | Aday hash'leri, doğrulama kanıtı (taze `FAIL` için sınırlı tanılar ve yazmasız öneriler) ve doğrulanmış/doğrulanmamış export paketi içeren revizyona bağlı change kaydı. |
+| `change` | Sunucuya ait scratch + aday doğrulaması için Cargo/rustc | Workspace'e asla yazmaz; yalnız aday kopyayı derler | Aday hash'leri, doğrulama kanıtı (taze `FAIL` için sınırlı tanılar ve yazmasız öneriler) ve doğrulanmış/doğrulanmamış export paketi içeren revizyona bağlı change kaydı. `action=migrate`; kimlik doğrulamalı etki haritası, host argümanlı yapısal düzenlemeler, tipli yükümlülükler ve gerçek gate kanıtı ekler. |
 
 `check` hedefleri `check`, `clippy`, `test`, `doc`, `fmt` ve `all` değerleridir.
 Biçimlendirme yalnız kontrol kipinde çalışır. Tamamlanmış açık bir doğrulama daha
@@ -105,6 +105,34 @@ başarısız olur. Uygulama sırasında G/Ç hatası, "applying" işareti ile so
 arasında çökme veya kayıtlı revizyonla eşleşmeyen aday byte'ları change'i
 `FAILED_INCONSISTENT` işaretler ve sonraki stage/validate/export istekleri
 reddedilir.
+
+### Göç (`action=migrate`)
+
+`migrate`, bir public API veya imza değişikliği için etki haritası ve
+uygulanabilir edit grupları üretir, mekanik olarak çözülebilen düzenlemeleri
+aday kopyaya uygular ve dönüştürülmüş aday revizyon üzerinde gerçek Cargo
+doğrulaması çalıştırır. `changeId`, `expectedRevision`, `baseIdentity`, `anchor`
+(`file`/`symbol`/isteğe bağlı `line`) ve `transformation` (`kind` =
+`addParameter` veya `changeParameter`, host'un verdiği `parameter` ve
+`argument`, isteğe bağlı 0 tabanlı `position`) zorunludur. Host argümanı asla
+tahmin edilmez; argümansız istek reddedilir. Dönüşümler anchor tanımını,
+implementasyonlarını ve tüketicilerini rust-analyzer definition, reference ve
+implementation verisiyle çözer; imzaları ve çağrı argüman listelerini yapısal
+olarak (UTF-8, yorum/string/literal farkındalığıyla) yeniden yazar; düz düzenli
+ifade değişimi kullanılmaz. Her referans anchor tanımına karşı geri
+doğrulanır; böylece aynı isimli ilgisiz sembol düzenlenmek yerine dışlanır.
+Rapor; etkilenen tanım, implementasyon, tüketici ve re-export/import
+listelerini, public API farkını, dönüştürülen ve çözülemeyen yerleri,
+paket/feature sınırlarını, aday farkını ve gerçek gate kanıtını içerir. Macro
+çağrısı içindeki çağrı noktaları, değer olarak kullanılan semboller, arity
+uyuşmazlıkları, sonuçsuz kimlik kontrolleri ve bütçesi tükenen referanslar
+düzenleme yerine tipli yükümlülük olur. Herhangi bir yükümlülük veya bütçe
+atlaması kaldığında `complete` false kalır; gate geçse bile. Davranış
+değiştirebilecek dönüşümler `semanticEquivalenceClaim = notClaimed` ile ve
+değerlendirme sırası/move-borrow uyarılarıyla işaretlenir. Yapılandırılmış
+rust-analyzer yoksa `migrate` tipli `ANALYZER_UNAVAILABLE` sonucu döndürür ve
+hiçbir şey yazmaz. Aday doğrulaması özgün workspace'e karşı asla çalışmaz ve
+yakalanan ağaç dışındaki tüketiciler için global API uyumluluğu iddia edilmez.
 
 `validate` ve taze `inspect`/`export` kanıt satırı ayrıca sınırlı aday
 derleyici geri bildirimi döndürür: `compact`, `standard` veya `full` detayına

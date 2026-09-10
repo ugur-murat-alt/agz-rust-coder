@@ -558,6 +558,7 @@ mod tests {
             patch_hash: String::new(),
             source_hashes: std::collections::BTreeMap::new(),
             evidence: Vec::new(),
+            migration: None,
             cleanup_warnings: Vec::new(),
         }
     }
