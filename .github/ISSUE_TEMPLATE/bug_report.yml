@@ -40,8 +40,8 @@ body:
     id: client
     attributes:
       label: MCP client
-      description: Name and version of OpenCode or another MCP client.
-      placeholder: OpenCode beta-18743
+      description: Name and version of the MCP client (for example OpenCode2).
+      placeholder: OpenCode2 beta-18743 (or another MCP client)
     validations:
       required: true
   - type: input

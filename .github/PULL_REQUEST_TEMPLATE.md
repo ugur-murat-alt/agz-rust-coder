@@ -8,7 +8,7 @@
 - [ ] `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
 - [ ] `cargo test --workspace --all-targets --all-features --locked --no-fail-fast`
 - [ ] `cargo +1.88.0 check --workspace --all-targets --all-features --locked`
-- [ ] Relevant protocol, OpenCode, and benchmark smokes
+- [ ] Relevant protocol, client-integration, and benchmark smokes
 - [ ] Real adapter and `cargo deny` checks when applicable
 
 ## Safety
