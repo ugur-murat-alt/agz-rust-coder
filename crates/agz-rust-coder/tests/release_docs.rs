@@ -42,6 +42,29 @@ fn bilingual_public_contract_is_in_sync() {
 }
 
 #[test]
+fn profile_config_rows_appear_once_in_both_readmes() {
+    for (name, document) in [("README.md", ENGLISH), ("README.tr.md", TURKISH)] {
+        for key in [
+            "profile.max_report_bytes",
+            "profile.max_runs",
+            "profile.compare_samples",
+        ] {
+            let occurrences = document
+                .lines()
+                .filter(|line| line.starts_with('|'))
+                .filter(|line| {
+                    line.trim_matches('|')
+                        .split('|')
+                        .next()
+                        .is_some_and(|column| column.trim().trim_matches('`') == key)
+                })
+                .count();
+            assert_eq!(occurrences, 1, "{name}: {key} must appear exactly once");
+        }
+    }
+}
+
+#[test]
 fn drift_validator_rejects_version_config_tool_and_link_changes() {
     let current_version = format!("`{}`", env!("CARGO_PKG_VERSION"));
     let wrong_version = TURKISH.replacen(&current_version, "`9.9.9`", 1);

@@ -114,10 +114,12 @@ dosyası ve varsayılanlardır. Ortam anahtarları bölümler arasında `__` kul
 | `profile.compare_samples` | `3` | Hız iddiası öncesi her taraf için gereken örnek sayısı. |
 | `limits.tool_output_bytes` | `49152` | Serileştirilmiş araç sonucu üst sınırı. |
 | `change.max_bytes` | `268435456` | Changeset başına yakalanan aday byte üst sınırı. |
-| `profile.max_report_bytes` | `4194304` | Tek Cargo zamanlama artifact'ı için sınırlı okuma/saklama üst sınırı. |
-| `profile.max_runs` | `4` | Bir `profile` çağrısında kullanılabilen taze Cargo koşusu. |
-| `profile.compare_samples` | `3` | Hız iddiası öncesi her taraf için gereken örnek sayısı. |
 | `telemetry.enabled` | `true` | Prompt veya kaynak içermeyen sınırlı yerel etkinlik kaydı. |
+
+`profile` kanıtı sınırlıdır: en güncel 64 kayıt bellekte tutulur ve sunucuya ait
+`profile-evidence` dizinindeki zamanlama artifact'ları 24 saat sonra veya 64
+dosyayı aşınca temizlenir. `profile` sonucu bu saklama politikasını görünür
+kılar; süresi dolan kanıt sessizce yeniden kullanılmaz.
 
 Tüm CLI alanları için `agz-rust-coder --help` çalıştırın. Tam davranış ve
 varsayılan tablosu [docs/tools.tr.md](docs/tools.tr.md) içindedir.

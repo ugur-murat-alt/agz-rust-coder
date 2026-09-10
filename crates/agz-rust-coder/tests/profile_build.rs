@@ -10,7 +10,7 @@ use std::{
 };
 
 use agz_rust_coder::{
-    Config,
+    Config, RustCoderServer,
     gate::GateTargetId,
     process::ProcessSupervisor,
     tools::{
@@ -18,6 +18,15 @@ use agz_rust_coder::{
     },
     workspace::{AuthorizedRoot, ClientRoots, RootGuard, select_workspace},
 };
+use anyhow::{Context, Result};
+use rmcp::{
+    ClientLifecycleMode, ClientServiceExt, ServiceExt,
+    model::{
+        CallToolRequestParams, CallToolResponse, ClientCapabilities, ClientInfo, ErrorCode,
+        Implementation, ProtocolVersion,
+    },
+};
+use serde_json::{Map, Value};
 use support::{TestRoot, write_minimal_package};
 use tokio_util::sync::CancellationToken;
 
@@ -79,6 +88,7 @@ impl Fixture {
             options: Default::default(),
             client_roots: ClientRoots::unsupported(),
             root_epoch: 0,
+            workspace_root: self.root.clone(),
             budget: ProfileBudget {
                 max_runs: 4,
                 max_report_bytes,
@@ -96,6 +106,7 @@ impl Fixture {
             options: Default::default(),
             client_roots: ClientRoots::unsupported(),
             root_epoch: 0,
+            workspace_root: self.root.clone(),
             budget: ProfileBudget {
                 max_runs,
                 max_report_bytes: 4 * 1024 * 1024,
@@ -209,14 +220,30 @@ async fn manifest_change_is_reported_as_a_distinct_rebuild_input() {
     let before = fixture.analyze(&service, None).await;
     assert_eq!(before.status, "COMPLETE", "{}", before.reason);
 
+    // Changing the edition invalidates the package fingerprint, so the rebuild
+    // profile really differs and not only the manifest text.
     fixture.test.write(
         "workspace/Cargo.toml",
-        "[package]\nname = \"profile-fixture-manifest\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[features]\nextra = []\n",
+        "[package]\nname = \"profile-fixture-manifest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
     );
     let after = fixture.analyze(&service, None).await;
     assert_eq!(after.status, "COMPLETE", "{}", after.reason);
     assert!(after.rebuild.available);
     assert_ne!(after.conditions.input_hash, before.conditions.input_hash);
+    assert!(
+        after.rebuild.rebuilt_units.unwrap_or(0) >= 1,
+        "{:?}",
+        after.rebuild
+    );
+    assert!(
+        after
+            .rebuild
+            .rebuilt_packages
+            .iter()
+            .any(|name| name.contains("profile-fixture-manifest")),
+        "{:?}",
+        after.rebuild
+    );
     assert!(
         after
             .explanations
@@ -326,7 +353,7 @@ async fn cancelled_run_never_reports_cache_hits_or_causality() {
 async fn single_sample_compare_records_conditions_and_stays_inconclusive() {
     let fixture = Fixture::new("compare-single", None);
     let service = fixture.service();
-    let baseline = fixture.analyze(&service, Some("change-1")).await;
+    let baseline = fixture.analyze(&service, Some("fixture-change")).await;
     assert_eq!(baseline.status, "COMPLETE", "{}", baseline.reason);
 
     let comparison = service
@@ -362,7 +389,7 @@ async fn single_sample_compare_records_conditions_and_stays_inconclusive() {
 async fn single_run_per_side_can_never_produce_a_speed_claim() {
     let fixture = Fixture::new("compare-single-rule", None);
     let service = fixture.service_with(1, 1);
-    let baseline = fixture.analyze(&service, None).await;
+    let baseline = fixture.analyze(&service, Some("fixture-change")).await;
     assert_eq!(baseline.status, "COMPLETE", "{}", baseline.reason);
     let comparison = service
         .compare(
@@ -398,6 +425,158 @@ async fn unknown_baseline_evidence_is_inconclusive_without_running() {
     assert_eq!(comparison.baseline.samples, 0);
     assert_eq!(comparison.candidate.samples, 0);
     assert!(comparison.speed_claim.is_none());
+}
+
+#[tokio::test]
+async fn duplicate_baseline_evidence_ids_are_counted_once() {
+    let fixture = Fixture::new("compare-duplicate", None);
+    let service = fixture.service();
+    let baseline = fixture.analyze(&service, Some("fixture-change")).await;
+    assert_eq!(baseline.status, "COMPLETE", "{}", baseline.reason);
+
+    let comparison = service
+        .compare(
+            &fixture.compare_request(
+                vec![baseline.evidence_id.clone(), baseline.evidence_id.clone()],
+                1,
+            ),
+            Instant::now(),
+            Some(fixture.authority()),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(comparison.status, "INCONCLUSIVE", "{}", comparison.reason);
+    assert_eq!(comparison.baseline.samples, 1, "{:?}", comparison.baseline);
+    assert_eq!(comparison.candidate.samples, 1);
+    assert!(
+        comparison
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("more than once")),
+        "{:?}",
+        comparison.warnings
+    );
+    assert!(comparison.speed_claim.is_none());
+}
+
+#[tokio::test]
+async fn non_complete_baseline_evidence_is_excluded_without_fresh_runs() {
+    let fixture = Fixture::new("compare-incomplete", None);
+    let service = fixture.service();
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let cancelled = service
+        .analyze(
+            &fixture.request(Some("fixture-change"), 4 * 1024 * 1024),
+            Instant::now(),
+            Some(fixture.authority()),
+            &cancellation,
+        )
+        .await;
+    assert_eq!(cancelled.status, "CANCELLED", "{}", cancelled.reason);
+
+    let comparison = service
+        .compare(
+            &fixture.compare_request(vec![cancelled.evidence_id.clone()], 4),
+            Instant::now(),
+            Some(fixture.authority()),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(comparison.status, "INCONCLUSIVE", "{}", comparison.reason);
+    assert_eq!(comparison.baseline.samples, 0);
+    assert_eq!(comparison.candidate.samples, 0);
+    assert!(
+        comparison
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("excluded")),
+        "{:?}",
+        comparison.warnings
+    );
+    assert!(comparison.speed_claim.is_none());
+}
+
+#[tokio::test]
+async fn baseline_evidence_from_another_change_is_rejected_without_runs() {
+    let fixture = Fixture::new("compare-foreign-change", None);
+    let service = fixture.service();
+    let baseline = fixture.analyze(&service, Some("other-change")).await;
+    assert_eq!(baseline.status, "COMPLETE", "{}", baseline.reason);
+
+    let comparison = service
+        .compare(
+            &fixture.compare_request(vec![baseline.evidence_id.clone()], 4),
+            Instant::now(),
+            Some(fixture.authority()),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(comparison.status, "INCONCLUSIVE", "{}", comparison.reason);
+    assert!(
+        comparison.reason.contains("changeId"),
+        "{}",
+        comparison.reason
+    );
+    assert_eq!(comparison.baseline.samples, 1);
+    assert_eq!(comparison.candidate.samples, 0);
+    assert!(comparison.speed_claim.is_none());
+}
+
+#[tokio::test]
+async fn baseline_evidence_from_another_root_epoch_is_rejected_without_runs() {
+    let fixture = Fixture::new("compare-foreign-epoch", None);
+    let service = fixture.service();
+    let baseline = fixture.analyze(&service, Some("fixture-change")).await;
+    assert_eq!(baseline.status, "COMPLETE", "{}", baseline.reason);
+
+    let mut request = fixture.compare_request(vec![baseline.evidence_id.clone()], 4);
+    request.root_epoch = 9;
+    let comparison = service
+        .compare(
+            &request,
+            Instant::now(),
+            Some(fixture.authority()),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(comparison.status, "INCONCLUSIVE", "{}", comparison.reason);
+    assert!(
+        comparison.reason.contains("root epoch"),
+        "{}",
+        comparison.reason
+    );
+    assert_eq!(comparison.candidate.samples, 0);
+    assert!(comparison.speed_claim.is_none());
+}
+
+#[tokio::test]
+async fn compare_uses_one_absolute_wall_deadline() {
+    let fixture = Fixture::new("compare-wall", None);
+    let service = fixture.service();
+    let mut request = fixture.compare_request(Vec::new(), 4);
+    request.budget.wall_time_ms = 1;
+    let started = Instant::now();
+    let comparison = service
+        .compare(
+            &request,
+            started,
+            Some(fixture.authority()),
+            &CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(comparison.status, "INCONCLUSIVE", "{}", comparison.reason);
+    assert_eq!(
+        comparison.candidate.samples, 0,
+        "{:?}",
+        comparison.candidate
+    );
+    assert!(comparison.speed_claim.is_none());
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "compare multiplied its wall budget: {:?}",
+        started.elapsed()
+    );
 }
 
 #[test]
@@ -445,4 +624,232 @@ async fn wall_time_budget_cancels_a_run_without_fabricating_evidence() {
         assert_eq!(record.status, "BUDGET_EXHAUSTED", "{}", record.reason);
         assert!(!record.rebuild.available);
     }
+}
+
+fn mcp_client_info(capabilities: ClientCapabilities) -> ClientInfo {
+    ClientInfo::new(
+        capabilities,
+        Implementation::new("agz-rust-coder-profile-test", "0.1.0"),
+    )
+}
+
+fn mcp_config(fixture: &Fixture, tool_output_bytes: u64) -> Config {
+    let mut config = Config::defaults_at(&fixture.root);
+    config.gate.debounce_ms = 10;
+    config.gate.hard_timeout_ms = 60_000;
+    config.gate.cache_dir = fixture.state.join("cache");
+    config.gate.lease_dir = fixture.state.join("leases");
+    config.limits.tool_output_bytes = tool_output_bytes;
+    config.telemetry.enabled = false;
+    config.telemetry.path = fixture.state.join("activity.jsonl");
+    config
+}
+
+fn spawn_mcp_server(
+    config: Config,
+) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<Result<()>>) {
+    let (server_transport, client_transport) = tokio::io::duplex(1 << 20);
+    let task = tokio::spawn(async move {
+        let service = RustCoderServer::new(config)?
+            .serve(server_transport)
+            .await?;
+        service.waiting().await?;
+        Ok(())
+    });
+    (client_transport, task)
+}
+
+fn mcp_error_code(error: rmcp::ServiceError) -> ErrorCode {
+    match error {
+        rmcp::ServiceError::McpError(data) => data.code,
+        other => panic!("expected MCP error, got {other:?}"),
+    }
+}
+
+fn profile_arguments(root: &Path, extra: Value) -> Map<String, Value> {
+    let mut arguments = Map::new();
+    arguments.insert("dir".to_owned(), Value::String(root.display().to_string()));
+    if let Value::Object(fields) = extra {
+        arguments.extend(fields);
+    }
+    arguments
+}
+
+#[tokio::test]
+async fn profile_mcp_maps_validation_status_and_is_error() -> Result<()> {
+    let fixture = Fixture::new("mcp-profile", None);
+    let (transport, server) = spawn_mcp_server(mcp_config(&fixture, 512));
+    let client = mcp_client_info(ClientCapabilities::default())
+        .serve(transport)
+        .await?;
+
+    // validate_profile: only one Cargo target is accepted.
+    let error = client
+        .peer()
+        .call_tool_once(
+            CallToolRequestParams::new("profile").with_arguments(profile_arguments(
+                &fixture.root,
+                serde_json::json!({"configuration": {"target": "all"}}),
+            )),
+        )
+        .await
+        .expect_err("multi-target profile must be invalid");
+    assert_eq!(mcp_error_code(error), ErrorCode::INVALID_PARAMS);
+
+    // validate_string: an oversized changeId is rejected before any work.
+    let error = client
+        .peer()
+        .call_tool_once(
+            CallToolRequestParams::new("profile").with_arguments(profile_arguments(
+                &fixture.root,
+                serde_json::json!({"changeId": "x".repeat(5_000)}),
+            )),
+        )
+        .await
+        .expect_err("oversized changeId must be invalid");
+    assert_eq!(mcp_error_code(error), ErrorCode::INVALID_PARAMS);
+
+    // A successful analyze is a non-error call that still marks untrusted data
+    // and truncates the wire form under the configured output bound.
+    let CallToolResponse::Complete(result) = client
+        .peer()
+        .call_tool_once(
+            CallToolRequestParams::new("profile").with_arguments(profile_arguments(
+                &fixture.root,
+                serde_json::json!({
+                    "action": "build_analyze",
+                    "changeId": "fixture-change",
+                    "configuration": {"target": "check"},
+                    "budget": {"maxRuns": 1, "maxReportBytes": 4_194_304, "wallTimeMs": 60_000},
+                }),
+            )),
+        )
+        .await?
+    else {
+        anyhow::bail!("capability-free client unexpectedly received a task");
+    };
+    let structured = result
+        .structured_content
+        .as_ref()
+        .context("missing structured result")?;
+    assert_eq!(result.is_error, Some(false));
+    assert_eq!(structured["tool"], "profile");
+    assert_eq!(structured["status"], "COMPLETE", "{structured}");
+    assert_eq!(structured["untrustedData"], true);
+    assert_eq!(structured["truncated"], true);
+
+    // INCONCLUSIVE comparisons are successful calls with is_error=true.
+    let CallToolResponse::Complete(result) = client
+        .peer()
+        .call_tool_once(
+            CallToolRequestParams::new("profile").with_arguments(profile_arguments(
+                &fixture.root,
+                serde_json::json!({
+                    "action": "build_compare",
+                    "changeId": "fixture-change",
+                    "baselineEvidence": ["pe-does-not-exist"],
+                }),
+            )),
+        )
+        .await?
+    else {
+        anyhow::bail!("capability-free client unexpectedly received a task");
+    };
+    let structured = result
+        .structured_content
+        .as_ref()
+        .context("missing structured result")?;
+    assert_eq!(result.is_error, Some(true));
+    assert_eq!(structured["status"], "INCONCLUSIVE", "{structured}");
+
+    client.cancel().await?;
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn disabled_profile_tool_is_not_registered_or_callable() -> Result<()> {
+    let fixture = Fixture::new("mcp-profile-disabled", None);
+    let mut config = mcp_config(&fixture, 49_152);
+    config.tools.profile = false;
+    let (transport, server) = spawn_mcp_server(config);
+    let client = mcp_client_info(ClientCapabilities::default())
+        .serve(transport)
+        .await?;
+
+    let tools = client.peer().list_tools(None).await?;
+    assert!(
+        tools.tools.iter().all(|tool| tool.name != "profile"),
+        "disabled profile tool was still advertised"
+    );
+    let error = client
+        .peer()
+        .call_tool_once(CallToolRequestParams::new("profile"))
+        .await
+        .expect_err("disabled profile tool must not be callable");
+    assert_eq!(mcp_error_code(error), ErrorCode::METHOD_NOT_FOUND);
+
+    client.cancel().await?;
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn profile_reports_resource_blocked_while_a_task_holds_the_permit() -> Result<()> {
+    let fixture = Fixture::new(
+        "mcp-profile-blocked",
+        Some("fn main() { std::thread::sleep(std::time::Duration::from_secs(60)); }\n"),
+    );
+    let mut config = mcp_config(&fixture, 49_152);
+    config.limits.max_in_flight_tools = 1;
+    let (transport, server) = spawn_mcp_server(config);
+    let client = mcp_client_info(ClientCapabilities::builder().enable_tasks().build())
+        .serve_with_lifecycle(
+            transport,
+            ClientLifecycleMode::Discover {
+                preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+            },
+        )
+        .await?;
+
+    let task = match client
+        .peer()
+        .call_tool_once(CallToolRequestParams::new("check"))
+        .await?
+    {
+        CallToolResponse::Task(task) => task,
+        other => anyhow::bail!("expected check task response, got {other:?}"),
+    };
+
+    let CallToolResponse::Complete(result) = client
+        .peer()
+        .call_tool_once(
+            CallToolRequestParams::new("profile").with_arguments(profile_arguments(
+                &fixture.root,
+                serde_json::json!({
+                    "action": "build_analyze",
+                    "configuration": {"target": "check"},
+                }),
+            )),
+        )
+        .await?
+    else {
+        anyhow::bail!("profile unexpectedly received a task");
+    };
+    let structured = result
+        .structured_content
+        .as_ref()
+        .context("missing structured result")?;
+    assert_eq!(result.is_error, Some(true));
+    assert_eq!(structured["status"], "RESOURCE_BLOCKED", "{structured}");
+
+    client
+        .peer()
+        .cancel_task(rmcp::model::CancelTaskParams::new(
+            task.task.task_id.clone(),
+        ))
+        .await?;
+    client.cancel().await?;
+    server.await??;
+    Ok(())
 }
