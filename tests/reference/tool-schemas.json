@@ -29,7 +29,7 @@
     "properties": {
       "action": {
         "type": "string",
-        "enum": ["build_analyze", "build_compare"]
+        "enum": ["build_analyze", "build_compare", "runtime_compare"]
       },
       "dir": {
         "type": "string",
@@ -43,6 +43,21 @@
       },
       "baselineEvidence": {
         "type": "array"
+      },
+      "baselineRevision": {
+        "type": "integer"
+      },
+      "candidateRevision": {
+        "type": "integer"
+      },
+      "benchmarkSpec": {
+        "type": "object"
+      },
+      "correctnessGate": {
+        "type": "object"
+      },
+      "hypothesis": {
+        "type": "string"
       },
       "budget": {
         "type": "object"

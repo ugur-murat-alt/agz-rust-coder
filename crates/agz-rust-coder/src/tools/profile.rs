@@ -159,7 +159,7 @@ pub struct ConditionValue {
 }
 
 impl ConditionValue {
-    fn unavailable(reason: impl Into<String>) -> Self {
+    pub(crate) fn unavailable(reason: impl Into<String>) -> Self {
         Self {
             available: false,
             summary: "unavailable".to_owned(),
@@ -1743,7 +1743,7 @@ fn elapsed_ms(started_at: Instant) -> u64 {
     started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
-fn summarize_toolchain(stdout: &str) -> String {
+pub(crate) fn summarize_toolchain(stdout: &str) -> String {
     let mut summary = Vec::new();
     for line in stdout.lines().take(8) {
         let line = line.trim();
@@ -1765,7 +1765,7 @@ fn summarize_toolchain(stdout: &str) -> String {
     }
 }
 
-fn hardware_class() -> ConditionValue {
+pub(crate) fn hardware_class() -> ConditionValue {
     // n2 note: this is a process-visible host probe outside the authorized
     // workspace, matching the existing precedent for bounded environment
     // metadata (OS, architecture, parallelism). It reads no workspace source.

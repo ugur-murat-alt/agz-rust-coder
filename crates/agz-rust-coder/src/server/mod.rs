@@ -46,7 +46,10 @@ use crate::{
     process::{ProcessJournal, ProcessSupervisor},
     repair::RepairService,
     telemetry::ActivityLog,
-    tools::{AuditLimits, AuditService, CheckService, ProfileService, VerifyService},
+    tools::{
+        AuditLimits, AuditService, CheckService, ProfileService, RuntimeCompareService,
+        VerifyService,
+    },
     work::WorkService,
     workspace::{AuthorizedRoot, MetadataService, RootGuard},
 };
@@ -71,6 +74,7 @@ pub struct AppState {
     /// disabled it fails every action closed as `BLOCKED`.
     work: WorkService,
     profile: ProfileService,
+    runtime: RuntimeCompareService,
     verify: Arc<VerifyService>,
     audit: AuditService,
     docs: Arc<DocsResolver>,
@@ -182,6 +186,7 @@ impl AppState {
             Duration::from_millis(config.context.capsule_ttl_ms),
         ));
         let profile = ProfileService::new(config.clone(), Arc::clone(&check), processes.clone());
+        let runtime = RuntimeCompareService::new(config.clone(), processes.clone());
         let verify = Arc::new(VerifyService::new(
             Arc::clone(&check),
             config.verify.clone(),
@@ -211,6 +216,7 @@ impl AppState {
             repair,
             work,
             profile,
+            runtime,
             verify,
             audit,
             docs: Arc::new(DocsResolver::with_authorized_supervisor(processes)),
@@ -348,6 +354,10 @@ impl AppState {
 
     pub(crate) fn profile_service(&self) -> &ProfileService {
         &self.profile
+    }
+
+    pub(crate) fn runtime_service(&self) -> &RuntimeCompareService {
+        &self.runtime
     }
 
     pub(crate) fn verify_service(&self) -> &Arc<VerifyService> {

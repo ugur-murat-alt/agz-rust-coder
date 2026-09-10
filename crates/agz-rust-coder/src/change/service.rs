@@ -36,7 +36,8 @@ use crate::{
 };
 
 use super::capture::{
-    CaptureError, CaptureLimits, capture_tree, manifest_hash, relative_path_string, sha256_hex,
+    CaptureError, CaptureLimits, CaptureManifest, capture_tree, manifest_hash,
+    relative_path_string, sha256_hex,
 };
 use super::model::{
     CHANGE_ID_PREFIX, CHANGE_SCHEMA_VERSION, CaptureSummary, ChangeAction, ChangeCaptureData,
@@ -48,6 +49,10 @@ use super::model::{
     StoredNewFile, StoredPatch,
 };
 use super::patch::{CandidateLimits, apply_plan, plan_patches};
+use super::runtime::{
+    RuntimeSnapshotPair, SnapshotError, copy_tree_bounded, expected_baseline_files,
+    expected_candidate_files, reverse_apply, verify_and_digest,
+};
 use super::store::{
     ChangeStore, MAX_CLEANUP_WARNINGS, is_valid_change_id, normalize_lexical, now_ms, truncate,
 };
@@ -190,6 +195,25 @@ impl ChangeService {
             return Err("the requested candidate file exceeds the bounded snapshot".to_owned());
         }
         String::from_utf8(bytes).map_err(|_| "the candidate source is not valid UTF-8".to_owned())
+    }
+
+    /// Current recorded revision for a change id. Read-only: no scratch is
+    /// created and the candidate copy is not touched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotError::NotFound`] when the change id has no record.
+    pub fn current_revision(&self, change_id: &str) -> Result<u64, SnapshotError> {
+        if !is_valid_change_id(change_id) {
+            return Err(SnapshotError::Invalid(
+                "changeId is not a valid server-issued id".to_owned(),
+            ));
+        }
+        match self.store.load(change_id) {
+            Ok(Some(record)) => Ok(record.revision),
+            Ok(None) => Err(SnapshotError::NotFound),
+            Err(reason) => Err(SnapshotError::Invalid(reason)),
+        }
     }
 
     /// Executes one change action. `workspace` is the request-authorized root
@@ -897,6 +921,173 @@ impl ChangeService {
             !matches!(status, "PASS" | "FAIL"),
             data,
         )
+    }
+
+    /// Materialize a verified baseline/candidate snapshot pair from
+    /// server-owned change scratch for `profile(action=runtime_compare)`.
+    ///
+    /// The candidate side is a bounded copy of the recorded candidate revision.
+    /// The baseline side starts from the same copy, reverse-applies the
+    /// recorded patch log, and re-hashes both sides against the capture
+    /// manifest and the recorded revision hashes. The original workspace is
+    /// never read. `destination` must be a fresh server-owned directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`SnapshotError`]; a revision, hash, or extra-file
+    /// mismatch is `Incomparable`/`Stale` instead of a guessed measurement.
+    pub async fn materialize_runtime_snapshots(
+        &self,
+        change_id: &str,
+        baseline_revision: u64,
+        candidate_revision: u64,
+        destination: &Path,
+        cancellation: &CancellationToken,
+    ) -> Result<RuntimeSnapshotPair, SnapshotError> {
+        if !is_valid_change_id(change_id) {
+            return Err(SnapshotError::Invalid(
+                "changeId is not a valid server-issued id".to_owned(),
+            ));
+        }
+        if cancellation.is_cancelled() {
+            return Err(SnapshotError::Cancelled);
+        }
+        if baseline_revision != 0 {
+            return Err(SnapshotError::Incomparable(format!(
+                "only revision 0 is materializable as the baseline; requested {baseline_revision}"
+            )));
+        }
+        let _stripe = self.stripe(change_id).lock_owned().await;
+        let record = match self.store.load(change_id) {
+            Ok(Some(record)) => record,
+            Ok(None) => return Err(SnapshotError::NotFound),
+            Err(reason) => return Err(SnapshotError::Invalid(reason)),
+        };
+        match record.state {
+            RecordState::Ready => {}
+            RecordState::FailedInconsistent => {
+                return Err(SnapshotError::Incomparable(
+                    "the candidate may be partially applied; runtime comparison is refused"
+                        .to_owned(),
+                ));
+            }
+            RecordState::Discarded => return Err(SnapshotError::NotFound),
+            RecordState::Applying | RecordState::Capturing => {
+                return Err(SnapshotError::Stale(format!(
+                    "the change is still {}; no completed revision was recorded",
+                    record.state.as_str()
+                )));
+            }
+        }
+        if candidate_revision != record.revision {
+            return Err(SnapshotError::Stale(format!(
+                "candidateRevision {candidate_revision} does not match current revision {}",
+                record.revision
+            )));
+        }
+        let _file_lock = match self.store.try_lock(change_id) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                return Err(SnapshotError::Stale(
+                    "the change scratch is locked by another process".to_owned(),
+                ));
+            }
+            Err(reason) => return Err(SnapshotError::Unavailable(reason)),
+        };
+        let record = match self.reload_pinned_record(ChangeAction::Validate, change_id, &record) {
+            Ok(record) => record,
+            Err(outcome) => return Err(SnapshotError::Stale(outcome.data.reason.clone())),
+        };
+        if cancellation.is_cancelled() {
+            return Err(SnapshotError::Cancelled);
+        }
+        let recorded_candidate = self.store.candidate_dir(change_id);
+        if fs::symlink_metadata(&recorded_candidate)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(SnapshotError::Invalid(
+                "the candidate copy is a symlink and cannot be measured".to_owned(),
+            ));
+        }
+        if record.applying_revision.is_some() {
+            return Err(SnapshotError::Stale(
+                "an interrupted stage left the candidate state unrecorded".to_owned(),
+            ));
+        }
+        verify_candidate_bytes(&self.store, change_id, &record)
+            .map_err(SnapshotError::Incomparable)?;
+        let manifest_bytes = fs::read(self.store.manifest_path(change_id)).map_err(|error| {
+            SnapshotError::Unavailable(format!("capture manifest is unavailable: {error}"))
+        })?;
+        let manifest: CaptureManifest =
+            serde_json::from_slice(&manifest_bytes).map_err(|error| {
+                SnapshotError::Invalid(format!("capture manifest is malformed: {error}"))
+            })?;
+        // Both expected-file maps are computed before any copy so a recorded
+        // path that can never be materialized fails before scratch is created.
+        let expected_candidate = expected_candidate_files(&record, &manifest)?;
+        let expected_baseline = expected_baseline_files(&record, &manifest)?;
+        if destination.exists() {
+            return Err(SnapshotError::Invalid(
+                "the runtime snapshot destination already exists".to_owned(),
+            ));
+        }
+        fs::create_dir_all(destination).map_err(|error| {
+            SnapshotError::Unavailable(format!(
+                "could not create {}: {error}",
+                destination.display()
+            ))
+        })?;
+        let baseline_root = destination.join("baseline");
+        let candidate_root = destination.join("candidate");
+        let limits = CaptureLimits {
+            max_files: self.config.change.max_files,
+            max_bytes: self.config.change.max_bytes,
+        };
+        let copy_error = |reason: String| {
+            if cancellation.is_cancelled() {
+                SnapshotError::Cancelled
+            } else {
+                SnapshotError::Unavailable(reason)
+            }
+        };
+        let excluded = copy_tree_bounded(
+            &recorded_candidate,
+            &candidate_root,
+            limits.max_files,
+            limits.max_bytes,
+            cancellation,
+        )
+        .map_err(copy_error)?;
+        let candidate_source_digest = verify_and_digest(&candidate_root, &expected_candidate)?;
+        copy_tree_bounded(
+            &recorded_candidate,
+            &baseline_root,
+            limits.max_files,
+            limits.max_bytes,
+            cancellation,
+        )
+        .map_err(copy_error)?;
+        reverse_apply(&baseline_root, &record, cancellation)?;
+        let baseline_source_digest = verify_and_digest(&baseline_root, &expected_baseline)?;
+        Ok(RuntimeSnapshotPair {
+            change_id: change_id.to_owned(),
+            baseline_revision,
+            candidate_revision: record.revision,
+            base_identity: record.base_identity.clone(),
+            patch_hash: record.patch_hash.clone(),
+            manifest_hash: record.capture.manifest_hash.clone(),
+            workspace_root: record.workspace_root.clone(),
+            workspace_epoch: record.workspace_epoch,
+            dependency_roots: record.dependency_roots.clone(),
+            baseline_root,
+            candidate_root,
+            baseline_source_digest,
+            candidate_source_digest,
+            changed_files: record.changed_files.clone(),
+            excluded,
+        })
     }
 
     fn export(&self, request: ChangeRequest, workspace: &WorkspaceRoot) -> ChangeOutcome {

@@ -8,6 +8,7 @@
 mod capture;
 mod model;
 mod patch;
+mod runtime;
 mod service;
 mod store;
 
@@ -16,4 +17,5 @@ pub use model::{
     ChangeNewFileData, ChangeOutcome, ChangePatchData, ChangeRequest, ChangeSourceHashData,
     ChangeSuggestionPackageData, ChangeSuggestionPatchData, NewFileInput, PatchInput,
 };
+pub use runtime::{RuntimeSnapshotPair, SnapshotError};
 pub use service::ChangeService;

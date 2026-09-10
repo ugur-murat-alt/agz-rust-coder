@@ -62,6 +62,24 @@ assertion'ları ve test kapsamı gizli hızlandırma olarak kapatılmaz. Saklana
 zamanlama artifact'ları saklama politikasını bildirir; 24 saat sonra veya 64
 dosyayı aşınca temizlenir ve en güncel 64 kanıt kaydı bellekte kalır.
 
+`profile(action=runtime_compare)`, sahnelenmiş bir değişikliğin doğrulanmış iki
+sunucu-sahipli anlık görüntüsünde (kaydedilmiş aday ve yakalanan bazın bayt-tam
+yeniden kurulumu) tek bir belirlenmiş workload'u ölçer. Önce iki tarafta da aynı
+doğruluk kapısı çalışır; böylece hızlı fakat yanlış veya işin bir bölümünü
+atlayan aday, herhangi bir zamanlama ölçümünden önce reddedilir ve hash'ler
+farklıysa sonuç `INCOMPARABLE` olur. Kabul eşiği ölçümden önce pozitif olarak
+bildirilmelidir ve runner yalnız `[profile.runtime]` içinde operatör tarafından
+yetkilendirilmiş adaptörü, dengelenmiş baseline/candidate çiftleri, warmup
+koşuları, ham örnekler, örnek sayısı ve belirsizlikle çalıştırır. Tek koşu,
+yetersiz veya gürültülü ölçüm `INCONCLUSIVE` döner; tek bir en iyi örnek asla
+kazanç gösteremez. Derleme/hazırlık süresi workload süresinden ayrı kaydedilir;
+allocation, peak-RSS ve donanım sayaçları MVP'de bunları gerçekten ölçen adaptör
+olmadığı için `unavailable` kalır. Sonuç; kaynak digest'lerini, patch hash'ini,
+capture manifest'ini, adaptör digest'ini, yapılandırmayı, toolchain'i, donanımı,
+ham örnekleri ve kullanılan tam komutları bağlar; model yorumu ile ölçülen
+bulgular ayrı alanlardır. Araç kaynağa asla yazmaz veya uygulamaz; export
+edilebilir aday yine ayrı change export/apply yetkisi gerektirir.
+
 `explain` eylemleri `macro`, `trait` ve `cfg` değerleridir. Her parça
 `observedCompiler`, `advisoryAnalyzer`, `inferred` veya `unknown` niteliği
 taşır. `macro`, tanılarda tutulan rustc açılım kaynağını, yetenek varsa
@@ -328,6 +346,11 @@ platformun path-list ayırıcısını kullanır.
 | `profile.max_report_bytes` | `4194304` | Tek Cargo zamanlama artifact'ı için sınırlı okuma/saklama üst sınırı. |
 | `profile.max_runs` | `4` | Bir `profile` çağrısında kullanılabilen taze Cargo koşusu. |
 | `profile.compare_samples` | `3` | Hız iddiası öncesi her taraf için gereken örnek sayısı. |
+| `profile.runtime_max_samples` | `8` | Her taraf için en çok ölçülen runtime örnek sayısı. |
+| `profile.runtime_min_samples` | `3` | İddia öncesi her taraf için gereken en az ölçülmüş runtime örneği. |
+| `profile.runtime_max_warmup` | `2` | Runtime ölçümünden önce her tarafta atılan warmup koşusu. |
+| `profile.runtime_run_timeout_ms` | `120000` | Yetkili tek runtime adaptör süreci için kesin zaman aşımı. |
+| `profile.runtime.adapters` | empty | Operatör tarafından yetkilendirilmiş runtime benchmark adaptörleri; boş liste `runtime_compare` aracını fail-closed tutar. |
 | `verify.max_cells` | `8` | İstek başına planlanan veya çalıştırılan matris hücresi için kesin üst sınır. |
 | `verify.max_wall_ms` | `120000` | Tek matris çalıştırması için kesin duvar saati üst sınırı. |
 | `rust_analyzer.path` | PATH or rustup | İsteğe bağlı binary değişimi. |

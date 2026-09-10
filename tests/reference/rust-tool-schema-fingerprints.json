@@ -99,8 +99,8 @@
       "destructiveHint": true,
       "openWorldHint": true
     },
-    "inputSchemaHash": "fnv1a64:14172655fa8f92ea",
-    "outputSchemaHash": "fnv1a64:f6c95f5e3eb81043"
+    "inputSchemaHash": "fnv1a64:e7a1c9734e09e87f",
+    "outputSchemaHash": "fnv1a64:e9ca504cdd22c898"
   },
   "refactor": {
     "annotations": {

@@ -10,6 +10,7 @@ pub mod edits;
 pub mod explain;
 pub mod navigation;
 pub mod profile;
+pub mod runtime;
 pub mod symbol;
 pub mod verify;
 
@@ -52,6 +53,11 @@ pub use profile::{
     ProfileBudget, ProfileComparison, ProfileExplanation, ProfilePhase, ProfileRebuildReport,
     ProfileRecord, ProfileRequest, ProfileService, TimingsReport, build_critical_path,
     extract_timing_units,
+};
+pub use runtime::{
+    RuntimeBinding, RuntimeCompareRequest, RuntimeCompareService, RuntimeComparison,
+    RuntimeConditions, RuntimeExperiment, RuntimeGateResult, RuntimeGates, RuntimeInterpretation,
+    RuntimeMeasurements, RuntimeSample, RuntimeSeries, UnavailableMetric,
 };
 pub use symbol::{
     DefinitionLocation, LspPosition, LspRange, SymbolEntry, ToolError, display_path,
