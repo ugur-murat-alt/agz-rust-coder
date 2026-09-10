@@ -36,9 +36,13 @@ agz-rust-coder --version
 The package is source-distributed through crates.io. Release pages also provide
 prebuilt archives and SHA-256 checksums.
 
-## OpenCode
+## MCP client setup (OpenCode2 example)
 
-Add the installed binary to `opencode.jsonc`:
+`agz-rust-coder` is a standalone stdio MCP server; any MCP-capable client can
+run it. The pinned OpenCode2 host is exercised by the repository's
+compatibility smoke.
+
+OpenCode2 example configuration (`opencode.jsonc`):
 
 ```jsonc
 {
@@ -67,9 +71,9 @@ Client-provided MCP roots may narrow configured access but never widen it.
 
 ## Tools
 
-OpenCode commonly exposes grouped MCP tools as `rust_*`.
+OpenCode2 commonly exposes grouped MCP tools as `rust_*`.
 
-| MCP tool | OpenCode direct name | Default | Purpose |
+| MCP tool | OpenCode2 direct name | Default | Purpose |
 | --- | --- | --- | --- |
 | `check` | `rust_check` | `enabled` | Run bounded Cargo check, Clippy, tests, docs, or the full gate. |
 | `profile` | `rust_profile` | `enabled` | Analyze observed Cargo rebuild behavior and compare bounded build evidence without claiming unmeasured speedups. |

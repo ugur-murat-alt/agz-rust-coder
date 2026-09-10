@@ -36,9 +36,12 @@ agz-rust-coder --version
 Paket crates.io üzerinden kaynak olarak dağıtılır. Release sayfalarında ayrıca
 hazır derlenmiş arşivler ve SHA-256 sağlama toplamları bulunur.
 
-## OpenCode
+## MCP istemci kurulumu (OpenCode2 örneği)
 
-Kurulu binary'yi `opencode.jsonc` dosyasına ekleyin:
+`agz-rust-coder` bağımsız bir stdio MCP sunucusudur; MCP destekli her istemci
+çalıştırabilir. Pinli OpenCode2 host'u depodaki uyumluluk smoke'u ile sınanır.
+
+OpenCode2 örnek yapılandırması (`opencode.jsonc`):
 
 ```jsonc
 {
@@ -67,9 +70,9 @@ başlatıyorsa tekrarlanan `--allow-root` argümanlarıyla açık kökler ekleyi
 
 ## Araçlar
 
-OpenCode gruplanmış MCP araçlarını çoğunlukla `rust_*` adıyla gösterir.
+OpenCode2 gruplanmış MCP araçlarını çoğunlukla `rust_*` adıyla gösterir.
 
-| MCP tool | OpenCode direct name | Default | Amaç |
+| MCP tool | OpenCode2 direct name | Default | Amaç |
 | --- | --- | --- | --- |
 | `check` | `rust_check` | `enabled` | Sınırlı Cargo check, Clippy, test, docs veya tam kapıyı çalıştırır. |
 | `profile` | `rust_profile` | `enabled` | Gözlenen Cargo yeniden derleme davranışını analiz eder ve ölçülmemiş hız iddiası kurmadan sınırlı derleme kanıtını karşılaştırır. |
