@@ -1278,6 +1278,7 @@ fn probe_change_request(
         base_identity,
         patches,
         new_files,
+        migration: None,
         target: GateTargetId::Check,
         options,
         detail: GateDetail::Compact,

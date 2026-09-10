@@ -839,7 +839,7 @@ fn format_edit_result(
     }
 }
 
-fn position_offset(content: &str, position: &Position) -> Option<usize> {
+pub(crate) fn position_offset(content: &str, position: &Position) -> Option<usize> {
     let starts = line_starts(content);
     let line_start = *starts.get(position.line as usize)?;
     let line_end = starts
@@ -874,7 +874,7 @@ fn line_starts(content: &str) -> Vec<usize> {
     starts
 }
 
-fn unique_context(content: &str, start: usize, end: usize) -> Option<Context> {
+pub(crate) fn unique_context(content: &str, start: usize, end: usize) -> Option<Context> {
     let starts = line_starts(content);
     let start_line = line_at_offset(&starts, start);
     let end_line = line_at_offset(&starts, end);
@@ -902,10 +902,10 @@ fn unique_context(content: &str, start: usize, end: usize) -> Option<Context> {
 }
 
 #[derive(Debug)]
-struct Context {
-    start: usize,
-    end: usize,
-    text: String,
+pub(crate) struct Context {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) text: String,
 }
 
 fn line_at_offset(starts: &[usize], offset: usize) -> usize {

@@ -22,8 +22,8 @@
       "destructiveHint": true,
       "openWorldHint": true
     },
-    "inputSchemaHash": "fnv1a64:8d56e1362cc12877",
-    "outputSchemaHash": "fnv1a64:f5c34941e301f88f"
+    "inputSchemaHash": "fnv1a64:4b06b5d097c2c646",
+    "outputSchemaHash": "fnv1a64:7d93a0df82ea6895"
   },
   "check": {
     "annotations": {

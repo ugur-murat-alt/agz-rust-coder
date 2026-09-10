@@ -88,7 +88,7 @@ OpenCode gruplanmış MCP araçlarını çoğunlukla `rust_*` adıyla gösterir.
 | `hierarchy` | `rust_hierarchy` | `enabled` | Sınırlı çağrı hiyerarşisini izler. |
 | `rename` | `rust_rename` | `enabled` | Uygulamadan doğrulanmış yeniden adlandırma paketi üretir. |
 | `refactor` | `rust_refactor` | `enabled` | Uygulamadan doğrulanmış refactor paketi üretir. |
-| `change` | `rust_change` | `enabled` | Workspace'e yazmadan sunucuya ait scratch alanında revizyona bağlı changeset oluşturur, uygular ve doğrular. |
+| `change` | `rust_change` | `enabled` | Workspace'e yazmadan sunucuya ait scratch alanında revizyona bağlı changeset oluşturur, uygular, göç ettirir ve doğrular. |
 | `repair` | `rust_repair` | `enabled` | Başarısız bir change revizyonu için derleyici güdümlü onarım adaylarını analiz eder, dener, karşılaştırır ve küçültür; workspace'e yazmaz. |
 | `work` | `rust_work` | `enabled` | Tipli bir intent'i açık kapılar ve bütçelerle change/validate üzerinden yürütür; dürüst kapı kanıtı veya sınırlı tek kullanımlık handoff döndürür. |
 

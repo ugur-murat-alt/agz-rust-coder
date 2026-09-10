@@ -31,7 +31,7 @@ Failed compilations are revalidated before offering edit/context evidence. Trunc
 | `hierarchy` | Rust Analyzer | Depends on workspace-code policy | Bounded incoming/outgoing call graph. |
 | `rename` | Rust Analyzer | Never writes source | Verified `old_string`/`new_string` edit package. |
 | `refactor` | Rust Analyzer | Never writes source | Verified write-free refactor package. |
-| `change` | Server-owned scratch + Cargo/rustc for candidate validation | Never writes the workspace; compiles only the candidate copy | Revision-bound change record with candidate hashes, validation evidence (bounded diagnostics and write-free suggestions for a fresh `FAIL`), and a verified/unverified export package. |
+| `change` | Server-owned scratch + Cargo/rustc for candidate validation | Never writes the workspace; compiles only the candidate copy | Revision-bound change record with candidate hashes, validation evidence (bounded diagnostics and write-free suggestions for a fresh `FAIL`), and a verified/unverified export package. `action=migrate` adds an identity-checked impact map, host-argument structural edits, typed obligations, and real gate evidence. |
 | `repair` | Server-owned scratch + Cargo/rustc for candidate validation and bounded minimization | Never writes the workspace; creates and compiles only temporary candidate copies | Grouped diagnostics with reasoned root-cause hypotheses and source-backed ownership evidence, per-candidate measured compile/test results, behavior/performance guards, a measured selection with residual risks, and an export-verified minimized reproducer with pinned configuration. |
 | `work` | Server-owned work record over change/validate | Never writes the workspace; compiles only the bound candidate copy | Typed intent execution with explicit gates and budgets: honest `READY` requested-gate evidence, a bounded `NEEDS_MODEL` handoff with a single-use revision-bound token, or a typed `BLOCKED`/`FAILED`/`CANCELLED` stop reason. |
 
@@ -127,6 +127,35 @@ reproduce their relative `path = "..."` references. A mid-apply I/O failure, a
 crash between the applying marker and the final publish, or candidate bytes
 that no longer match the recorded revision mark the change
 `FAILED_INCONSISTENT` and refuse further stage/validate/export requests.
+
+### Migration (`action=migrate`)
+
+`migrate` builds an impact map and applicable edit groups for a public API or
+signature change, applies the mechanically resolvable edits to the candidate
+copy, and runs real Cargo validation on the transformed candidate revision. It
+requires `changeId`, `expectedRevision`, `baseIdentity`, `anchor`
+(`file`/`symbol`/optional `line`), and `transformation` (`kind` =
+`addParameter` or `changeParameter`, host-supplied `parameter` and `argument`,
+optional 0-based `position`). The host argument is never guessed; a request
+without it is rejected. Transforms resolve the anchor definition, its
+implementations, and its consumers through rust-analyzer definition,
+reference, and implementation data, then rewrite signatures and call argument
+lists structurally (UTF-8 aware, comment/string/literal aware); plain regular
+expression replacement is not used. Every reference is checked back against the
+anchor definition, so a same-named but unrelated symbol is excluded instead of
+edited. The report lists the affected definitions, implementations, consumers,
+re-exports/imports, unrelated sites, the public API diff, transformed and
+unresolved sites, package and feature boundaries, candidate diff, and actual
+gate evidence. Call sites inside macro invocations, symbols used as values,
+arity mismatches, inconclusive identities, and budget-exhausted references
+become typed obligations rather than edits. `complete` is false whenever any
+obligation or budget omission remains, even if the gate passes, and
+behavior-changing transforms are flagged with
+`semanticEquivalenceClaim = notClaimed` plus evaluation-order and move/borrow
+hints. Without a configured rust-analyzer, `migrate` returns a typed
+`ANALYZER_UNAVAILABLE` result and writes nothing. Candidate validation never
+runs against the original workspace, and no global API compatibility claim is
+made for consumers outside the captured workspace.
 
 `validate`, and a fresh `inspect`/`export` evidence row, also return bounded
 candidate compiler feedback: at most five, twelve, or twenty-four diagnostics

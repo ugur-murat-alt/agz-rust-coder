@@ -39,14 +39,17 @@ use super::capture::{
     CaptureError, CaptureLimits, CaptureManifest, capture_tree, manifest_hash,
     relative_path_string, sha256_hex,
 };
+use super::migrate::{
+    AnalyzeRequest, AnalyzerError, MigrationAnalyzer, PlanBudgets, compose_patches, plan_migration,
+};
 use super::model::{
     CHANGE_ID_PREFIX, CHANGE_SCHEMA_VERSION, CaptureSummary, ChangeAction, ChangeCaptureData,
     ChangeData, ChangeDiagnosticData, ChangeEvidenceData, ChangeNewFileData, ChangeOutcome,
     ChangePatchData, ChangeRecord, ChangeRequest, ChangeSourceHashData,
     ChangeSuggestionPackageData, ChangeSuggestionPatchData, MAX_CHANGED_FILES_IN_RECORD,
     MAX_COMMAND_CHARS, MAX_LISTED_CHANGED_FILES, MAX_LISTED_EVIDENCE, MAX_LISTED_HASHES,
-    MAX_RECORDED_EVIDENCE, NewFileInput, PatchInput, RecordState, StoredEvidence, StoredHash,
-    StoredNewFile, StoredPatch,
+    MAX_MIGRATION_OBLIGATIONS, MAX_RECORDED_EVIDENCE, MigrationReportData, NewFileInput,
+    PatchInput, RecordState, StoredEvidence, StoredHash, StoredNewFile, StoredPatch,
 };
 use super::patch::{CandidateLimits, apply_plan, plan_patches};
 use super::runtime::{
@@ -181,6 +184,7 @@ pub struct ChangeService {
     store: ChangeStore,
     locks: Vec<Arc<AsyncMutex<()>>>,
     cleanup_warnings: Mutex<Vec<String>>,
+    migration_analyzer: Option<Arc<dyn MigrationAnalyzer>>,
 }
 
 impl fmt::Debug for ChangeService {
@@ -238,7 +242,15 @@ impl ChangeService {
                 .map(|_| Arc::new(AsyncMutex::new(())))
                 .collect(),
             cleanup_warnings: Mutex::new(cleanup_warnings),
+            migration_analyzer: None,
         })
+    }
+
+    /// Attaches the semantic analyzer used by `action=migrate`. Without one,
+    /// migrate returns a typed `ANALYZER_UNAVAILABLE` result and writes nothing.
+    pub fn with_migration_analyzer(mut self, analyzer: Arc<dyn MigrationAnalyzer>) -> Self {
+        self.migration_analyzer = Some(analyzer);
+        self
     }
 
     pub fn scratch_root(&self) -> &Path {
@@ -462,6 +474,9 @@ impl ChangeService {
         match request.action {
             ChangeAction::Create => self.create(workspace, cancellation).await,
             ChangeAction::Stage => self.stage(request, workspace, cancellation).await,
+            ChangeAction::Migrate => {
+                Box::pin(self.migrate(request, workspace, cancellation, progress)).await
+            }
             ChangeAction::Inspect => self.inspect(request),
             ChangeAction::Validate => {
                 self.validate(request, workspace, cancellation, progress)
@@ -774,6 +789,463 @@ impl ChangeService {
                 Some(&id),
             ),
         }
+    }
+
+    /// Plans a structural migration from advisory analysis, applies it to the
+    /// candidate copy, and validates the new revision with real Cargo.
+    async fn migrate(
+        &self,
+        request: ChangeRequest,
+        workspace: &WorkspaceRoot,
+        cancellation: CancellationToken,
+        progress: Option<ProgressCallback>,
+    ) -> ChangeOutcome {
+        let Some(id) = request.change_id.clone() else {
+            return self.error_outcome(
+                ChangeAction::Migrate,
+                "INVALID",
+                "action=migrate requires changeId.",
+                "changeId is required",
+                None,
+            );
+        };
+        if !is_valid_change_id(&id) {
+            return self.error_outcome(
+                ChangeAction::Migrate,
+                "INVALID",
+                "The change id is not valid.",
+                "changeId is not a valid server-issued id",
+                Some(&id),
+            );
+        }
+        let Some(migration) = request.migration.clone() else {
+            return self.error_outcome(
+                ChangeAction::Migrate,
+                "INVALID",
+                "action=migrate requires anchor and transformation.",
+                "migration inputs are required",
+                Some(&id),
+            );
+        };
+        if let Some(scope) = migration.consumer_scope.as_deref()
+            && scope != "workspace"
+        {
+            return self.error_outcome(
+                ChangeAction::Migrate,
+                "MIGRATION_REFUSED",
+                "Only workspace-wide consumer migration is supported.",
+                format!("consumerScope '{scope}' is unsupported; only 'workspace' is available"),
+                Some(&id),
+            );
+        }
+        let Some(analyzer) = self.migration_analyzer.clone() else {
+            return self.error_outcome(
+                ChangeAction::Migrate,
+                "ANALYZER_UNAVAILABLE",
+                "Migration analysis requires a configured semantic analyzer.",
+                "no migration analyzer is configured; rust-analyzer analysis is unavailable",
+                Some(&id),
+            );
+        };
+        let Some(expected_revision) = request.expected_revision else {
+            return self.error_outcome(
+                ChangeAction::Migrate,
+                "INVALID",
+                "action=migrate requires expectedRevision.",
+                "expectedRevision is required",
+                Some(&id),
+            );
+        };
+        let Some(base_identity) = request.base_identity.clone() else {
+            return self.error_outcome(
+                ChangeAction::Migrate,
+                "INVALID",
+                "action=migrate requires baseIdentity.",
+                "baseIdentity is required",
+                Some(&id),
+            );
+        };
+
+        // Plan and apply under the change lock. The analyzer runs against the
+        // server-owned candidate copy, never the original workspace. The
+        // planning future is boxed so it does not inflate the server future.
+        let prepared = {
+            let _stripe = self.stripe(&id).lock_owned().await;
+            let planning = self.migrate_prepare(
+                &id,
+                &migration,
+                analyzer,
+                expected_revision,
+                &base_identity,
+                workspace,
+                &cancellation,
+            );
+            Box::pin(planning).await
+        };
+        let (record, report) = match prepared {
+            Ok(prepared) => prepared,
+            Err(outcome) => return *outcome,
+        };
+
+        // Real Cargo validation on the transformed candidate revision.
+        let validate_request = ChangeRequest {
+            action: ChangeAction::Validate,
+            change_id: Some(id.clone()),
+            expected_revision: Some(record.revision),
+            base_identity: Some(record.base_identity.clone()),
+            patches: Vec::new(),
+            new_files: Vec::new(),
+            migration: None,
+            target: request.target,
+            options: request.options.clone(),
+            detail: request.detail,
+            timings: request.timings,
+        };
+        let validation = {
+            let validating = self.validate(validate_request, workspace, cancellation, progress);
+            Box::pin(validating).await
+        };
+        let mut data = validation.data;
+        data.action = ChangeAction::Migrate.as_str().to_owned();
+        data.migration = Some(report.clone());
+        let complete = report.complete;
+        let (status, is_error, summary) = if complete {
+            match validation.status {
+                "PASS" => (
+                    "MIGRATED",
+                    false,
+                    "The candidate revision was migrated and passed real Cargo validation.",
+                ),
+                "FAIL" => (
+                    "MIGRATION_FAILED",
+                    true,
+                    "The migrated candidate failed real Cargo validation.",
+                ),
+                _ => (
+                    "MIGRATION_INCONCLUSIVE",
+                    true,
+                    "The migrated candidate could not be validated to a terminal result.",
+                ),
+            }
+        } else {
+            (
+                "MIGRATION_PARTIAL",
+                true,
+                "The migration is incomplete; unresolved sites and budget omissions are reported.",
+            )
+        };
+        data.reason = format!(
+            "{} gate={} obligations={} complete={}",
+            data.reason, validation.status, report.obligations_total, complete
+        );
+        self.finish(status, summary, is_error, data)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn migrate_prepare(
+        &self,
+        id: &str,
+        migration: &super::model::MigrateRequest,
+        analyzer: Arc<dyn MigrationAnalyzer>,
+        expected_revision: u64,
+        base_identity: &str,
+        workspace: &WorkspaceRoot,
+        cancellation: &CancellationToken,
+    ) -> Result<(ChangeRecord, MigrationReportData), Box<ChangeOutcome>> {
+        let _file_lock = match self.store.try_lock(id) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                return Err(Box::new(self.error_outcome(
+                    ChangeAction::Migrate,
+                    "CHANGE_BUSY",
+                    "The change scratch is locked by another process.",
+                    "another server process holds this change lock",
+                    Some(id),
+                )));
+            }
+            Err(reason) => {
+                return Err(Box::new(self.error_outcome(
+                    ChangeAction::Migrate,
+                    "UNAVAILABLE",
+                    "The change lock could not be opened.",
+                    reason,
+                    Some(id),
+                )));
+            }
+        };
+        let Some(record) = (match self.store.load(id) {
+            Ok(record) => record,
+            Err(reason) => {
+                return Err(Box::new(self.error_outcome(
+                    ChangeAction::Migrate,
+                    "INVALID",
+                    "The change record could not be read.",
+                    reason,
+                    Some(id),
+                )));
+            }
+        }) else {
+            return Err(Box::new(self.error_outcome(
+                ChangeAction::Migrate,
+                "NOT_FOUND",
+                "The change id has no server-owned scratch.",
+                "no change record exists",
+                Some(id),
+            )));
+        };
+        match record.state {
+            RecordState::Ready => {}
+            RecordState::FailedInconsistent | RecordState::Applying | RecordState::Capturing => {
+                return Err(Box::new(self.finish(
+                    "FAILED_INCONSISTENT",
+                    "An inconsistent candidate cannot be migrated.",
+                    true,
+                    refused_data(
+                        ChangeAction::Migrate,
+                        &record,
+                        "the candidate may be partially applied; migration is refused",
+                    ),
+                )));
+            }
+            RecordState::Discarded => {
+                return Err(Box::new(self.finish(
+                    "DISCARDED",
+                    "The change scratch was discarded.",
+                    true,
+                    refused_data(
+                        ChangeAction::Migrate,
+                        &record,
+                        "the candidate copy was discarded",
+                    ),
+                )));
+            }
+        }
+        if record.workspace_epoch != workspace.epoch() {
+            return Err(Box::new(self.finish(
+                "STALE",
+                "The authorization epoch changed; migration is refused.",
+                true,
+                refused_data(
+                    ChangeAction::Migrate,
+                    &record,
+                    format!(
+                        "authorization root epoch changed from {} to {}",
+                        record.workspace_epoch,
+                        workspace.epoch()
+                    ),
+                ),
+            )));
+        }
+        if expected_revision != record.revision {
+            return Err(Box::new(self.finish(
+                "STALE",
+                "The requested revision is not current; nothing was migrated.",
+                true,
+                refused_data(
+                    ChangeAction::Migrate,
+                    &record,
+                    format!(
+                        "expectedRevision {expected_revision} does not match current revision {}",
+                        record.revision
+                    ),
+                ),
+            )));
+        }
+        if base_identity != record.base_identity {
+            return Err(Box::new(self.finish(
+                "STALE",
+                "The requested base identity is stale; nothing was migrated.",
+                true,
+                refused_data(
+                    ChangeAction::Migrate,
+                    &record,
+                    "baseIdentity does not match the captured base",
+                ),
+            )));
+        }
+        if cancellation.is_cancelled() {
+            return Err(Box::new(self.finish(
+                "CANCELLED",
+                "Migration was cancelled before analysis started.",
+                true,
+                refused_data(
+                    ChangeAction::Migrate,
+                    &record,
+                    "the migration request was cancelled before analysis",
+                ),
+            )));
+        }
+        if record.revision.saturating_add(1) > self.config.change.max_revisions {
+            return Err(Box::new(self.error_outcome(
+                ChangeAction::Migrate,
+                "REVISION_LIMIT",
+                "The change reached its configured revision limit.",
+                format!(
+                    "the change reached the configured revision limit {}",
+                    self.config.change.max_revisions
+                ),
+                Some(id),
+            )));
+        }
+        let candidate_root = self.store.candidate_dir(id);
+        if fs::symlink_metadata(&candidate_root)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(Box::new(self.error_outcome(
+                ChangeAction::Migrate,
+                "FAILED_INCONSISTENT",
+                "The candidate copy is a symlink and will not be analyzed.",
+                "candidate copy was replaced by a symlink",
+                Some(id),
+            )));
+        }
+        if let Err(reason) = verify_candidate_bytes(&self.store, id, &record) {
+            return Err(Box::new(self.finish(
+                "FAILED_INCONSISTENT",
+                "The candidate bytes do not match the recorded revision; nothing was migrated.",
+                true,
+                refused_data(ChangeAction::Migrate, &record, reason),
+            )));
+        }
+        let max_references = u64::from(
+            migration
+                .constraints
+                .max_references
+                .unwrap_or(super::model::MAX_MIGRATION_REFERENCES as u32),
+        );
+        let max_identity_checks = u64::from(
+            migration
+                .constraints
+                .max_identity_checks
+                .unwrap_or(super::model::MAX_MIGRATION_IDENTITY_CHECKS as u32),
+        );
+        let analysis = analyzer
+            .analyze(AnalyzeRequest {
+                root: candidate_root.clone(),
+                anchor_file: migration.anchor.file.clone(),
+                anchor_symbol: migration.anchor.symbol.clone(),
+                anchor_line: migration.anchor.line,
+                max_references,
+                max_identity_checks,
+                timeout: Duration::from_millis(self.config.rust_analyzer.timeout_ms),
+            })
+            .await;
+        let analysis = match analysis {
+            Ok(analysis) => analysis,
+            Err(error) => {
+                let (status, summary) = match error {
+                    AnalyzerError::Unavailable(_) | AnalyzerError::Unsupported(_) => (
+                        "ANALYZER_UNAVAILABLE",
+                        "Migration analysis is unavailable; nothing was migrated.",
+                    ),
+                    AnalyzerError::NotFound(_) | AnalyzerError::Ambiguous(_) => (
+                        "MIGRATION_REFUSED",
+                        "The anchor could not be resolved unambiguously; nothing was migrated.",
+                    ),
+                    AnalyzerError::Invalid(_) => (
+                        "MIGRATION_REFUSED",
+                        "The migration analysis input was rejected; nothing was migrated.",
+                    ),
+                };
+                return Err(Box::new(self.error_outcome(
+                    ChangeAction::Migrate,
+                    status,
+                    summary,
+                    error.to_string(),
+                    Some(id),
+                )));
+            }
+        };
+        let read_root = candidate_root.clone();
+        let read_file = move |file: &str| -> Option<String> {
+            let relative = super::patch::normalize_relative(file).ok()?;
+            crate::tools::symbol::read_workspace_file(&read_root, &read_root.join(relative))
+        };
+        let mut plan = plan_migration(
+            migration,
+            &analysis,
+            &read_file,
+            PlanBudgets::from_request(migration),
+        );
+        if let Some((status, reason)) = plan.refused.take() {
+            return Err(Box::new(self.error_outcome(
+                ChangeAction::Migrate,
+                status,
+                "The migration plan was refused before touching the candidate.",
+                reason,
+                Some(id),
+            )));
+        }
+        let (patches, compose_obligations) = compose_patches(&plan.edits, &read_file);
+        if !compose_obligations.is_empty() {
+            let extra = u64::try_from(compose_obligations.len()).unwrap_or(u64::MAX);
+            plan.report.obligations_total = plan.report.obligations_total.saturating_add(extra);
+            let room = MAX_MIGRATION_OBLIGATIONS.saturating_sub(plan.report.obligations.len());
+            plan.report
+                .obligations
+                .extend(compose_obligations.into_iter().take(room));
+            plan.report.complete = false;
+            plan.report.notes.push(
+                "one or more planned edits could not be composed into candidate patches".to_owned(),
+            );
+        }
+        if patches.is_empty() {
+            let status = if plan.report.complete {
+                "MIGRATION_NOOP"
+            } else {
+                "MIGRATION_PARTIAL"
+            };
+            let mut data = data_for_record(ChangeAction::Migrate, &record, None);
+            data.migration = Some(plan.report.clone());
+            data.reason = if plan.report.complete {
+                "the plan produced no candidate edits".to_owned()
+            } else {
+                format!(
+                    "the plan produced no applicable edits and {} obligation(s) remain",
+                    plan.report.obligations_total
+                )
+            };
+            let is_error = !plan.report.complete;
+            return Err(Box::new(self.finish(
+                status,
+                if is_error {
+                    "No edit was applied because the migration is incomplete."
+                } else {
+                    "No candidate edit was required."
+                },
+                is_error,
+                data,
+            )));
+        }
+        let mut record = match stage_locked(
+            &self.store,
+            &self.config.change,
+            record,
+            Some(expected_revision),
+            Some(base_identity),
+            &patches,
+            &[],
+            cancellation,
+        ) {
+            Ok(record) => record,
+            Err(failure) => {
+                return Err(Box::new(self.failure_outcome(
+                    ChangeAction::Migrate,
+                    Some(id),
+                    failure,
+                )));
+            }
+        };
+        let mut report = plan.report;
+        report.candidate_revision = record.revision;
+        record.migration = Some(report.clone());
+        if let Err(reason) = self.store.save(&mut record) {
+            self.push_cleanup_warnings(&[format!(
+                "the migration report could not be persisted: {reason}"
+            )]);
+        }
+        Ok((record, report))
     }
 
     fn inspect(&self, request: ChangeRequest) -> ChangeOutcome {
@@ -1903,6 +2375,7 @@ fn data_for_record(
         new_files_total: record.new_files.len().try_into().unwrap_or(u64::MAX),
         new_files,
         new_files_content_omitted: omitted,
+        migration: record.migration.clone(),
         cleanup_warnings: record.cleanup_warnings.clone(),
         reason: String::new(),
     }
@@ -2065,6 +2538,7 @@ fn placeholder_record(id: &str, capture_root: &Path, workspace_epoch: u64) -> Ch
         patch_hash: String::new(),
         source_hashes: BTreeMap::new(),
         evidence: Vec::new(),
+        migration: None,
         cleanup_warnings: Vec::new(),
     }
 }
@@ -2210,6 +2684,7 @@ fn capture_into(
         patch_hash: String::new(),
         source_hashes: BTreeMap::new(),
         evidence: Vec::new(),
+        migration: None,
         cleanup_warnings: Vec::new(),
     };
     store
@@ -2331,7 +2806,7 @@ fn stage_blocking(
             "another server process holds this change lock",
         ));
     };
-    let Some(mut record) = store
+    let Some(record) = store
         .load(id)
         .map_err(|reason| ChangeFailure::new("INVALID", reason))?
     else {
@@ -2360,9 +2835,34 @@ fn stage_blocking(
             ),
         ));
     }
-    let expected_revision = expected_revision.ok_or_else(|| {
-        ChangeFailure::new("INVALID", "expectedRevision is required for action=stage")
-    })?;
+    stage_locked(
+        store,
+        config,
+        record,
+        expected_revision,
+        base_identity,
+        patches,
+        new_files,
+        cancellation,
+    )
+}
+
+/// Applies a pre-validated patch plan to the candidate while the caller holds
+/// the change lock. Shared by `stage` and `migrate`.
+#[allow(clippy::too_many_arguments)]
+fn stage_locked(
+    store: &ChangeStore,
+    config: &ChangeConfig,
+    mut record: ChangeRecord,
+    expected_revision: Option<u64>,
+    base_identity: Option<&str>,
+    patches: &[PatchInput],
+    new_files: &[NewFileInput],
+    cancellation: &CancellationToken,
+) -> Result<ChangeRecord, ChangeFailure> {
+    let id = record.id.clone();
+    let expected_revision = expected_revision
+        .ok_or_else(|| ChangeFailure::new("INVALID", "expectedRevision is required"))?;
     if expected_revision != record.revision {
         return Err(ChangeFailure::new(
             "STALE",
@@ -2372,9 +2872,8 @@ fn stage_blocking(
             ),
         ));
     }
-    let base_identity = base_identity.ok_or_else(|| {
-        ChangeFailure::new("INVALID", "baseIdentity is required for action=stage")
-    })?;
+    let base_identity =
+        base_identity.ok_or_else(|| ChangeFailure::new("INVALID", "baseIdentity is required"))?;
     if base_identity != record.base_identity {
         return Err(ChangeFailure::new(
             "STALE",
@@ -2393,7 +2892,7 @@ fn stage_blocking(
             ),
         ));
     }
-    let candidate_root = store.candidate_dir(id);
+    let candidate_root = store.candidate_dir(&id);
     let limits = CandidateLimits {
         current_files: record.candidate_files,
         current_bytes: record.candidate_bytes,

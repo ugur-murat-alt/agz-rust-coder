@@ -1405,6 +1405,7 @@ fn create_request() -> ChangeRequest {
         base_identity: None,
         patches: Vec::new(),
         new_files: Vec::new(),
+        migration: None,
         target: crate::gate::GateTargetId::Check,
         options: crate::gate::ValidationOptions::default(),
         detail: GateDetail::Compact,

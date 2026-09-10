@@ -391,7 +391,7 @@
   "change": {
     "type": "object",
     "properties": {
-      "action": { "type": "string", "enum": ["create", "stage", "inspect", "validate", "export", "discard"] },
+      "action": { "type": "string", "enum": ["create", "stage", "migrate", "inspect", "validate", "export", "discard"] },
       "dir": {
         "type": "string",
         "description": "Absolute path to the Rust project/workspace, or to a parent containing one unambiguous nested Cargo project."
@@ -426,9 +426,40 @@
           "additionalProperties": false
         }
       },
+      "anchor": {
+        "type": ["object", "null"],
+        "properties": {
+          "file": { "type": "string", "minLength": 1 },
+          "symbol": { "type": "string", "minLength": 1 },
+          "line": { "type": ["integer", "null"], "minimum": 1 }
+        },
+        "required": ["file", "symbol"],
+        "additionalProperties": false
+      },
+      "transformation": {
+        "type": ["object", "null"],
+        "properties": {
+          "kind": { "type": "string", "enum": ["addParameter", "changeParameter"] },
+          "parameter": { "type": "string", "minLength": 1 },
+          "argument": { "type": "string", "minLength": 1 },
+          "position": { "type": ["integer", "null"], "minimum": 0 }
+        },
+        "required": ["kind", "parameter", "argument"],
+        "additionalProperties": false
+      },
+      "consumerScope": { "type": ["string", "null"], "maxLength": 64 },
+      "constraints": {
+        "type": ["object", "null"],
+        "properties": {
+          "maxReferences": { "type": ["integer", "null"], "minimum": 1 },
+          "maxEdits": { "type": ["integer", "null"], "minimum": 1 },
+          "maxIdentityChecks": { "type": ["integer", "null"], "minimum": 1 }
+        },
+        "additionalProperties": false
+      },
       "options": {
         "type": "object",
-        "description": "Typed Cargo validation options for action=validate."
+        "description": "Typed Cargo validation options for action=validate and action=migrate."
       },
       "target": { "type": "string", "enum": ["check", "clippy", "test", "doc", "fmt", "all"] },
       "timings": { "type": "boolean" },
