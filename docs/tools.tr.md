@@ -156,7 +156,8 @@ Planlama adayları `cargo metadata` ile `[workspace.metadata.agz-verify]` (veya
 ilk workspace üyesinin `[package.metadata.agz-verify]`) altındaki açık proje
 politikasından türetir:
 
-- `feature-groups`: açıkça desteklenen feature adı dizileri;
+- `feature-groups`: açıkça desteklenen feature adı dizileri; düz adların yanı
+  sıra `dep/feat` ve zayıf `dep?/feat` seçicileri kabul edilir;
 - `mutually-exclusive-features`: birlikte etkinleştirilmemesi gereken gruplar;
 - `targets`: desteklenen yerleşik hedef üçlüleri; yalnız kurulu olanlar planlanır;
 - `msrv`: paket `rust-version` değerini geçersiz kılan rustup toolchain seçici;
@@ -174,10 +175,15 @@ durumları `PASS`, `FAIL`, `NOT_INSTALLED`, `RUNNER_UNAVAILABLE`,
 hücre asla yeşil değildir. `FULL_REQUESTED_MATRIX` yalnız istenen her hücre
 tamamlandığında döner; bütçe aşımında tamamlanan ve eksik hücre kimlikleri ayrı
 verilir. Yerel olmayan hedefler yalnız derleme amaçlıdır ve o platformda test
-çalıştığını iddia etmez. MSRV hücresi kurulu toolchain'in kendi `cargo`
-binary'sini çalıştırır; böylece komut hash'i gerçekten seçilen derleyiciyi
-bağlar. Hiçbir toolchain, hedef veya bağımlılık indirilmez; mevcut ağ politikası
-korunur.
+çalıştığını iddia etmez. Kurulu yabancı hedefler için derleme amaçlı `check`
+hücresi yalnız `check` istenen aşamalar arasındayken planlanır; yabancı hedefte
+istenen `test`, `clippy` veya `doc` aşaması `UNSUPPORTED_CONFIGURATION` olarak
+işaretlenir. Toolchain/MSRV hücresi seçilen toolchain'i çalıştırır: doğrudan
+toolchain `cargo` çağrısında `RUSTC`, `RUSTUP_TOOLCHAIN` ve toolchain önekli
+`PATH` sabitlenir; rustup shim geri dönüşünde `+toolchain` uygulanır. Böylece
+gerçekten seçilen derleyici çalışır ve komut ile ortam hash'lerine bağlanır.
+Hiçbir toolchain veya hedef indirilmez; Cargo mevcut ağ politikasına göre crate
+indirebilir.
 
 Planlayıcı sınırlı bir numaralandırıcıdır ve çıktısını `NOT exhaustive` olarak
 işaretler. Her sonuç kaynak/lock/yapılandırma/toolchain bağını kapı kimliği ve

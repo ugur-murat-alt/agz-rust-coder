@@ -1,7 +1,8 @@
 //! Authoritative Cargo validation service.
 
 use std::{
-    ffi::OsString,
+    collections::BTreeMap,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -154,6 +155,7 @@ impl CheckService {
         } else {
             None
         };
+        let prepare_binding = selection.binding.clone();
         let metadata_control = crate::workspace::metadata::MetadataControl::new(
             deadline,
             cancellation.clone(),
@@ -174,6 +176,7 @@ impl CheckService {
                 &git,
                 &prepare_cargo,
                 prepare_selector.as_deref(),
+                prepare_binding.as_ref(),
             )
         });
         // The controlled preflight owns metadata and Git children through the supervisor.
@@ -421,25 +424,34 @@ impl CheckService {
     ///
     /// A direct toolchain cargo is preferred so evidence binds the exact
     /// compiler path. The rustup shim remains a fallback with an explicit
-    /// `+toolchain` argument; nothing is downloaded.
+    /// `+toolchain` argument; nothing is downloaded. Both modes carry a
+    /// [`ToolchainBinding`] so the child environment actually selects the
+    /// requested compiler instead of an ambient one.
     fn select_cargo(&self, toolchain: Option<&str>) -> Result<CargoSelection, String> {
         let Some(toolchain) = toolchain else {
             return Ok(CargoSelection {
                 cargo: self.cargo.clone(),
                 selector: false,
+                binding: None,
             });
         };
         crate::gate::validate_toolchain_name(toolchain)?;
-        if let Some(cargo) = resolve_toolchain_cargo(toolchain) {
+        if let Some(cargo) = resolve_toolchain_cargo(toolchain)
+            && let Some(binding) = direct_toolchain_binding(&cargo)
+        {
             return Ok(CargoSelection {
                 cargo,
                 selector: false,
+                binding: Some(binding),
             });
         }
         if rustup_shim_available(&self.cargo) {
             return Ok(CargoSelection {
                 cargo: self.cargo.clone(),
                 selector: true,
+                binding: Some(ToolchainBinding::Shim {
+                    toolchain: toolchain.to_owned(),
+                }),
             });
         }
         Err(format!(
@@ -454,6 +466,7 @@ impl CheckService {
         git: &dyn GitProbe,
         cargo: &Path,
         toolchain_selector: Option<&str>,
+        toolchain_binding: Option<&ToolchainBinding>,
     ) -> Result<PreparedCheck, (GateStatus, String)> {
         control.checkpoint().map_err(preflight_control_error)?;
         let roots = self
@@ -494,13 +507,16 @@ impl CheckService {
                 })?
         };
         let git_authority = selection.worktree_authority().clone();
-        let cache =
+        let mut cache =
             select_gate_cache(&snapshot, &self.config.gate, request.mode()).map_err(|error| {
                 (
                     GateStatus::Inconclusive,
                     format!("gate cache selection failed: {error}"),
                 )
             })?;
+        if let Some(binding) = toolchain_binding {
+            apply_toolchain_environment(&mut cache.environment, binding);
+        }
         let initial_scope_args = if matches!(
             request.target,
             GateTargetId::Check | GateTargetId::Clippy | GateTargetId::Test | GateTargetId::Doc
@@ -642,6 +658,91 @@ struct CargoSelection {
     cargo: PathBuf,
     /// Apply `+toolchain` to every stage (rustup shim fallback only).
     selector: bool,
+    /// Compiler binding that must be applied to the child environment.
+    binding: Option<ToolchainBinding>,
+}
+
+/// How the selected toolchain compiler is bound for child processes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ToolchainBinding {
+    /// A direct toolchain cargo was resolved; its sibling `rustc` is pinned
+    /// through `RUSTC`, `RUSTUP_TOOLCHAIN`, and a prepended `PATH` entry so
+    /// Cargo and build scripts cannot fall back to an ambient compiler.
+    Direct { toolchain: String, bin_dir: PathBuf },
+    /// The rustup shim is invoked with `+toolchain`; `RUSTUP_TOOLCHAIN` is
+    /// pinned as well and an ambient `RUSTC` override is removed.
+    Shim { toolchain: String },
+}
+
+impl ToolchainBinding {
+    fn toolchain(&self) -> &str {
+        match self {
+            Self::Direct { toolchain, .. } | Self::Shim { toolchain } => toolchain,
+        }
+    }
+}
+
+/// Build a direct binding from a resolved `<rustup>/toolchains/<name>/bin/cargo`.
+/// Returns `None` when the sibling `rustc` or the toolchain directory name is
+/// unavailable, so `select_cargo` can fall back to the rustup shim.
+fn direct_toolchain_binding(cargo: &Path) -> Option<ToolchainBinding> {
+    let bin_dir = cargo.parent()?;
+    if !bin_dir.join(executable_name("rustc")).is_file() {
+        return None;
+    }
+    let toolchain = bin_dir
+        .parent()?
+        .file_name()
+        .and_then(OsStr::to_str)
+        .filter(|name| !name.is_empty())?
+        .to_owned();
+    Some(ToolchainBinding::Direct {
+        toolchain,
+        bin_dir: bin_dir.to_owned(),
+    })
+}
+
+/// Pin the selected compiler into a gate environment.
+///
+/// The runtime environment and the identity hashes share this map, so both the
+/// command hash and the environment hash reflect the binding.
+fn apply_toolchain_environment(
+    environment: &mut BTreeMap<OsString, OsString>,
+    binding: &ToolchainBinding,
+) {
+    environment.insert(
+        OsString::from("RUSTUP_TOOLCHAIN"),
+        OsString::from(binding.toolchain()),
+    );
+    match binding {
+        ToolchainBinding::Direct { bin_dir, .. } => {
+            environment.insert(
+                OsString::from("RUSTC"),
+                bin_dir.join(executable_name("rustc")).into_os_string(),
+            );
+            let existing = environment
+                .get(OsStr::new("PATH"))
+                .cloned()
+                .or_else(|| std::env::var_os("PATH"))
+                .unwrap_or_default();
+            let entries = std::iter::once(bin_dir.clone()).chain(std::env::split_paths(&existing));
+            match std::env::join_paths(entries) {
+                Ok(path) => {
+                    environment.insert(OsString::from("PATH"), path);
+                }
+                Err(_) => {
+                    // A malformed ambient PATH must never widen resolution; the
+                    // pinned toolchain directory remains authoritative.
+                    environment.insert(OsString::from("PATH"), bin_dir.clone().into_os_string());
+                }
+            }
+        }
+        ToolchainBinding::Shim { .. } => {
+            // The `+toolchain` selector only wins when no ambient `RUSTC`
+            // override reaches Cargo.
+            environment.remove(OsStr::new("RUSTC"));
+        }
+    }
 }
 
 /// Resolve a rustup toolchain's direct cargo binary without invoking rustup.
@@ -1621,5 +1722,95 @@ mod tests {
         assert_eq!(targets[0].args[1], OsString::from("check"));
         apply_toolchain(&mut targets, None);
         assert_eq!(targets[0].args.len(), 3);
+    }
+
+    #[test]
+    fn direct_toolchain_binding_pins_rustc_toolchain_and_path() {
+        let bin_dir = PathBuf::from("/rustup/toolchains/1.88.0-x86_64-unknown-linux-gnu/bin");
+        let mut environment = BTreeMap::from([
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+            (
+                OsString::from("RUSTC"),
+                OsString::from("/ambient/bin/rustc"),
+            ),
+        ]);
+        apply_toolchain_environment(
+            &mut environment,
+            &ToolchainBinding::Direct {
+                toolchain: "1.88.0-x86_64-unknown-linux-gnu".to_owned(),
+                bin_dir: bin_dir.clone(),
+            },
+        );
+        assert_eq!(
+            environment
+                .get(OsStr::new("RUSTC"))
+                .map(OsString::as_os_str),
+            Some(bin_dir.join(executable_name("rustc")).as_os_str())
+        );
+        assert_eq!(
+            environment
+                .get(OsStr::new("RUSTUP_TOOLCHAIN"))
+                .map(OsString::as_os_str),
+            Some(OsStr::new("1.88.0-x86_64-unknown-linux-gnu"))
+        );
+        let path = environment
+            .get(OsStr::new("PATH"))
+            .expect("pinned PATH")
+            .clone();
+        let entries = std::env::split_paths(&path).collect::<Vec<_>>();
+        assert_eq!(
+            entries.first().map(PathBuf::as_path),
+            Some(bin_dir.as_path())
+        );
+        assert!(entries.iter().any(|entry| entry == Path::new("/usr/bin")));
+    }
+
+    #[test]
+    fn shim_toolchain_binding_removes_an_ambient_rustc_override() {
+        let mut environment = BTreeMap::from([
+            (
+                OsString::from("RUSTC"),
+                OsString::from("/ambient/bin/rustc"),
+            ),
+            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        ]);
+        apply_toolchain_environment(
+            &mut environment,
+            &ToolchainBinding::Shim {
+                toolchain: "nightly-2026-01-01".to_owned(),
+            },
+        );
+        assert!(!environment.contains_key(OsStr::new("RUSTC")));
+        assert_eq!(
+            environment
+                .get(OsStr::new("RUSTUP_TOOLCHAIN"))
+                .map(OsString::as_os_str),
+            Some(OsStr::new("nightly-2026-01-01"))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("PATH")).map(OsString::as_os_str),
+            Some(OsStr::new("/usr/bin:/bin"))
+        );
+    }
+
+    #[test]
+    fn direct_toolchain_binding_requires_a_sibling_rustc() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let root = std::env::temp_dir().join(format!(
+            "agz-toolchain-binding-{}-{stamp}",
+            std::process::id()
+        ));
+        let bin = root.join("toolchains").join("1.88.0").join("bin");
+        std::fs::create_dir_all(&bin).expect("create binding fixture");
+        let cargo = bin.join(executable_name("cargo"));
+        std::fs::write(&cargo, b"").expect("write cargo placeholder");
+        assert!(direct_toolchain_binding(&cargo).is_none());
+        std::fs::write(bin.join(executable_name("rustc")), b"").expect("write rustc placeholder");
+        let binding = direct_toolchain_binding(&cargo).expect("direct binding");
+        assert_eq!(binding.toolchain(), "1.88.0");
+        assert!(matches!(binding, ToolchainBinding::Direct { .. }));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

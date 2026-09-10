@@ -835,3 +835,182 @@ fn live_sccache_pids() -> std::collections::BTreeSet<u32> {
         })
         .collect()
 }
+
+#[cfg(unix)]
+const COMPILER_PROBE: &str = r#"
+fn main() {
+    let rustc = std::env::var_os("RUSTC").expect("cargo sets RUSTC for build scripts");
+    let output = std::process::Command::new(rustc)
+        .arg("-vV")
+        .output()
+        .expect("probe rustc");
+    let out_dir = std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR");
+    std::fs::write(std::path::Path::new(&out_dir).join("compiler-probe.txt"), output.stdout)
+        .expect("write compiler probe");
+    println!("cargo:rerun-if-changed=build.rs");
+}
+"#;
+
+#[cfg(unix)]
+fn rustup_home() -> PathBuf {
+    std::env::var_os("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".rustup")
+        })
+}
+
+#[cfg(unix)]
+fn installed_toolchain(prefix: &str) -> Option<String> {
+    let mut names = fs::read_dir(rustup_home().join("toolchains"))
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|name| name.starts_with(prefix))
+        .collect::<Vec<_>>();
+    names.sort();
+    names.into_iter().next()
+}
+
+#[cfg(unix)]
+fn ambient_toolchain_excluding(prefix: &str) -> Option<String> {
+    let home = rustup_home();
+    let default = fs::read_to_string(home.join("settings.toml"))
+        .ok()
+        .and_then(|text| {
+            text.lines().find_map(|line| {
+                let (key, value) = line.split_once('=')?;
+                (key.trim() == "default_toolchain")
+                    .then(|| value.trim().trim_matches('"').to_owned())
+            })
+        });
+    if let Some(default) = default.filter(|name| !name.starts_with(prefix)) {
+        return Some(default);
+    }
+    let mut names = fs::read_dir(home.join("toolchains"))
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|name| !name.starts_with(prefix))
+        .collect::<Vec<_>>();
+    names.sort();
+    names.into_iter().next()
+}
+
+#[cfg(unix)]
+fn find_file(root: &Path, name: &str) -> Option<PathBuf> {
+    let mut pending = vec![(root.to_owned(), 0_usize)];
+    while let Some((directory, depth)) = pending.pop() {
+        if depth > 12 {
+            continue;
+        }
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                if path.file_name().and_then(|value| value.to_str()) == Some(".git") {
+                    continue;
+                }
+                pending.push((path, depth + 1));
+            } else if file_type.is_file()
+                && path.file_name().and_then(|value| value.to_str()) == Some(name)
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Runs the child with a different ambient toolchain. A gate that trusts the
+/// ambient compiler instead of the requested toolchain fails here.
+#[cfg(unix)]
+#[tokio::test]
+async fn toolchain_request_runs_the_selected_compiler_for_direct_and_shim_selection() {
+    const MARKER: &str = "AGZ_CHECK_TOOLCHAIN_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let Some(ambient) = ambient_toolchain_excluding("1.88") else {
+            eprintln!("skipping toolchain-binding test: no differing toolchain installed");
+            return;
+        };
+        let executable = std::env::current_exe().expect("current test binary");
+        let status = Command::new(&executable)
+            .args([
+                "--exact",
+                "toolchain_request_runs_the_selected_compiler_for_direct_and_shim_selection",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(MARKER, "1")
+            .env("RUSTUP_TOOLCHAIN", ambient)
+            .env_remove("RUSTC")
+            .status()
+            .expect("spawn toolchain-binding child test");
+        assert!(status.success(), "toolchain-binding child test failed");
+        return;
+    }
+    if installed_toolchain("1.88").is_none() {
+        eprintln!("skipping toolchain-binding test: no 1.88 toolchain installed");
+        return;
+    }
+    let project = TestProject::new(
+        "toolchain-binding",
+        "pub fn value() -> usize { 1 }\n",
+        Some(COMPILER_PROBE),
+    );
+    let service = project.service();
+    let outcome = service
+        .run(
+            GateRequest::new(&project.root, GateTargetId::Check)
+                .with_toolchain(installed_toolchain("1.88")),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(outcome.status, GateStatus::FastPass, "{outcome:#?}");
+    let selected = installed_toolchain("1.88").expect("selected toolchain");
+    let command = &outcome.steps[0].command;
+    if command.contains(&format!("toolchains/{selected}")) {
+        assert!(
+            !command.contains(&format!("+{selected}")),
+            "direct toolchain cargo must not need a shim selector: {command}"
+        );
+    } else {
+        assert!(
+            command.contains(&format!("+{selected}")),
+            "shim fallback must pass +toolchain: {command}"
+        );
+    }
+    let probe = find_file(
+        project.root.parent().expect("fixture base directory"),
+        "compiler-probe.txt",
+    )
+    .expect("build script compiler probe");
+    let observed = fs::read_to_string(&probe).expect("read compiler probe");
+    let expected = Command::new(
+        rustup_home()
+            .join("toolchains")
+            .join(&selected)
+            .join("bin")
+            .join("rustc"),
+    )
+    .arg("-vV")
+    .output()
+    .expect("probe selected toolchain rustc");
+    assert_eq!(
+        observed,
+        String::from_utf8(expected.stdout).expect("rustc -vV is UTF-8"),
+        "the gate must run {selected}, not an ambient compiler"
+    );
+    assert!(
+        observed.starts_with("rustc 1.88"),
+        "unexpected compiler probe: {observed}"
+    );
+    service.close().await;
+}

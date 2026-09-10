@@ -14,7 +14,7 @@ cargo install agz-rust-coder --locked
 agz-rust-coder --version
 ```
 
-The server exposes `check`, `audit`, `crate_lookup`, `docs`, `symbol`,
+The server exposes `check`, `audit`, `crate_lookup`, `docs`, `verify`, `symbol`,
 `references`, `definition`, `symbols`, `implementations`, `hierarchy`, `rename`,
 and `refactor`. Edit tools return bounded packages and never modify source.
 
