@@ -110,10 +110,12 @@ sections, for example `AGZ_RUST_CODER_GATE__HARD_TIMEOUT_MS=600000`.
 | `profile.max_runs` | `4` | Fresh Cargo runs available to one `profile` call. |
 | `profile.compare_samples` | `3` | Required samples per side before any speed claim. |
 | `limits.tool_output_bytes` | `49152` | Maximum serialized tool result size. |
-| `profile.max_report_bytes` | `4194304` | Bounded read/store cap for one Cargo timing artifact. |
-| `profile.max_runs` | `4` | Fresh Cargo runs available to one `profile` call. |
-| `profile.compare_samples` | `3` | Required samples per side before any speed claim. |
 | `telemetry.enabled` | `true` | Bounded local activity records without prompts or source. |
+
+`profile` evidence is bounded: the latest 64 records stay in memory, and
+persisted timing artifacts under the server-owned `profile-evidence` directory
+are pruned after 24 hours or beyond 64 files. The `profile` result reports this
+retention policy, so expired evidence is visible instead of silently reused.
 
 Run `agz-rust-coder --help` for every CLI field. The complete behavior and
 default table is in [docs/tools.md](docs/tools.md).

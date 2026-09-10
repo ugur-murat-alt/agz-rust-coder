@@ -14,7 +14,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     io::Read,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -52,6 +52,14 @@ const MAX_TOOLCHAIN_BYTES: usize = 16 * 1024;
 const TOOLCHAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const NOISE_RATIO: f64 = 0.5;
 const MATERIALITY_RATIO: f64 = 0.05;
+
+/// Persisted timing artifacts older than this are pruned on the next write.
+pub const PROFILE_EVIDENCE_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
+/// Maximum number of persisted timing artifact files retained on disk.
+pub const MAX_PROFILE_EVIDENCE_FILES: usize = MAX_RETAINED_EVIDENCE;
+/// Visible retention policy for persisted timing artifacts.
+pub const PROFILE_EVIDENCE_RETENTION: &str = "profile-evidence keeps at most 64 timing artifacts for at most 24h; expired files are \
+     pruned on the next write";
 
 /// Effective run/report/wall budget for one profile invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -137,6 +145,8 @@ pub struct TimingsReport {
     /// `parsed` or `unavailable`; never a guessed value.
     pub extraction: String,
     pub format: String,
+    /// Visible retention policy for the persisted artifact.
+    pub retention: String,
     pub expensive_units: Vec<CriticalPathUnit>,
 }
 
@@ -202,6 +212,11 @@ pub struct ProfileRecord {
     pub gate_status: String,
     pub reason: String,
     pub change_id: Option<String>,
+    /// Canonical authorized workspace root this sample was measured against.
+    /// Comparison is bound to one workspace identity.
+    pub workspace_root: Option<String>,
+    /// Authorization root epoch recorded when the sample was measured.
+    pub root_epoch: u64,
     pub configuration: ConfigurationSnapshot,
     pub conditions: ConditionSnapshot,
     pub phases: Vec<ProfilePhase>,
@@ -217,10 +232,14 @@ pub struct ProfileRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ComparisonSide {
+    /// Number of unique `COMPLETE` samples on this side.
     pub samples: u64,
     pub evidence_ids: Vec<String>,
+    /// Median comparable tool wall time, excluding protocol admission.
     pub wall_median_ms: Option<u64>,
+    /// Minimum comparable tool wall time, excluding protocol admission.
     pub wall_min_ms: Option<u64>,
+    /// Maximum comparable tool wall time, excluding protocol admission.
     pub wall_max_ms: Option<u64>,
     pub cargo_median_ms: Option<u64>,
     pub cargo_min_ms: Option<u64>,
@@ -229,6 +248,10 @@ pub struct ComparisonSide {
     pub hardware: ConditionValue,
     pub cache_state: String,
     pub input_hash: String,
+    /// Canonical workspace root every sample on this side was measured against.
+    pub workspace_root: Option<String>,
+    /// Authorization root epoch recorded for these samples.
+    pub root_epoch: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -270,23 +293,20 @@ pub struct ProfileComparison {
     pub warnings: Vec<String>,
 }
 
-/// One extracted `UNIT_DATA` row. Unknown fields are ignored; missing fields
-/// fail closed through `serde` defaults only for the documented v1 shape.
+/// One extracted `UNIT_DATA` row. Every documented v1 field is required; an
+/// unknown shape or a missing field fails closed instead of defaulting to zero.
+/// Unknown extra fields are ignored, and the dependency-edge list is accepted
+/// under the documented `unblocked_units` key or its `unlocked_units` alias
+/// (the key Cargo 1.88 emits).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TimingUnit {
-    #[serde(default)]
     pub i: usize,
-    #[serde(default)]
     pub name: String,
-    #[serde(default)]
     pub version: String,
-    #[serde(default)]
     pub target: String,
-    #[serde(default)]
     pub start: f64,
-    #[serde(default)]
     pub duration: f64,
-    #[serde(default)]
+    #[serde(alias = "unlocked_units")]
     pub unblocked_units: Vec<usize>,
 }
 
@@ -298,6 +318,8 @@ pub struct ProfileRequest {
     pub options: ValidationOptions,
     pub client_roots: ClientRoots,
     pub root_epoch: u64,
+    /// Canonical authorized workspace root resolved by the protocol handler.
+    pub workspace_root: PathBuf,
     pub budget: ProfileBudget,
     pub change_id: Option<String>,
     /// Protocol-level admission duration measured by the handler, if any.
@@ -312,6 +334,8 @@ pub struct CompareRequest {
     pub options: ValidationOptions,
     pub client_roots: ClientRoots,
     pub root_epoch: u64,
+    /// Canonical authorized workspace root resolved by the protocol handler.
+    pub workspace_root: PathBuf,
     pub budget: ProfileBudget,
     pub change_id: Option<String>,
     pub baseline_evidence: Vec<String>,
@@ -376,6 +400,25 @@ impl ProfileService {
     ) -> ProfileRecord {
         let budget = self.effective_budget(&request.budget);
         let deadline = started_at + Duration::from_millis(budget.wall_time_ms);
+        self.analyze_with_deadline(request, started_at, deadline, authority, cancellation)
+            .await
+    }
+
+    /// Run one sample under an absolute deadline shared by the caller.
+    ///
+    /// The record wall span is measured from `measured_from`; the sample budget
+    /// is clamped by the caller's absolute deadline, so repeated samples can
+    /// never multiply the invocation wall budget.
+    async fn analyze_with_deadline(
+        &self,
+        request: &ProfileRequest,
+        measured_from: Instant,
+        deadline: Instant,
+        authority: Option<Arc<AuthorizedRoot>>,
+        cancellation: &CancellationToken,
+    ) -> ProfileRecord {
+        let budget = self.effective_budget(&request.budget);
+        let deadline = deadline.min(measured_from + Duration::from_millis(budget.wall_time_ms));
         let toolchain = match authority.as_ref() {
             Some(authority) => {
                 self.toolchain(authority.clone(), deadline, cancellation.clone())
@@ -408,7 +451,7 @@ impl ProfileService {
         let record = self.assemble_record(
             request,
             &budget,
-            started_at,
+            measured_from,
             toolchain,
             hardware,
             &evidence,
@@ -420,6 +463,11 @@ impl ProfileService {
 
     /// Compare retained or freshly-run baseline evidence against fresh candidate
     /// samples. A single run per side can never produce a speed claim.
+    ///
+    /// Retained ids are deduplicated in order, non-`COMPLETE` samples are
+    /// excluded, and the comparison is bound to one workspace root, root epoch,
+    /// `changeId`, and one uniform `inputHash` per side.
+    #[allow(clippy::too_many_lines)]
     pub async fn compare(
         &self,
         request: &CompareRequest,
@@ -431,63 +479,84 @@ impl ProfileService {
         let deadline = started_at + Duration::from_millis(budget.wall_time_ms);
         let required = self.config.profile.compare_samples.max(1);
         let mut warnings = Vec::new();
+
+        // B1: one unique evidence id per retained sample, order preserved.
+        let mut seen = BTreeSet::new();
+        let mut unique_ids = Vec::new();
+        for id in &request.baseline_evidence {
+            if seen.insert(id.clone()) {
+                unique_ids.push(id.clone());
+            } else {
+                warnings.push(format!(
+                    "baseline evidence id {id} was provided more than once and was counted once"
+                ));
+            }
+        }
         let mut missing = Vec::new();
         let mut baseline = Vec::new();
-        for id in &request.baseline_evidence {
+        for id in &unique_ids {
             match self.lookup(id) {
                 Some(record) => baseline.push(record),
                 None => missing.push(id.clone()),
             }
         }
         if !missing.is_empty() {
-            return self.inconclusive_comparison(
+            return inconclusive_comparison(
                 request,
                 &budget,
                 required,
                 format!("unknown baseline evidence id(s): {}", missing.join(", ")),
             );
         }
-        for record in &baseline {
-            if record.status == "COMPLETE" {
-                continue;
-            }
-            warnings.push(format!(
-                "retained baseline sample {} finished as {}: {}",
-                record.evidence_id, record.status, record.reason
-            ));
-        }
+        let (retained, dropped) = complete_records(&baseline, "retained baseline");
+        baseline = retained;
+        warnings.extend(dropped);
 
         let mut runs_used = 0_u64;
         if baseline.is_empty() {
-            if budget.max_runs < 1 {
-                return self.inconclusive_comparison(
+            if !request.baseline_evidence.is_empty() {
+                // The caller supplied baseline ids, but none is a countable
+                // COMPLETE sample: do not substitute an unrequested fresh run.
+                return build_comparison(request, required, &baseline, &[], warnings);
+            }
+            if Instant::now() >= deadline {
+                return inconclusive_comparison(
                     request,
                     &budget,
                     required,
-                    "budget.maxRuns does not allow a fresh baseline run".to_owned(),
+                    "wall-time budget was exhausted before a fresh baseline sample".to_owned(),
                 );
             }
             let record = self
-                .analyze(
+                .analyze_with_deadline(
                     &analyze_request(request, budget),
-                    started_at,
+                    Instant::now(),
+                    deadline,
                     authority.clone(),
                     cancellation,
                 )
                 .await;
-            let status = record.status.clone();
-            let reason = record.reason.clone();
             runs_used += 1;
-            baseline.push(record);
-            if status != "COMPLETE" {
-                warnings.push(format!("fresh baseline run finished as {status}: {reason}"));
+            if record.status == "COMPLETE" {
+                baseline.push(record);
+            } else {
+                warnings.push(format!(
+                    "fresh baseline run finished as {}: {}",
+                    record.status, record.reason
+                ));
+                return build_comparison(request, required, &baseline, &[], warnings);
             }
+        }
+
+        if let Some(reason) = side_binding_problem(&baseline, request, "baseline") {
+            warnings.push(reason);
+            return build_comparison(request, required, &baseline, &[], warnings);
         }
 
         let remaining = budget.max_runs.saturating_sub(runs_used);
         let candidate_runs = required.min(remaining);
         if candidate_runs == 0 {
-            return self.inconclusive_comparison(
+            return inconclusive_comparison(
                 request,
                 &budget,
                 required,
@@ -504,9 +573,10 @@ impl ProfileService {
                 break;
             }
             let record = self
-                .analyze(
+                .analyze_with_deadline(
                     &analyze_request(request, budget),
                     Instant::now(),
+                    deadline,
                     authority.clone(),
                     cancellation,
                 )
@@ -519,8 +589,10 @@ impl ProfileService {
             }
             candidate.push(record);
         }
+        let (candidate, dropped) = complete_records(&candidate, "candidate");
+        warnings.extend(dropped);
         if candidate.is_empty() {
-            return self.inconclusive_comparison(
+            return inconclusive_comparison(
                 request,
                 &budget,
                 required,
@@ -528,108 +600,124 @@ impl ProfileService {
             );
         }
 
-        self.build_comparison(request, required, &baseline, &candidate, warnings)
+        build_comparison(request, required, &baseline, &candidate, warnings)
     }
+}
 
-    #[allow(clippy::too_many_lines)]
-    fn build_comparison(
-        &self,
-        request: &CompareRequest,
-        required: u64,
-        baseline: &[ProfileRecord],
-        candidate: &[ProfileRecord],
-        mut warnings: Vec<String>,
-    ) -> ProfileComparison {
-        let configuration = baseline
-            .first()
-            .or_else(|| candidate.first())
-            .map(|record| record.configuration.clone());
-        let mut differences = Vec::new();
-        differences.extend(condition_differences(baseline, candidate));
-        if let Some(configuration) = &configuration
-            && candidate
-                .iter()
-                .chain(baseline.iter())
-                .any(|record| &record.configuration != configuration)
-        {
-            differences.push("configuration differs between samples".to_owned());
-        }
-        let baseline_side = side(baseline);
-        let candidate_side = side(candidate);
-        let change_binding = ChangeBinding {
-            change_id: request.change_id.clone(),
-            baseline_input_hash: baseline_side.input_hash.clone(),
-            candidate_input_hash: candidate_side.input_hash.clone(),
-            changed: baseline_side.input_hash != candidate_side.input_hash,
-        };
-        let phase_deltas = phase_deltas(baseline, candidate);
-        let conditions_match = differences.is_empty();
-        let compare_result = compare_measurements(
+#[allow(clippy::too_many_lines)]
+fn build_comparison(
+    request: &CompareRequest,
+    required: u64,
+    baseline: &[ProfileRecord],
+    candidate: &[ProfileRecord],
+    mut warnings: Vec<String>,
+) -> ProfileComparison {
+    let (baseline, dropped) = complete_records(baseline, "baseline");
+    warnings.extend(dropped);
+    let (candidate, dropped) = complete_records(candidate, "candidate");
+    warnings.extend(dropped);
+    let configuration = baseline
+        .first()
+        .or_else(|| candidate.first())
+        .map(|record| record.configuration.clone());
+    let mut differences = Vec::new();
+    differences.extend(condition_differences(&baseline, &candidate));
+    if let Some(configuration) = &configuration
+        && candidate
+            .iter()
+            .chain(baseline.iter())
+            .any(|record| &record.configuration != configuration)
+    {
+        differences.push("configuration differs between samples".to_owned());
+    }
+    let baseline_side = side(&baseline);
+    let candidate_side = side(&candidate);
+    let change_binding = ChangeBinding {
+        change_id: request.change_id.clone(),
+        baseline_input_hash: baseline_side.input_hash.clone(),
+        candidate_input_hash: candidate_side.input_hash.clone(),
+        changed: !baseline_side.input_hash.is_empty()
+            && !candidate_side.input_hash.is_empty()
+            && baseline_side.input_hash != candidate_side.input_hash,
+    };
+    let phase_deltas = phase_deltas(&baseline, &candidate);
+    let binding = side_binding_problem(&baseline, request, "baseline")
+        .or_else(|| side_binding_problem(&candidate, request, "candidate"));
+    if let Some(binding) = &binding {
+        differences.push(binding.clone());
+    }
+    let mut seen = BTreeSet::new();
+    differences.retain(|difference| seen.insert(difference.clone()));
+    let conditions_match = differences.is_empty();
+    let compare_result = match binding {
+        Some(reason) => Err(reason),
+        None => compare_measurements(
             &baseline_side,
             &candidate_side,
             required,
             change_binding.changed,
             conditions_match,
+        ),
+    };
+    let (status, reason, speed_claim) = match compare_result {
+        Ok((claim, reason)) => ("COMPARABLE".to_owned(), reason, claim),
+        Err(reason) => ("INCONCLUSIVE".to_owned(), reason, None),
+    };
+    if !conditions_match {
+        warnings.push(
+            "conditions differed between sides; no speed claim is valid from these samples"
+                .to_owned(),
         );
-        let (status, reason, speed_claim) = match compare_result {
-            Ok((claim, reason)) => ("COMPARABLE".to_owned(), reason, claim),
-            Err(reason) => ("INCONCLUSIVE".to_owned(), reason, None),
-        };
-        if !conditions_match {
-            warnings.push(
-                "conditions differed between sides; no speed claim is valid from these samples"
-                    .to_owned(),
-            );
-        }
-        ProfileComparison {
-            format_version: PROFILE_FORMAT_VERSION,
-            status,
-            reason,
-            configuration,
-            conditions_match,
-            condition_differences: differences,
-            change_binding,
-            required_samples: required,
-            baseline: baseline_side,
-            candidate: candidate_side,
-            phase_deltas,
-            speed_claim,
-            warnings,
-        }
     }
-
-    fn inconclusive_comparison(
-        &self,
-        request: &CompareRequest,
-        budget: &ProfileBudget,
-        required: u64,
-        reason: String,
-    ) -> ProfileComparison {
-        ProfileComparison {
-            format_version: PROFILE_FORMAT_VERSION,
-            status: "INCONCLUSIVE".to_owned(),
-            reason,
-            configuration: None,
-            conditions_match: false,
-            condition_differences: Vec::new(),
-            change_binding: ChangeBinding {
-                change_id: request.change_id.clone(),
-                baseline_input_hash: String::new(),
-                candidate_input_hash: String::new(),
-                changed: false,
-            },
-            required_samples: required,
-            baseline: empty_side(),
-            candidate: empty_side(),
-            phase_deltas: Vec::new(),
-            speed_claim: None,
-            warnings: vec![format!(
-                "no comparison was possible under budget maxRuns={} maxReportBytes={} wallTimeMs={}",
-                budget.max_runs, budget.max_report_bytes, budget.wall_time_ms
-            )],
-        }
+    ProfileComparison {
+        format_version: PROFILE_FORMAT_VERSION,
+        status,
+        reason,
+        configuration,
+        conditions_match,
+        condition_differences: differences,
+        change_binding,
+        required_samples: required,
+        baseline: baseline_side,
+        candidate: candidate_side,
+        phase_deltas,
+        speed_claim,
+        warnings,
     }
+}
 
+fn inconclusive_comparison(
+    request: &CompareRequest,
+    budget: &ProfileBudget,
+    required: u64,
+    reason: String,
+) -> ProfileComparison {
+    ProfileComparison {
+        format_version: PROFILE_FORMAT_VERSION,
+        status: "INCONCLUSIVE".to_owned(),
+        reason,
+        configuration: None,
+        conditions_match: false,
+        condition_differences: Vec::new(),
+        change_binding: ChangeBinding {
+            change_id: request.change_id.clone(),
+            baseline_input_hash: String::new(),
+            candidate_input_hash: String::new(),
+            changed: false,
+        },
+        required_samples: required,
+        baseline: empty_side(),
+        candidate: empty_side(),
+        phase_deltas: Vec::new(),
+        speed_claim: None,
+        warnings: vec![format!(
+            "no comparison was possible under budget maxRuns={} maxReportBytes={} wallTimeMs={}",
+            budget.max_runs, budget.max_report_bytes, budget.wall_time_ms
+        )],
+    }
+}
+
+impl ProfileService {
     fn retain(&self, record: ProfileRecord) {
         let mut evidence = self
             .evidence
@@ -787,6 +875,8 @@ impl ProfileService {
                 .clone()
                 .unwrap_or_else(|| evidence.status.as_str().to_owned()),
             change_id: request.change_id.clone(),
+            workspace_root: Some(request.workspace_root.display().to_string()),
+            root_epoch: request.root_epoch,
             configuration: ConfigurationSnapshot {
                 target: request.target.as_str().to_owned(),
                 options: request.options.clone(),
@@ -834,6 +924,7 @@ impl ProfileService {
             units_extracted: None,
             extraction: "unavailable".to_owned(),
             format: TIMING_UNIT_FORMAT.to_owned(),
+            retention: PROFILE_EVIDENCE_RETENTION.to_owned(),
             expensive_units: Vec::new(),
         };
         let Some(target_directory) = evidence
@@ -846,51 +937,10 @@ impl ProfileService {
                 None,
             );
         };
-        let path = target_directory
-            .join("cargo-timings")
-            .join("cargo-timing.html");
-        let Ok(metadata) = fs::metadata(&path) else {
-            return (
-                unavailable(format!(
-                    "the stable timing artifact {} was not produced",
-                    path.display()
-                )),
-                None,
-            );
+        let (text, bytes) = match read_timing_artifact(&target_directory, budget.max_report_bytes) {
+            Ok(read) => read,
+            Err(reason) => return (unavailable(reason), None),
         };
-        let bytes = metadata.len();
-        if bytes > budget.max_report_bytes {
-            return (
-                unavailable(format!(
-                    "timing artifact is {bytes} bytes and exceeds budget.maxReportBytes={}",
-                    budget.max_report_bytes
-                )),
-                None,
-            );
-        }
-        let mut text = String::new();
-        let read = fs::File::open(&path).and_then(|file| {
-            file.take(budget.max_report_bytes.saturating_add(1))
-                .read_to_string(&mut text)
-        });
-        if let Err(error) = read {
-            return (
-                unavailable(format!(
-                    "timing artifact {} could not be read: {error}",
-                    path.display()
-                )),
-                None,
-            );
-        }
-        if text.len() as u64 > budget.max_report_bytes {
-            return (
-                unavailable(format!(
-                    "timing artifact exceeded budget.maxReportBytes={} while reading",
-                    budget.max_report_bytes
-                )),
-                None,
-            );
-        }
         let relative_path = self.persist_report(id, text.as_bytes());
         let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
         let (extraction, units, reason) = match extract_timing_units(&text, MAX_TIMING_UNITS) {
@@ -919,6 +969,7 @@ impl ProfileService {
             units_extracted: units.as_ref().map(|units| units.len() as u64),
             extraction,
             format: TIMING_UNIT_FORMAT.to_owned(),
+            retention: PROFILE_EVIDENCE_RETENTION.to_owned(),
             expensive_units,
         };
         (report, units)
@@ -936,7 +987,156 @@ impl ProfileService {
             .ok()?;
         file.write_all(bytes).ok()?;
         file.flush().ok()?;
+        prune_profile_evidence(&directory, SystemTime::now());
         Some(format!("profile-evidence/{id}.html"))
+    }
+}
+
+/// Read the stable Cargo timing artifact as a bounded regular file.
+///
+/// The artifact is never followed through a symlink, never opened when it is
+/// not a regular file (a FIFO would block indefinitely), and its canonical
+/// location must stay inside the server-owned target directory.
+fn read_timing_artifact(target_directory: &Path, max_bytes: u64) -> Result<(String, u64), String> {
+    let path = target_directory
+        .join("cargo-timings")
+        .join("cargo-timing.html");
+    let metadata = fs::symlink_metadata(&path).map_err(|error| {
+        format!(
+            "the stable timing artifact {} was not produced: {error}",
+            path.display()
+        )
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "timing artifact {} is not a regular file; extraction is fail-closed",
+            path.display()
+        ));
+    }
+    let canonical = fs::canonicalize(&path).map_err(|error| {
+        format!(
+            "timing artifact {} could not be canonicalized: {error}",
+            path.display()
+        )
+    })?;
+    let owned_directory = fs::canonicalize(target_directory).map_err(|error| {
+        format!(
+            "target directory {} could not be canonicalized: {error}",
+            target_directory.display()
+        )
+    })?;
+    if !canonical.starts_with(&owned_directory) {
+        return Err(format!(
+            "timing artifact {} escapes the server-owned target directory {}; extraction is fail-closed",
+            canonical.display(),
+            owned_directory.display()
+        ));
+    }
+    let bytes = metadata.len();
+    if bytes > max_bytes {
+        return Err(format!(
+            "timing artifact is {bytes} bytes and exceeds budget.maxReportBytes={max_bytes}"
+        ));
+    }
+    let file = open_regular_file_no_follow(&canonical)?;
+    let opened = file.metadata().map_err(|error| {
+        format!(
+            "timing artifact {} could not be verified after opening: {error}",
+            canonical.display()
+        )
+    })?;
+    if !opened.file_type().is_file() {
+        return Err(format!(
+            "timing artifact {} was replaced by a non-regular file; extraction is fail-closed",
+            canonical.display()
+        ));
+    }
+    let mut text = String::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_string(&mut text)
+        .map_err(|error| {
+            format!(
+                "timing artifact {} could not be read: {error}",
+                canonical.display()
+            )
+        })?;
+    if text.len() as u64 > max_bytes {
+        return Err(format!(
+            "timing artifact exceeded budget.maxReportBytes={max_bytes} while reading"
+        ));
+    }
+    Ok((text, bytes))
+}
+
+#[cfg(unix)]
+fn open_regular_file_no_follow(path: &Path) -> Result<fs::File, String> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|error| {
+            format!(
+                "timing artifact {} could not be opened: {error}",
+                path.display()
+            )
+        })
+}
+
+#[cfg(not(unix))]
+fn open_regular_file_no_follow(path: &Path) -> Result<fs::File, String> {
+    fs::File::open(path).map_err(|error| {
+        format!(
+            "timing artifact {} could not be opened: {error}",
+            path.display()
+        )
+    })
+}
+
+/// Prune persisted timing artifacts beyond the visible retention bounds.
+///
+/// Only files that match the server-owned `pe-*.html` naming pattern are
+/// touched: expired files are removed first, then the oldest files beyond the
+/// `MAX_PROFILE_EVIDENCE_FILES` cap.
+fn prune_profile_evidence(directory: &Path, now: SystemTime) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let mut retained = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        // Server-owned artifacts are always written as lowercase `pe-*.html`;
+        // the exact suffix match avoids touching unrelated files.
+        #[allow(clippy::case_sensitive_file_extension_comparisons)]
+        let owned = name.starts_with("pe-") && name.ends_with(".html");
+        if !owned {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.file_type().is_file() {
+            continue;
+        }
+        let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
+        let expired = now
+            .duration_since(modified)
+            .is_ok_and(|age| age.as_millis() > u128::from(PROFILE_EVIDENCE_TTL_MS));
+        if expired {
+            let _ = fs::remove_file(entry.path());
+        } else {
+            retained.push((entry.path(), modified));
+        }
+    }
+    if retained.len() > MAX_PROFILE_EVIDENCE_FILES {
+        retained.sort_by_key(|(_, modified)| *modified);
+        let excess = retained.len() - MAX_PROFILE_EVIDENCE_FILES;
+        for (path, _) in retained.drain(..excess) {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 
@@ -947,6 +1147,7 @@ fn analyze_request(request: &CompareRequest, budget: ProfileBudget) -> ProfileRe
         options: request.options.clone(),
         client_roots: request.client_roots.clone(),
         root_epoch: request.root_epoch,
+        workspace_root: request.workspace_root.clone(),
         budget,
         change_id: request.change_id.clone(),
         mcp_admission_ms: None,
@@ -972,6 +1173,12 @@ pub fn extract_timing_units(html: &str, max_units: usize) -> Result<Vec<TimingUn
     let units: Vec<TimingUnit> = serde_json::from_str(&candidate[..end]).map_err(|error| {
         format!("report UNIT_DATA does not match the version-bound shape: {error}")
     })?;
+    if units.is_empty() {
+        return Err(format!(
+            "report UNIT_DATA matched the {TIMING_UNIT_FORMAT} anchor but contained no units; \
+             extraction is fail-closed"
+        ));
+    }
     if units.len() > max_units {
         return Err(format!(
             "report UNIT_DATA had {} units and exceeds the {max_units}-unit bound",
@@ -1021,6 +1228,9 @@ pub fn build_critical_path(units: &[TimingUnit]) -> Result<(f64, Vec<CriticalPat
     }
     let mut index_of = BTreeMap::new();
     for (position, unit) in units.iter().enumerate() {
+        // n3 note: duplicate `i` values are merged last-write-wins in this
+        // lookup. Cargo's version-bound shape emits unique indices; a divergent
+        // report degrades one edge target rather than fabricating a unit.
         index_of.insert(unit.i, position);
     }
     let mut adjacency = vec![BTreeSet::new(); units.len()];
@@ -1431,6 +1641,13 @@ fn phases(evidence: &GateEvidence, mcp_admission_ms: Option<u64>) -> Vec<Profile
         .map(|step| step.duration_ms)
         .sum::<u64>();
     let gate_observed = !terminal;
+    // m1: `queue_ms` spans from request acceptance to the first Cargo process,
+    // so it already contains admission and preflight. Only the residual wait
+    // after preflight is reported as queue time to avoid double counting.
+    let queue_residual = evidence
+        .queue_ms
+        .saturating_sub(evidence.admission_ms)
+        .saturating_sub(evidence.preflight_ms);
     phases.push(ProfilePhase {
         name: "mcpAdmission".to_owned(),
         ms: mcp_admission_ms,
@@ -1446,8 +1663,8 @@ fn phases(evidence: &GateEvidence, mcp_admission_ms: Option<u64>) -> Vec<Profile
         ),
         (
             "gateQueue",
-            Some(evidence.queue_ms),
-            "gate-evidence:scheduler-queue",
+            Some(queue_residual),
+            "gate-evidence:scheduler-wait-after-preflight",
         ),
         (
             "preflight",
@@ -1474,7 +1691,7 @@ fn phases(evidence: &GateEvidence, mcp_admission_ms: Option<u64>) -> Vec<Profile
         let measured = evidence
             .admission_ms
             .saturating_add(evidence.preflight_ms)
-            .saturating_add(evidence.queue_ms)
+            .saturating_add(queue_residual)
             .saturating_add(step_sum);
         phases.push(ProfilePhase {
             name: "finalization".to_owned(),
@@ -1548,6 +1765,9 @@ fn summarize_toolchain(stdout: &str) -> String {
 }
 
 fn hardware_class() -> ConditionValue {
+    // n2 note: this is a process-visible host probe outside the authorized
+    // workspace, matching the existing precedent for bounded environment
+    // metadata (OS, architecture, parallelism). It reads no workspace source.
     let parallelism = std::thread::available_parallelism()
         .map(|value| value.get())
         .unwrap_or(0);
@@ -1632,11 +1852,99 @@ fn condition_differences(baseline: &[ProfileRecord], candidate: &[ProfileRecord]
     differences
 }
 
-fn side(records: &[ProfileRecord]) -> ComparisonSide {
-    let wall = records
+/// Keep only unique `COMPLETE` records, preserving order. Dropped records are
+/// reported as visible warnings instead of silently entering sample counts.
+fn complete_records(records: &[ProfileRecord], label: &str) -> (Vec<ProfileRecord>, Vec<String>) {
+    let mut seen = BTreeSet::new();
+    let mut kept = Vec::new();
+    let mut dropped = Vec::new();
+    for record in records {
+        if !seen.insert(record.evidence_id.clone()) {
+            dropped.push(format!(
+                "{label} evidence {} appeared more than once and was counted once",
+                record.evidence_id
+            ));
+            continue;
+        }
+        if record.status != "COMPLETE" {
+            dropped.push(format!(
+                "{label} sample {} was excluded because it finished as {}: {}",
+                record.evidence_id, record.status, record.reason
+            ));
+            continue;
+        }
+        kept.push(record.clone());
+    }
+    (kept, dropped)
+}
+
+/// Reject evidence that is not bound to this comparison's workspace root, root
+/// epoch, and `changeId`, or that mixes input identities inside one side.
+fn side_binding_problem(
+    records: &[ProfileRecord],
+    request: &CompareRequest,
+    label: &str,
+) -> Option<String> {
+    let workspace_root = request.workspace_root.display().to_string();
+    let mut input_hash: Option<&str> = None;
+    for record in records {
+        match record.workspace_root.as_deref() {
+            Some(root) if root == workspace_root => {}
+            Some(root) => {
+                return Some(format!(
+                    "{label} evidence {} belongs to workspace {root} instead of {workspace_root}",
+                    record.evidence_id
+                ));
+            }
+            None => {
+                return Some(format!(
+                    "{label} evidence {} has no workspace identity and cannot be compared",
+                    record.evidence_id
+                ));
+            }
+        }
+        if record.root_epoch != request.root_epoch {
+            return Some(format!(
+                "{label} evidence {} was measured under root epoch {} instead of {}",
+                record.evidence_id, record.root_epoch, request.root_epoch
+            ));
+        }
+        if record.change_id != request.change_id {
+            return Some(format!(
+                "{label} evidence {} is bound to changeId {:?} instead of {:?}",
+                record.evidence_id, record.change_id, request.change_id
+            ));
+        }
+        match input_hash {
+            None => input_hash = Some(record.conditions.input_hash.as_str()),
+            Some(hash) if hash == record.conditions.input_hash => {}
+            Some(_) => {
+                return Some(format!(
+                    "{label} samples mix input identities; changed or warm/cold inputs are not \
+                     comparable"
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Comparable wall span for one sample: the recorded tool wall minus the
+/// protocol admission measured for that invocation. Standalone analyze samples
+/// and samples produced inside a compare are then on the same interval.
+fn comparable_wall_ms(record: &ProfileRecord) -> u64 {
+    let admission = record
+        .phases
         .iter()
-        .map(|record| record.wall_ms)
-        .collect::<Vec<_>>();
+        .find(|phase| phase.name == "mcpAdmission")
+        .and_then(|phase| phase.ms)
+        .unwrap_or(0);
+    record.wall_ms.saturating_sub(admission)
+}
+
+fn side(records: &[ProfileRecord]) -> ComparisonSide {
+    let (records, _) = complete_records(records, "side");
+    let wall = records.iter().map(comparable_wall_ms).collect::<Vec<_>>();
     let cargo = records
         .iter()
         .map(cargo_phase_ms)
@@ -1667,6 +1975,8 @@ fn side(records: &[ProfileRecord]) -> ComparisonSide {
         input_hash: first
             .map(|record| record.conditions.input_hash.clone())
             .unwrap_or_default(),
+        workspace_root: first.and_then(|record| record.workspace_root.clone()),
+        root_epoch: first.map_or(0, |record| record.root_epoch),
     }
 }
 
@@ -1684,6 +1994,8 @@ fn empty_side() -> ComparisonSide {
         hardware: ConditionValue::unavailable("no samples"),
         cache_state: "unknown".to_owned(),
         input_hash: String::new(),
+        workspace_root: None,
+        root_epoch: 0,
     }
 }
 
@@ -1905,5 +2217,557 @@ const UNIT_DATA = [
             },
         ];
         assert!(build_critical_path(&cyclic).is_err());
+    }
+
+    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let sequence = NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "agz-profile-unit-{label}-{}-{nanos}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("create unit test directory");
+        path
+    }
+
+    #[test]
+    fn extraction_rejects_empty_and_partial_unit_shapes() {
+        assert!(extract_timing_units("const UNIT_DATA = []", MAX_TIMING_UNITS).is_err());
+        assert!(extract_timing_units("const UNIT_DATA = [{}]", MAX_TIMING_UNITS).is_err());
+        for missing in [
+            "{\"name\": \"a\", \"version\": \"1\", \"target\": \" (lib)\", \"start\": 0.0, \
+             \"duration\": 1.0, \"unblocked_units\": []}",
+            "{\"i\": 0, \"version\": \"1\", \"target\": \" (lib)\", \"start\": 0.0, \
+             \"duration\": 1.0, \"unblocked_units\": []}",
+            "{\"i\": 0, \"name\": \"a\", \"target\": \" (lib)\", \"start\": 0.0, \
+             \"duration\": 1.0, \"unblocked_units\": []}",
+            "{\"i\": 0, \"name\": \"a\", \"version\": \"1\", \"start\": 0.0, \"duration\": 1.0, \
+             \"unblocked_units\": []}",
+            "{\"i\": 0, \"name\": \"a\", \"version\": \"1\", \"target\": \" (lib)\", \
+             \"duration\": 1.0, \"unblocked_units\": []}",
+            "{\"i\": 0, \"name\": \"a\", \"version\": \"1\", \"target\": \" (lib)\", \"start\": 0.0, \
+             \"unblocked_units\": []}",
+            "{\"i\": 0, \"name\": \"a\", \"version\": \"1\", \"target\": \" (lib)\", \"start\": 0.0, \
+             \"duration\": 1.0}",
+        ] {
+            let html = format!("const UNIT_DATA = [{missing}]");
+            assert!(
+                extract_timing_units(&html, MAX_TIMING_UNITS).is_err(),
+                "shape must fail closed: {missing}"
+            );
+        }
+        // Unknown extra fields stay tolerated for forward-compatible rows.
+        let extended = VALID_HTML.replace(
+            "\"unblocked_units\": [1]}",
+            "\"unblocked_units\": [1], \"extra\": true}",
+        );
+        assert_eq!(
+            extract_timing_units(&extended, MAX_TIMING_UNITS)
+                .expect("extra fields are ignored")
+                .len(),
+            2
+        );
+        // Cargo 1.88 emits the edge list under `unlocked_units`.
+        let unlocked = VALID_HTML.replace("unblocked_units", "unlocked_units");
+        assert_eq!(
+            extract_timing_units(&unlocked, MAX_TIMING_UNITS)
+                .expect("unlocked_units alias")
+                .len(),
+            2
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timing_artifact_reader_rejects_symlink_fifo_and_escape() {
+        use std::os::unix::fs::symlink;
+        let root = unique_test_dir("artifact");
+        let target = root.join("target");
+        let timings = target.join("cargo-timings");
+        fs::create_dir_all(&timings).expect("create timings directory");
+        let artifact = timings.join("cargo-timing.html");
+        fs::write(&artifact, "regular").expect("write regular artifact");
+        assert_eq!(
+            read_timing_artifact(&target, 1_024)
+                .expect("regular artifact is readable")
+                .0,
+            "regular"
+        );
+
+        let outside = root.join("outside.html");
+        fs::write(&outside, "outside").expect("write outside artifact");
+        fs::remove_file(&artifact).expect("remove regular artifact");
+        symlink(&outside, &artifact).expect("create symlink artifact");
+        let reason = read_timing_artifact(&target, 1_024).expect_err("symlink must fail closed");
+        assert!(reason.contains("not a regular file"), "{reason}");
+
+        fs::remove_file(&artifact).expect("remove symlink artifact");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&artifact)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success());
+        let started = Instant::now();
+        let reason = read_timing_artifact(&target, 1_024).expect_err("fifo must fail closed");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "fifo open blocked for {:?}",
+            started.elapsed()
+        );
+        assert!(reason.contains("not a regular file"), "{reason}");
+
+        fs::remove_file(&artifact).expect("remove fifo");
+        fs::remove_dir(&timings).expect("remove timings directory");
+        let escape = root.join("escape");
+        fs::create_dir_all(&escape).expect("create escape directory");
+        fs::write(escape.join("cargo-timing.html"), "escape").expect("write escape artifact");
+        symlink(&escape, &timings).expect("symlink timings directory");
+        let reason = read_timing_artifact(&target, 1_024).expect_err("escape must fail closed");
+        assert!(reason.contains("escapes the server-owned"), "{reason}");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn retention_prunes_expired_and_excess_artifacts() {
+        use std::fs::File;
+        let directory = unique_test_dir("retention");
+        let make = |name: &str, modified: SystemTime| {
+            let path = directory.join(name);
+            fs::write(&path, b"evidence").expect("write artifact");
+            File::options()
+                .write(true)
+                .open(&path)
+                .expect("open artifact")
+                .set_modified(modified)
+                .expect("set artifact mtime");
+            path
+        };
+        let now = SystemTime::now();
+        let expired = make(
+            "pe-expired.html",
+            now - Duration::from_millis(PROFILE_EVIDENCE_TTL_MS + 60_000),
+        );
+        let fresh = make("pe-fresh.html", now - Duration::from_millis(1_000));
+        let unrelated = directory.join("keep.txt");
+        fs::write(&unrelated, b"keep").expect("write unrelated file");
+        prune_profile_evidence(&directory, now);
+        assert!(!expired.exists(), "expired artifact was retained");
+        assert!(fresh.exists(), "fresh artifact was pruned");
+        assert!(unrelated.exists(), "unrelated file was pruned");
+
+        fs::remove_file(&fresh).expect("remove fresh artifact");
+        let mut paths = Vec::new();
+        for index in 0..(MAX_PROFILE_EVIDENCE_FILES + 3) {
+            let age = u64::try_from(MAX_PROFILE_EVIDENCE_FILES + 3 - index).expect("age fits");
+            paths.push(make(
+                &format!("pe-{index:03}.html"),
+                now - Duration::from_millis(age * 1_000),
+            ));
+        }
+        prune_profile_evidence(&directory, now);
+        let retained = fs::read_dir(&directory)
+            .expect("read directory")
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("pe-"))
+            .count();
+        assert_eq!(retained, MAX_PROFILE_EVIDENCE_FILES);
+        assert!(!paths[0].exists(), "oldest artifact survived the cap");
+        assert!(paths[paths.len() - 1].exists());
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    fn condition(input_hash: &str, cache_state: &str) -> ConditionSnapshot {
+        ConditionSnapshot {
+            toolchain: ConditionValue {
+                available: true,
+                summary: "cargo 1.88.0".to_owned(),
+                reason: String::new(),
+            },
+            hardware: ConditionValue {
+                available: true,
+                summary: "linux/x86_64 cpus=8".to_owned(),
+                reason: String::new(),
+            },
+            cache_state: cache_state.to_owned(),
+            input_hash: input_hash.to_owned(),
+            command_hash: "command".to_owned(),
+            environment_hash: "environment".to_owned(),
+            change_id: Some("change".to_owned()),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn test_record(
+        id: &str,
+        status: &str,
+        cache_state: &str,
+        input_hash: &str,
+        cargo_ms: u64,
+        wall_ms: u64,
+        admission_ms: u64,
+    ) -> ProfileRecord {
+        ProfileRecord {
+            format_version: PROFILE_FORMAT_VERSION,
+            evidence_id: id.to_owned(),
+            action: "buildAnalyze".to_owned(),
+            status: status.to_owned(),
+            gate_status: "FAST_PASS".to_owned(),
+            reason: format!("finished as {status}"),
+            change_id: Some("change".to_owned()),
+            workspace_root: Some("/workspace".to_owned()),
+            root_epoch: 0,
+            configuration: ConfigurationSnapshot {
+                target: "check".to_owned(),
+                options: ValidationOptions::default(),
+                cargo: "cargo".to_owned(),
+                cache_mode: "isolated".to_owned(),
+                detail: "standard".to_owned(),
+            },
+            conditions: condition(input_hash, cache_state),
+            phases: vec![
+                ProfilePhase {
+                    name: "mcpAdmission".to_owned(),
+                    ms: Some(admission_ms),
+                    observed: true,
+                    source: "test".to_owned(),
+                },
+                ProfilePhase {
+                    name: "cargo:check".to_owned(),
+                    ms: Some(cargo_ms),
+                    observed: true,
+                    source: "test".to_owned(),
+                },
+            ],
+            rebuild: ProfileRebuildReport {
+                available: false,
+                reason: "test telemetry".to_owned(),
+                total_units: None,
+                fresh_units: None,
+                rebuilt_units: None,
+                build_scripts: None,
+                linked_units: None,
+                partial: false,
+                rebuilt_packages: Vec::new(),
+                build_script_packages: Vec::new(),
+                packages_truncated: false,
+            },
+            explanations: Vec::new(),
+            critical_path: CriticalPath {
+                available: false,
+                reason: "test".to_owned(),
+                method: String::new(),
+                path_duration_secs: None,
+                units: Vec::new(),
+                caveat: String::new(),
+            },
+            timings_report: TimingsReport {
+                available: false,
+                reason: "test".to_owned(),
+                relative_path: None,
+                root: None,
+                bytes: None,
+                sha256: None,
+                units_extracted: None,
+                extraction: "unavailable".to_owned(),
+                format: TIMING_UNIT_FORMAT.to_owned(),
+                retention: PROFILE_EVIDENCE_RETENTION.to_owned(),
+                expensive_units: Vec::new(),
+            },
+            wall_ms,
+            budget: BudgetSnapshot {
+                max_runs: 4,
+                max_report_bytes: 4 * 1024 * 1024,
+                wall_time_ms: 60_000,
+            },
+            warnings: Vec::new(),
+        }
+    }
+
+    fn test_compare_request() -> CompareRequest {
+        CompareRequest {
+            directory: None,
+            target: GateTargetId::Check,
+            options: ValidationOptions::default(),
+            client_roots: ClientRoots::unsupported(),
+            root_epoch: 0,
+            workspace_root: PathBuf::from("/workspace"),
+            budget: ProfileBudget {
+                max_runs: 4,
+                max_report_bytes: 4 * 1024 * 1024,
+                wall_time_ms: 60_000,
+            },
+            change_id: Some("change".to_owned()),
+            baseline_evidence: Vec::new(),
+        }
+    }
+
+    fn clean_side(
+        prefix: &str,
+        input_hash: &str,
+        cargo_ms: u64,
+        wall_ms: u64,
+    ) -> Vec<ProfileRecord> {
+        (0..3)
+            .map(|index| {
+                test_record(
+                    &format!("{prefix}-{index}"),
+                    "COMPLETE",
+                    "cold",
+                    input_hash,
+                    cargo_ms,
+                    wall_ms,
+                    10,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn comparison_excludes_non_complete_and_deduplicates_evidence() {
+        let request = test_compare_request();
+        let baseline = vec![
+            test_record("pe-a", "COMPLETE", "cold", "hash-a", 100, 150, 10),
+            test_record("pe-a", "COMPLETE", "cold", "hash-a", 100, 150, 10),
+            test_record("pe-b", "CANCELLED", "unknown", "hash-a", 100, 150, 10),
+        ];
+        let candidate = vec![
+            test_record("pe-c", "COMPLETE", "cold", "hash-b", 50, 80, 10),
+            test_record("pe-d", "TIMEOUT", "unknown", "hash-b", 0, 5, 10),
+            test_record("pe-e", "COMPLETE", "cold", "hash-b", 52, 82, 10),
+        ];
+        let comparison = build_comparison(&request, 2, &baseline, &candidate, Vec::new());
+        assert_eq!(comparison.baseline.samples, 1);
+        assert_eq!(comparison.candidate.samples, 2);
+        assert_eq!(comparison.baseline.evidence_ids, ["pe-a"]);
+        assert!(
+            comparison
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("appeared more than once")),
+            "{:?}",
+            comparison.warnings
+        );
+        assert!(
+            comparison
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("CANCELLED") && warning.contains("excluded")),
+            "{:?}",
+            comparison.warnings
+        );
+        assert!(
+            comparison
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("TIMEOUT") && warning.contains("excluded")),
+            "{:?}",
+            comparison.warnings
+        );
+        assert_eq!(comparison.status, "INCONCLUSIVE");
+        assert!(
+            comparison.reason.contains("insufficient samples"),
+            "{}",
+            comparison.reason
+        );
+    }
+
+    #[test]
+    fn comparison_rejects_mixed_foreign_and_epoch_bindings() {
+        let request = test_compare_request();
+        let candidate = clean_side("pe-cand", "hash-b", 50, 80);
+
+        let mixed = vec![
+            test_record("pe-a", "COMPLETE", "cold", "hash-a", 100, 150, 10),
+            test_record("pe-b", "COMPLETE", "cold", "hash-other", 100, 150, 10),
+        ];
+        let comparison = build_comparison(&request, 2, &mixed, &candidate.clone(), Vec::new());
+        assert_eq!(comparison.status, "INCONCLUSIVE");
+        assert!(
+            comparison.reason.contains("mix input identities"),
+            "{}",
+            comparison.reason
+        );
+
+        let mut foreign = test_record("pe-a", "COMPLETE", "cold", "hash-a", 100, 150, 10);
+        foreign.workspace_root = Some("/elsewhere".to_owned());
+        let comparison = build_comparison(&request, 2, &[foreign], &candidate.clone(), Vec::new());
+        assert_eq!(comparison.status, "INCONCLUSIVE");
+        assert!(
+            comparison.reason.contains("belongs to workspace"),
+            "{}",
+            comparison.reason
+        );
+
+        let mut wrong_epoch = test_record("pe-a", "COMPLETE", "cold", "hash-a", 100, 150, 10);
+        wrong_epoch.root_epoch = 5;
+        let comparison =
+            build_comparison(&request, 2, &[wrong_epoch], &candidate.clone(), Vec::new());
+        assert_eq!(comparison.status, "INCONCLUSIVE");
+        assert!(
+            comparison.reason.contains("root epoch 5 instead of 0"),
+            "{}",
+            comparison.reason
+        );
+
+        let mut wrong_change = test_record("pe-a", "COMPLETE", "cold", "hash-a", 100, 150, 10);
+        wrong_change.change_id = Some("other".to_owned());
+        let comparison = build_comparison(&request, 2, &[wrong_change], &candidate, Vec::new());
+        assert_eq!(comparison.status, "INCONCLUSIVE");
+        assert!(
+            comparison.reason.contains("changeId"),
+            "{}",
+            comparison.reason
+        );
+    }
+
+    #[test]
+    fn comparison_rejects_noise_mixed_cache_and_unchanged_inputs() {
+        let request = test_compare_request();
+
+        let noisy_baseline = vec![
+            test_record("pe-a", "COMPLETE", "cold", "hash-a", 100, 150, 10),
+            test_record("pe-b", "COMPLETE", "cold", "hash-a", 100, 150, 10),
+            test_record("pe-c", "COMPLETE", "cold", "hash-a", 400, 450, 10),
+        ];
+        let comparison = build_comparison(
+            &request,
+            3,
+            &noisy_baseline,
+            &clean_side("pe-cand", "hash-b", 50, 80),
+            Vec::new(),
+        );
+        assert_eq!(comparison.status, "INCONCLUSIVE");
+        assert!(comparison.reason.contains("noisy"), "{}", comparison.reason);
+
+        let mixed_cache = vec![
+            test_record("pe-a", "COMPLETE", "cold", "hash-a", 100, 150, 10),
+            test_record("pe-b", "COMPLETE", "warm", "hash-a", 100, 150, 10),
+            test_record("pe-c", "COMPLETE", "cold", "hash-a", 100, 150, 10),
+        ];
+        let comparison = build_comparison(
+            &request,
+            3,
+            &mixed_cache,
+            &clean_side("pe-cand", "hash-b", 50, 80),
+            Vec::new(),
+        );
+        assert_eq!(comparison.status, "INCONCLUSIVE");
+        assert!(
+            comparison.reason.contains("conditions differ"),
+            "{}",
+            comparison.reason
+        );
+        assert!(
+            comparison
+                .condition_differences
+                .iter()
+                .any(|difference| difference.contains("mixes cache states")),
+            "{:?}",
+            comparison.condition_differences
+        );
+
+        let comparison = build_comparison(
+            &request,
+            3,
+            &clean_side("pe-base", "hash-a", 100, 150),
+            &clean_side("pe-cand", "hash-a", 100, 150),
+            Vec::new(),
+        );
+        assert_eq!(comparison.status, "INCONCLUSIVE");
+        assert!(
+            comparison.reason.contains("identical"),
+            "{}",
+            comparison.reason
+        );
+        assert!(comparison.speed_claim.is_none());
+    }
+
+    #[test]
+    fn clean_changed_samples_can_produce_a_speed_claim() {
+        let request = test_compare_request();
+        let comparison = build_comparison(
+            &request,
+            3,
+            &clean_side("pe-base", "hash-a", 100, 150),
+            &clean_side("pe-cand", "hash-b", 50, 80),
+            Vec::new(),
+        );
+        assert_eq!(comparison.status, "COMPARABLE", "{}", comparison.reason);
+        assert_eq!(comparison.speed_claim.as_deref(), Some("candidate-faster"));
+        assert_eq!(comparison.baseline.samples, 3);
+        assert_eq!(comparison.candidate.samples, 3);
+        assert_eq!(comparison.baseline.wall_median_ms, Some(140));
+        assert_eq!(comparison.candidate.wall_median_ms, Some(70));
+        assert_eq!(
+            comparison.baseline.workspace_root.as_deref(),
+            Some("/workspace")
+        );
+        assert_eq!(comparison.candidate.root_epoch, 0);
+        assert!(comparison.change_binding.changed);
+    }
+
+    fn gate_step(duration_ms: u64) -> crate::gate::GateStepResult {
+        crate::gate::GateStepResult {
+            evidence: crate::diagnostics::EvidenceStats::default(),
+            diagnostics_omitted: 0,
+            contexts: Vec::new(),
+            target: GateTargetId::Check,
+            command: "cargo check".to_owned(),
+            exit_code: 0,
+            signal: None,
+            timed_out: false,
+            cancelled: false,
+            duration_ms,
+            first_diagnostic_ms: None,
+            diagnostics: Vec::new(),
+            suggestion_package: None,
+            tail: String::new(),
+            stdout: String::new(),
+            stderr: String::new(),
+            output_truncated: false,
+            drain_complete: true,
+            cleanup_complete: true,
+            build: None,
+        }
+    }
+
+    #[test]
+    fn phase_accounting_does_not_double_count_admission_and_preflight() {
+        let request = GateRequest::new("/workspace", GateTargetId::Check);
+        let mut evidence = GateEvidence::pending("job-1", &request);
+        evidence.status = GateStatus::FastPass;
+        evidence.response_ms = 500;
+        evidence.queue_ms = 100;
+        evidence.admission_ms = 40;
+        evidence.preflight_ms = 30;
+        evidence.steps = vec![gate_step(300)];
+
+        let phases = phases(&evidence, Some(5));
+        let observed = |name: &str| {
+            phases
+                .iter()
+                .find(|phase| phase.name == name)
+                .and_then(|phase| phase.ms)
+        };
+        assert_eq!(observed("mcpAdmission"), Some(5));
+        assert_eq!(observed("gateAdmission"), Some(40));
+        assert_eq!(observed("preflight"), Some(30));
+        assert_eq!(observed("gateQueue"), Some(30));
+        assert_eq!(observed("cargo:check"), Some(300));
+        assert_eq!(observed("finalization"), Some(100));
+        // The reported phases partition the response span instead of
+        // double-counting queue time.
+        let accounted = observed("gateAdmission").unwrap_or(0)
+            + observed("preflight").unwrap_or(0)
+            + observed("gateQueue").unwrap_or(0)
+            + observed("cargo:check").unwrap_or(0)
+            + observed("finalization").unwrap_or(0);
+        assert_eq!(accounted, evidence.response_ms);
     }
 }

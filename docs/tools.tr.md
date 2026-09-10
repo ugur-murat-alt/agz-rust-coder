@@ -44,10 +44,16 @@ yerine tipli `unavailable` üretir ve eksik Cargo kanıtı cache-hit olarak
 sayılmaz. `buildAnalyze` tek örnek döndürür; `buildCompare` toolchain, donanım
 sınıfı, yapılandırma, cache durumu, örnek sayıları ve kaynak değişim bağını
 kaydeder; tek koşu, gürültülü, karışık warm/cold veya yetersiz örneklerde
-`INCONCLUSIVE` döner. Warm ve cold deneyler birleştirilmez, gözlem olmadan
-CPU/I/O darboğaz türü kesinleştirilmez ve önerilen feature/dependency/profile
-değişiklikleri otomatik uygulanmaz. Debug assertion'ları ve test kapsamı gizli
-hızlandırma olarak kapatılmaz.
+`INCONCLUSIVE` döner. Karşılaştırmalar tek bir kanonik workspace köküne, yetki
+kök epoch'una ve `changeId` değerine bağlanır; baz kanıt kimlikleri sırayı
+koruyarak tekilleştirilir, örnek sayılarına yalnızca `COMPLETE` örnekler girer ve
+bir taraf içinde birden çok `inputHash` değeri varsa sonuç reddedilir. Terminal
+olmayan örnekler sayılmak yerine görünür uyarıyla hariç tutulur. Warm ve cold
+deneyler birleştirilmez, gözlem olmadan CPU/I/O darboğaz türü kesinleştirilmez ve
+önerilen feature/dependency/profile değişiklikleri otomatik uygulanmaz. Debug
+assertion'ları ve test kapsamı gizli hızlandırma olarak kapatılmaz. Saklanan
+zamanlama artifact'ları saklama politikasını bildirir; 24 saat sonra veya 64
+dosyayı aşınca temizlenir ve en güncel 64 kanıt kaydı bellekte kalır.
 
 Tüm araçlar `limits.tool_output_bytes` içinde eşdeğer belirli yapıdaki veri ve
 metin döndürür. Uzak gövdeler ve alıntılar ayrıştırmadan önce sınırlandırılır.

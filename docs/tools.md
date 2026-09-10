@@ -42,11 +42,17 @@ version-bound shape. A missing, oversized, or malformed report produces a typed
 never reported as cache hits. `buildAnalyze` returns one sample; `buildCompare`
 records toolchain, hardware class, configuration, cache state, sample counts, and
 the source-change binding, and returns `INCONCLUSIVE` for single-run, noisy,
-mixed warm/cold, or insufficient samples. Warm and cold experiments are never
+mixed warm/cold, or insufficient samples. Comparisons are bound to one canonical
+workspace root, authorization root epoch, and `changeId`; baseline evidence ids
+are deduplicated in order, only `COMPLETE` samples enter counts, and a side that
+mixes `inputHash` values is rejected. Non-terminal samples are excluded with a
+visible warning instead of being counted. Warm and cold experiments are never
 merged, CPU/I/O bottleneck types are not asserted without observation, and any
 suggested feature/dependency/profile change remains a proposal that is never
 applied automatically. Debug assertions and test scope are never disabled as a
-hidden speedup.
+hidden speedup. Persisted timing artifacts report their retention policy and are
+pruned after 24 hours or beyond 64 files, and the latest 64 evidence records stay
+in memory.
 
 All tools return equivalent structured and text representations within
 `limits.tool_output_bytes`. Remote bodies and excerpts are bounded before

@@ -46,6 +46,7 @@ tracing-subscriber.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 command-fds.workspace = true
+libc.workspace = true
 
 [dev-dependencies]
 proptest = "=1.6.0"

@@ -1175,6 +1175,7 @@ impl ServerHandler for RustCoderServer {
                             options: input.configuration.options.clone(),
                             client_roots: workspace.client_roots.clone(),
                             root_epoch: workspace.root.epoch(),
+                            workspace_root: workspace.root.authority_path().to_owned(),
                             budget,
                             change_id: input.change_id.clone(),
                             mcp_admission_ms,
@@ -1207,6 +1208,7 @@ impl ServerHandler for RustCoderServer {
                             options: input.configuration.options.clone(),
                             client_roots: workspace.client_roots.clone(),
                             root_epoch: workspace.root.epoch(),
+                            workspace_root: workspace.root.authority_path().to_owned(),
                             budget,
                             change_id: input.change_id.clone(),
                             baseline_evidence: input.baseline_evidence.clone(),
@@ -1745,10 +1747,18 @@ fn validate_dir(dir: Option<&str>) -> Result<(), McpError> {
     Ok(())
 }
 
+const MAX_VALIDATED_STRING_BYTES: usize = 4_096;
+
 fn validate_string(value: &str, field: &str) -> Result<(), McpError> {
     if value.trim().is_empty() {
         return Err(McpError::invalid_params(
             format!("{field} cannot be empty"),
+            None,
+        ));
+    }
+    if value.len() > MAX_VALIDATED_STRING_BYTES {
+        return Err(McpError::invalid_params(
+            format!("{field} exceeds {MAX_VALIDATED_STRING_BYTES} bytes"),
             None,
         ));
     }
@@ -2772,6 +2782,25 @@ mod tests {
         assert_eq!(error.message, "invalid tool arguments");
         assert!(!error.message.contains(&attacker_controlled));
         assert!(serde_json::to_vec(&error).expect("serialize error").len() < 256);
+    }
+
+    #[test]
+    fn profile_validation_bounds_identifier_lengths() {
+        let config = Config::defaults_at("/workspace");
+        let oversized = "x".repeat(MAX_VALIDATED_STRING_BYTES + 1);
+        let mut input = ProfileInput {
+            action: ProfileAction::BuildAnalyze,
+            dir: None,
+            configuration: ProfileConfigurationInput::default(),
+            change_id: Some(oversized.clone()),
+            baseline_evidence: Vec::new(),
+            budget: ProfileBudgetInput::default(),
+        };
+        assert!(validate_profile(&config, &input).is_err());
+        input.change_id = None;
+        input.baseline_evidence = vec![oversized];
+        assert!(validate_profile(&config, &input).is_err());
+        assert!(validate_string(&"y".repeat(MAX_VALIDATED_STRING_BYTES), "field").is_ok());
     }
 
     #[test]
