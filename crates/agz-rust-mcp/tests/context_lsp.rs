@@ -27,10 +27,15 @@ fn semantic_binary() -> &'static PathBuf {
 fn compile_semantic_binary(name: &str) -> PathBuf {
     let source =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/lsp/semantic_ra.rs");
-    let output_dir = std::env::temp_dir().join(format!(
-        "agz-rust-mcp-context-lsp-fixture-{}",
-        std::process::id()
-    ));
+    // macOS `temp_dir` is under the `/var` -> `/private/var` symlink, and the
+    // manager rejects an executable with any symlink component. Canonicalize so
+    // the compiled fixture is an admissible absolute path on every platform.
+    let output_dir = fs::canonicalize(std::env::temp_dir())
+        .expect("canonical temp directory")
+        .join(format!(
+            "agz-rust-mcp-context-lsp-fixture-{}",
+            std::process::id()
+        ));
     fs::create_dir_all(&output_dir).expect("create fixture output directory");
     let output = output_dir.join(format!("{name}{}", env::consts::EXE_SUFFIX));
     let rustc = env::var_os("RUSTC")

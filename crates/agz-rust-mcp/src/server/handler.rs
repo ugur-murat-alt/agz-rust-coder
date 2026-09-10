@@ -6175,6 +6175,16 @@ async fn explain_result(
 mod tests {
     use super::*;
 
+    /// Handler validation requires platform-absolute paths; a Unix-style
+    /// leading slash has no prefix on Windows and is treated as relative.
+    fn absolute_test_path(name: &str) -> String {
+        if cfg!(windows) {
+            format!(r"C:\{name}")
+        } else {
+            format!("/{name}")
+        }
+    }
+
     #[test]
     fn invalid_arguments_do_not_echo_untrusted_serde_details() {
         let attacker_controlled = "x".repeat(32_768);
@@ -6355,7 +6365,7 @@ mod tests {
         };
         let base = WorkInput {
             action: WorkAction::Start,
-            dir: Some("/workspace".to_owned()),
+            dir: Some(absolute_test_path("workspace")),
             work_id: None,
             continuation_token: None,
             change_id: None,
@@ -6404,7 +6414,7 @@ mod tests {
     fn change_actions_validate_required_fields_without_echoing_input() {
         let base = ChangeInput {
             action: ChangeAction::Create,
-            dir: Some("/workspace".to_owned()),
+            dir: Some(absolute_test_path("workspace")),
             change_id: None,
             expected_revision: None,
             base_identity: None,
@@ -6865,7 +6875,7 @@ mod tests {
         input.budget.repeats = None;
         input.changed_paths = vec!["../escape".to_owned()];
         assert!(validate_verify(&input).is_err());
-        input.changed_paths = vec!["/absolute".to_owned()];
+        input.changed_paths = vec![absolute_test_path("absolute")];
         assert!(validate_verify(&input).is_err());
         input.changed_paths = vec!["src/lib.rs".to_owned()];
         assert!(validate_verify(&input).is_ok());

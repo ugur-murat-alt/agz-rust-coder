@@ -181,7 +181,10 @@ fn sleep_adapter() -> RuntimeAdapterConfig {
         prepare_args: Vec::new(),
         workloads: vec![RuntimeWorkloadConfig {
             name: "tiny".to_owned(),
-            args: vec!["0.05".to_owned()],
+            // Long enough that scheduler jitter on loaded CI runners stays far
+            // below the comparison's 50% relative-spread noise threshold. The
+            // duration is not asserted anywhere, so it cannot mask a regression.
+            args: vec!["0.5".to_owned()],
         }],
         metric: RuntimeMetric::Duration,
     }
