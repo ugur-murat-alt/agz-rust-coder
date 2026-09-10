@@ -10,7 +10,7 @@ pub use handler::{
     CheckTarget, CrateLookupData, CrateLookupInput, CrateLookupOutput, DocsData, DocsInput,
     DocsOutput, EditData, EditOutput, HierarchyDirection, HierarchyInput, ImplementationsInput,
     RefactorInput, RenameInput, RustCoderServer, SemanticData, SemanticInput, SemanticOutput,
-    SymbolInput, SymbolsInput, tool_definitions,
+    SymbolInput, SymbolsInput, VerifyInput, VerifyOutput, tool_definitions,
 };
 pub use progress::ProgressReporter;
 pub use response::{ToolData, ToolOutput, WorkspaceInfo};
@@ -35,7 +35,7 @@ use crate::{
     lsp::RustAnalyzerManager,
     process::{ProcessJournal, ProcessSupervisor},
     telemetry::ActivityLog,
-    tools::{AuditLimits, AuditService, CheckService},
+    tools::{AuditLimits, AuditService, CheckService, VerifyService},
     workspace::{AuthorizedRoot, RootGuard},
 };
 use admission::AdmissionController;
@@ -49,6 +49,7 @@ pub struct AppState {
     client_roots: ClientRootsCoordinator,
     processes: ProcessSupervisor,
     check: Arc<CheckService>,
+    verify: Arc<VerifyService>,
     audit: AuditService,
     docs: Arc<DocsResolver>,
     cargo_home: Option<Arc<AuthorizedRoot>>,
@@ -70,6 +71,7 @@ impl fmt::Debug for AppState {
             .field("client_roots", &self.client_roots)
             .field("processes", &self.processes)
             .field("check", &self.check)
+            .field("verify", &self.verify)
             .field("lsp_available", &self.lsp.is_some())
             .field("tasks", &self.tasks)
             .field("shutting_down", &self.is_shutting_down())
@@ -128,6 +130,10 @@ impl AppState {
             Arc::clone(&roots),
             processes.clone(),
         ));
+        let verify = Arc::new(VerifyService::new(
+            Arc::clone(&check),
+            config.verify.clone(),
+        ));
         let audit = AuditService::new(AuditLimits::from_u64(
             config.limits.audit_files,
             config.limits.audit_file_bytes,
@@ -149,6 +155,7 @@ impl AppState {
             client_roots,
             processes: processes.clone(),
             check,
+            verify,
             audit,
             docs: Arc::new(DocsResolver::with_authorized_supervisor(processes)),
             cargo_home,
@@ -267,6 +274,10 @@ impl AppState {
 
     pub(crate) fn check_service(&self) -> &Arc<CheckService> {
         &self.check
+    }
+
+    pub(crate) fn verify_service(&self) -> &Arc<VerifyService> {
+        &self.verify
     }
 
     pub(crate) fn audit_service(&self) -> &AuditService {

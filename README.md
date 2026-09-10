@@ -75,6 +75,7 @@ OpenCode commonly exposes grouped MCP tools as `rust_*`.
 | `audit` | `rust_audit` | `enabled` | Scan Rust source for bounded static findings. |
 | `crate_lookup` | `rust_crate_lookup` | `enabled` | Verify a crate and optional exact version on crates.io. |
 | `docs` | `rust_docs` | `enabled` | Resolve exact-version docs from cache, local sources, or docs.rs. |
+| `verify` | `rust_verify` | `enabled` | Plan or run a bounded feature, target, toolchain, and stage matrix. |
 | `symbol` | `rust_symbol` | `enabled` | Read Rust Analyzer hover data for one symbol. |
 | `references` | `rust_references` | `enabled` | Find bounded references. |
 | `definition` | `rust_definition` | `enabled` | Find the selected definition. |

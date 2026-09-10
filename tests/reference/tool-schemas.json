@@ -155,5 +155,17 @@
     },
     "required": ["dir", "path", "symbol"],
     "additionalProperties": false
+  },
+  "verify": {
+    "type": "object",
+    "properties": {
+      "dir": { "type": "string" },
+      "action": { "type": "string", "enum": ["matrix_plan", "matrix_run"] },
+      "requiredConfigurations": { "type": "object" },
+      "budget": { "type": "object" },
+      "changeId": { "type": "string" }
+    },
+    "required": ["dir"],
+    "additionalProperties": false
   }
 }

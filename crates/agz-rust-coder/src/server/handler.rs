@@ -36,8 +36,8 @@ use crate::{
     gate::{GateDetail, GateEvidence, GateRequest, GateStatus, GateTargetId},
     tools::{
         AuditCancellation, CrateLookupInput as DomainCrateLookupInput,
-        ToolError as SemanticToolError, document_symbols, semantic_refactor, semantic_rename,
-        symbol_definition, symbol_hierarchy, symbol_hover, symbol_implementations,
+        ToolError as SemanticToolError, VerifyOutcome, document_symbols, semantic_refactor,
+        semantic_rename, symbol_definition, symbol_hierarchy, symbol_hover, symbol_implementations,
         symbol_references, with_lsp_authority, with_lsp_cancellation,
     },
     workspace::{ClientRoots, WorkspaceRoot, select_in_root},
@@ -115,6 +115,26 @@ pub struct CheckInput {
     pub timings: bool,
     #[serde(default)]
     pub detail: CheckDetail,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VerifyInput {
+    /// Optional absolute workspace or package directory.
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub dir: Option<String>,
+    #[serde(default)]
+    pub action: crate::tools::VerifyAction,
+    #[serde(default)]
+    pub required_configurations: crate::tools::RequiredConfigurations,
+    #[serde(default)]
+    pub budget: crate::tools::VerifyBudget,
+    /// Opaque caller-supplied change identifier copied into every result for
+    /// binding; the verify tool never resolves or mutates a changeset.
+    #[serde(default)]
+    #[schemars(length(min = 1))]
+    pub change_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -468,6 +488,7 @@ pub struct EditData {
 }
 
 pub type CheckOutput = ToolOutput<CheckData>;
+pub type VerifyOutput = ToolOutput<VerifyOutcome>;
 pub type AuditOutput = ToolOutput<AuditData>;
 pub type CrateLookupOutput = ToolOutput<CrateLookupData>;
 pub type DocsOutput = ToolOutput<DocsData>;
@@ -509,6 +530,14 @@ pub fn tool_definitions(config: &Config) -> Vec<Tool> {
         tools.push(tool::<DocsInput, DocsData>(
             "docs",
             "Resolve bounded, exact-version Rust documentation from configured sources.",
+            ToolAnnotations::new().destructive(true).open_world(true),
+        ));
+    }
+    if config.tools.verify {
+        tools.push(tool::<VerifyInput, VerifyOutcome>(
+            "verify",
+            "Plan or run a bounded configuration matrix over features, targets, toolchains, and \
+             development stages.",
             ToolAnnotations::new().destructive(true).open_world(true),
         ));
     }
@@ -685,6 +714,44 @@ impl RustCoderServer {
             .await;
         let _ = progress_worker.await;
         check_result(&self.state, input.target, input.timings, evidence)
+    }
+
+    async fn verify(
+        &self,
+        input: VerifyInput,
+        context: &RequestContext<RoleServer>,
+        workspace: WorkspaceRequest,
+    ) -> CallToolResult {
+        let progress = ProgressReporter::from_context(context);
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::gate::ProgressEvent>();
+        let progress_worker = tokio::spawn(async move {
+            while let Some(event) = progress_rx.recv().await {
+                progress
+                    .report(event.progress, event.total, event.message)
+                    .await;
+            }
+        });
+        let callback = Arc::new(move |event: crate::gate::ProgressEvent| {
+            let _ = progress_tx.send(event);
+        });
+        let cancellation = workspace.cancellation(context.ct.clone(), self.state.shutdown_token());
+        let request = crate::tools::VerifyRequest {
+            action: input.action,
+            directory: input.dir.as_deref().map(PathBuf::from),
+            client_roots: workspace.client_roots.clone(),
+            root_epoch: workspace.root.epoch(),
+            change_id: input.change_id.clone(),
+            required: input.required_configurations.clone(),
+            budget: input.budget,
+        };
+        let outcome = self
+            .state
+            .verify_service()
+            .execute(request, Some(callback), Some(cancellation.token()))
+            .await;
+        let _ = progress_worker.await;
+        verify_result(&self.state, outcome)
     }
 
     async fn docs(
@@ -1039,6 +1106,35 @@ impl ServerHandler for RustCoderServer {
                 let _permit = permit;
                 Ok(CallToolResponse::Complete(
                     self.check(input, &context, workspace).await,
+                ))
+            }
+            "verify" => {
+                let input: VerifyInput = parse_input(arguments)?;
+                validate_verify(&input)?;
+                let Ok(_permit) = self.state.try_admit() else {
+                    return Ok(CallToolResponse::Complete(resource_blocked_verify(
+                        &self.state,
+                        input,
+                    )));
+                };
+                if self.state.is_shutting_down() {
+                    return Ok(CallToolResponse::Complete(resource_blocked_verify(
+                        &self.state,
+                        input,
+                    )));
+                }
+                let workspace = match self.resolve_workspace(input.dir.as_deref(), &context).await {
+                    Ok(workspace) => workspace,
+                    Err(reason) => {
+                        return Ok(CallToolResponse::Complete(inconclusive_verify(
+                            &self.state,
+                            input,
+                            reason,
+                        )));
+                    }
+                };
+                Ok(CallToolResponse::Complete(
+                    self.verify(input, &context, workspace).await,
                 ))
             }
             "audit" => {
@@ -1567,6 +1663,65 @@ fn validate_check(input: &CheckInput) -> Result<(), McpError> {
         .map_err(|message| McpError::invalid_params(message, None))
 }
 
+fn validate_verify(input: &VerifyInput) -> Result<(), McpError> {
+    validate_dir(input.dir.as_deref())?;
+    if let Some(change_id) = input.change_id.as_deref()
+        && (change_id.len() > 128 || change_id.chars().any(char::is_control))
+    {
+        return Err(McpError::invalid_params(
+            "changeId must be a bounded printable identifier",
+            None,
+        ));
+    }
+    if let Some(max_cells) = input.budget.max_cells
+        && !(1..=64).contains(&max_cells)
+    {
+        return Err(McpError::invalid_params(
+            "budget.maxCells must be between 1 and 64",
+            None,
+        ));
+    }
+    if let Some(max_wall_ms) = input.budget.max_wall_ms
+        && !(1_000..=3_600_000).contains(&max_wall_ms)
+    {
+        return Err(McpError::invalid_params(
+            "budget.maxWallMs must be between 1000 and 3600000",
+            None,
+        ));
+    }
+    if input.required_configurations.feature_groups.len() > 16
+        || input.required_configurations.targets.len() > 16
+        || input.required_configurations.stages.len() > 4
+    {
+        return Err(McpError::invalid_params(
+            "requiredConfigurations accepts at most 16 feature groups, 16 targets, and 4 stages",
+            None,
+        ));
+    }
+    for group in &input.required_configurations.feature_groups {
+        if group.len() > 32 {
+            return Err(McpError::invalid_params(
+                "a feature group accepts at most 32 feature names",
+                None,
+            ));
+        }
+    }
+    for target in &input.required_configurations.targets {
+        if target.is_empty()
+            || target.len() > 128
+            || !target
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+        {
+            return Err(McpError::invalid_params(
+                "targets must be bounded built-in target triples, not JSON paths or flags",
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_audit(input: &AuditInput) -> Result<(), McpError> {
     validate_dir(input.dir.as_deref())?;
     if let Some(path) = input.path.as_deref() {
@@ -1660,6 +1815,7 @@ fn gate_request(input: &CheckInput, client_roots: ClientRoots, root_epoch: u64) 
     GateRequest {
         options: input.options.clone(),
         directory: input.dir.as_deref().map(PathBuf::from),
+        toolchain: None,
         target: match input.target {
             CheckTarget::Check => GateTargetId::Check,
             CheckTarget::Clippy => GateTargetId::Clippy,
@@ -1890,6 +2046,63 @@ fn inconclusive_check(
         "INCONCLUSIVE",
         "The check workspace could not be resolved.",
         empty_check_data(target, timings, "cargo-and-rustc", reason),
+    )
+    .into_call_tool_result(state.max_output_bytes(), true)
+}
+
+fn verify_result(state: &AppState, outcome: VerifyOutcome) -> CallToolResult {
+    let status = outcome.status.clone();
+    let is_error = !matches!(
+        status.as_str(),
+        "PLANNED" | "FULL_REQUESTED_MATRIX" | "PARTIAL"
+    );
+    let summary = match status.as_str() {
+        "PLANNED" => "The matrix plan is ready; no cell was executed.".to_owned(),
+        "FULL_REQUESTED_MATRIX" => "Every requested matrix cell completed.".to_owned(),
+        "PARTIAL" => {
+            "The matrix run is partial; skipped or incomplete cells never grant a pass.".to_owned()
+        }
+        other => format!("The matrix request finished with {other}."),
+    };
+    let warnings = outcome.warnings.clone();
+    ToolOutput::new("verify", status, summary, outcome)
+        .with_warnings(warnings)
+        .with_untrusted_data()
+        .into_call_tool_result(state.max_output_bytes(), is_error)
+}
+
+fn empty_verify(
+    action: crate::tools::VerifyAction,
+    status: &str,
+    reason: String,
+    change_id: Option<String>,
+) -> VerifyOutcome {
+    VerifyOutcome::failure(action, status, change_id, reason)
+}
+
+fn resource_blocked_verify(state: &AppState, input: VerifyInput) -> CallToolResult {
+    let action = input.action;
+    ToolOutput::new(
+        "verify",
+        "RESOURCE_BLOCKED",
+        "The verify request could not be admitted.",
+        empty_verify(
+            action,
+            "RESOURCE_BLOCKED",
+            RESOURCE_BLOCKED_REASON.to_owned(),
+            input.change_id,
+        ),
+    )
+    .into_call_tool_result(state.max_output_bytes(), true)
+}
+
+fn inconclusive_verify(state: &AppState, input: VerifyInput, reason: String) -> CallToolResult {
+    let action = input.action;
+    ToolOutput::new(
+        "verify",
+        "INCONCLUSIVE",
+        "The verify workspace could not be resolved.",
+        empty_verify(action, "INCONCLUSIVE", reason, input.change_id),
     )
     .into_call_tool_result(state.max_output_bytes(), true)
 }

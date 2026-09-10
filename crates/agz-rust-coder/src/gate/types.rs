@@ -147,6 +147,9 @@ pub struct GateRequest {
     pub options: super::ValidationOptions,
     pub directory: Option<PathBuf>,
     pub target: GateTargetId,
+    /// Optional rustup toolchain selector. It is applied as `cargo +<toolchain>`
+    /// before every stage so the command hash binds the actual compiler.
+    pub toolchain: Option<String>,
     pub timings: bool,
     pub detail: GateDetail,
     pub client_roots: ClientRoots,
@@ -163,6 +166,7 @@ impl GateRequest {
         Self {
             directory: Some(directory.into()),
             target,
+            toolchain: None,
             timings: false,
             options: super::ValidationOptions::default(),
             detail: GateDetail::Compact,
@@ -180,6 +184,7 @@ impl GateRequest {
         Self {
             directory: None,
             target,
+            toolchain: None,
             timings: false,
             options: super::ValidationOptions::default(),
             detail: GateDetail::Compact,
@@ -196,6 +201,11 @@ impl GateRequest {
 
     pub fn with_timings(mut self, timings: bool) -> Self {
         self.timings = timings;
+        self
+    }
+
+    pub fn with_toolchain(mut self, toolchain: Option<String>) -> Self {
+        self.toolchain = toolchain;
         self
     }
 
@@ -514,4 +524,18 @@ impl GateTarget {
             .collect::<Vec<_>>()
             .join(" ")
     }
+}
+
+/// Bounded rustup toolchain selector shared by the gate and verify planning.
+pub fn validate_toolchain_name(toolchain: &str) -> Result<(), String> {
+    if toolchain.is_empty()
+        || toolchain.len() > 96
+        || toolchain.starts_with('-')
+        || !toolchain
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-.".contains(&byte))
+    {
+        return Err("toolchain must be a bounded rustup toolchain name".to_owned());
+    }
+    Ok(())
 }

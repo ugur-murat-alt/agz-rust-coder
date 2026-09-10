@@ -26,8 +26,8 @@ use crate::{
     },
     process::{ProcessRunOptions, ProcessSupervisor},
     workspace::{
-        AuthorizedRoot, GitProbe, IdentityError, IdentityInput, IdentityLimits, InputIdentity,
-        MetadataService, RootGuard, WorkspaceRoot, select_workspace,
+        AuthorizedRoot, ClientRoots, GitProbe, IdentityError, IdentityInput, IdentityLimits,
+        InputIdentity, MetadataService, RootGuard, WorkspaceRoot, select_workspace,
     },
 };
 
@@ -95,6 +95,12 @@ impl CheckService {
         cancellation: Option<CancellationToken>,
     ) -> GateEvidence {
         let accepted_at = Instant::now();
+        let selection = match self.select_cargo(request.toolchain.as_deref()) {
+            Ok(selection) => selection,
+            Err(message) => {
+                return terminal_evidence(&request, GateStatus::Inconclusive, message, accepted_at);
+            }
+        };
         if let Err(message) = request.options.validate(request.target) {
             return terminal_evidence(&request, GateStatus::Inconclusive, message, accepted_at);
         }
@@ -142,6 +148,12 @@ impl CheckService {
             spawn_preflight_heartbeat(progress.clone(), cancellation.clone(), accepted_at);
         let service = self.clone();
         let prepare_request = request.clone();
+        let prepare_cargo = selection.cargo.clone();
+        let prepare_selector = if selection.selector {
+            request.toolchain.clone()
+        } else {
+            None
+        };
         let metadata_control = crate::workspace::metadata::MetadataControl::new(
             deadline,
             cancellation.clone(),
@@ -156,7 +168,13 @@ impl CheckService {
             tokio::runtime::Handle::current(),
         );
         let preparing = tokio::task::spawn_blocking(move || {
-            service.prepare(&prepare_request, &metadata_control, &git)
+            service.prepare(
+                &prepare_request,
+                &metadata_control,
+                &git,
+                &prepare_cargo,
+                prepare_selector.as_deref(),
+            )
         });
         // The controlled preflight owns metadata and Git children through the supervisor.
         // Awaiting it here prevents detaching the blocking worker while still bounding
@@ -222,7 +240,7 @@ impl CheckService {
         let root = prepared.snapshot.workspace_root.clone();
         let supervisor = self.supervisor.clone();
         let config = self.config.clone();
-        let cargo = self.cargo.clone();
+        let cargo = selection.cargo.clone();
         let work_request = request.clone();
         let job =
             match self
@@ -272,11 +290,170 @@ impl CheckService {
         }
     }
 
+    /// Resolve workspace metadata without starting any Cargo build stage.
+    ///
+    /// Matrix planning uses the same authorization, cache, deadline, and
+    /// cancellation path as a gate request: no workspace source is written and
+    /// no compilation is started.
+    pub(crate) async fn plan_snapshot(
+        &self,
+        directory: Option<PathBuf>,
+        client_roots: ClientRoots,
+        cancellation: Option<CancellationToken>,
+    ) -> Result<PlanSnapshot, (GateStatus, String)> {
+        let accepted_at = Instant::now();
+        let roots = self.guard.snapshot(client_roots).map_err(|error| {
+            (
+                GateStatus::Inconclusive,
+                format!("verify workspace root snapshot failed: {error}"),
+            )
+        })?;
+        let selection = select_workspace(&roots, directory.as_deref()).map_err(|error| {
+            (
+                GateStatus::Inconclusive,
+                format!("verify workspace selection failed: {error}"),
+            )
+        })?;
+        let deadline = accepted_at + Duration::from_millis(self.config.gate.hard_timeout_ms);
+        let cancellation = cancellation.unwrap_or_default();
+        if cancellation.is_cancelled() {
+            return Err((
+                GateStatus::Cancelled,
+                "verify planning was cancelled".to_owned(),
+            ));
+        }
+        let control = crate::workspace::metadata::MetadataControl::new(
+            deadline,
+            cancellation,
+            self.supervisor.clone(),
+            tokio::runtime::Handle::current(),
+        );
+        let service = self.clone();
+        let selection_for_task = selection.clone();
+        let load = tokio::task::spawn_blocking(move || {
+            service.metadata.acquire_controlled(
+                &selection_for_task,
+                service.cargo.clone(),
+                &control,
+            )
+        })
+        .await
+        .map_err(|error| {
+            (
+                GateStatus::Unavailable,
+                format!("verify planning task failed: {error}"),
+            )
+        })?
+        .map_err(|error| {
+            let status = match &error {
+                crate::workspace::MetadataError::Cancelled => GateStatus::Cancelled,
+                crate::workspace::MetadataError::TimedOut => GateStatus::Timeout,
+                _ => GateStatus::Inconclusive,
+            };
+            (
+                status,
+                format!("Cargo metadata preflight failed for verify: {error}"),
+            )
+        })?;
+        let snapshot = Arc::clone(&load.snapshot);
+        let workspace_authority = if snapshot.workspace_root == selection.package_authority().path()
+        {
+            selection.package_authority().clone()
+        } else {
+            selection
+                .worktree_authority()
+                .authorize_dir(&snapshot.workspace_root)
+                .map_err(|error| {
+                    (
+                        GateStatus::Inconclusive,
+                        format!("verify workspace execution authorization failed: {error}"),
+                    )
+                })?
+        };
+        Ok(PlanSnapshot {
+            snapshot,
+            workspace_authority,
+        })
+    }
+
+    /// Run one bounded, fixed-literal discovery command through the shared
+    /// process supervisor. Used only for read-only toolchain inspection.
+    pub(crate) async fn auxiliary_output(
+        &self,
+        cwd: &Path,
+        executable: &Path,
+        args: &[OsString],
+        timeout: Duration,
+        cancellation: &CancellationToken,
+        authority: Arc<AuthorizedRoot>,
+    ) -> Result<String, String> {
+        let environment = std::env::vars_os().collect::<Vec<_>>();
+        let options = ProcessRunOptions::new(cwd)
+            .with_timeout(timeout)
+            .with_cancellation(cancellation.clone())
+            .with_max_output_bytes(1_048_576)
+            .with_environment(environment);
+        let result = self
+            .supervisor
+            .run_authorized(
+                executable.to_path_buf(),
+                args.iter().cloned(),
+                options,
+                authority,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if result.exit_code != 0 {
+            return Err(format!(
+                "{} exited with code {}",
+                executable.display(),
+                result.exit_code
+            ));
+        }
+        Ok(result.stdout)
+    }
+
+    pub(crate) fn cargo_path(&self) -> &Path {
+        &self.cargo
+    }
+
+    /// Resolve the cargo executable for an optional rustup toolchain selector.
+    ///
+    /// A direct toolchain cargo is preferred so evidence binds the exact
+    /// compiler path. The rustup shim remains a fallback with an explicit
+    /// `+toolchain` argument; nothing is downloaded.
+    fn select_cargo(&self, toolchain: Option<&str>) -> Result<CargoSelection, String> {
+        let Some(toolchain) = toolchain else {
+            return Ok(CargoSelection {
+                cargo: self.cargo.clone(),
+                selector: false,
+            });
+        };
+        crate::gate::validate_toolchain_name(toolchain)?;
+        if let Some(cargo) = resolve_toolchain_cargo(toolchain) {
+            return Ok(CargoSelection {
+                cargo,
+                selector: false,
+            });
+        }
+        if rustup_shim_available(&self.cargo) {
+            return Ok(CargoSelection {
+                cargo: self.cargo.clone(),
+                selector: true,
+            });
+        }
+        Err(format!(
+            "toolchain {toolchain} is not installed as a direct cargo and the configured cargo is not a rustup shim; no toolchain is downloaded"
+        ))
+    }
+
     fn prepare(
         &self,
         request: &GateRequest,
         control: &crate::workspace::metadata::MetadataControl,
         git: &dyn GitProbe,
+        cargo: &Path,
+        toolchain_selector: Option<&str>,
     ) -> Result<PreparedCheck, (GateStatus, String)> {
         control.checkpoint().map_err(preflight_control_error)?;
         let roots = self
@@ -298,7 +475,7 @@ impl CheckService {
         let workspace_root = selection.requested_root();
         let load = self
             .metadata
-            .acquire_controlled(&selection, self.cargo.clone(), control)
+            .acquire_controlled(&selection, cargo.to_path_buf(), control)
             .map_err(preflight_metadata_error)?;
         control.checkpoint().map_err(preflight_control_error)?;
         let snapshot = Arc::clone(&load.snapshot);
@@ -348,6 +525,7 @@ impl CheckService {
         for target in &mut targets {
             request.options.apply(target);
         }
+        apply_toolchain(&mut targets, toolchain_selector);
         let mut command = targets
             .iter()
             .flat_map(|target| target.args.iter().cloned())
@@ -363,7 +541,7 @@ impl CheckService {
             &workspace_root,
             &git_authority,
             &snapshot.manifest_path,
-            &self.cargo,
+            cargo,
             &command,
             &cache,
             &external_roots,
@@ -398,6 +576,7 @@ impl CheckService {
             for target in &mut targets {
                 request.options.apply(target);
             }
+            apply_toolchain(&mut targets, toolchain_selector);
             command = targets
                 .iter()
                 .flat_map(|target| target.args.iter().cloned())
@@ -406,7 +585,7 @@ impl CheckService {
                 &workspace_root,
                 &git_authority,
                 &snapshot.manifest_path,
-                &self.cargo,
+                cargo,
                 &command,
                 &cache,
                 &external_roots,
@@ -449,6 +628,42 @@ impl CheckService {
             .map(|selection| selection.requested_root().path().to_owned())
             .map_err(|error| (GateStatus::Inconclusive, error.to_string()))
     }
+}
+
+/// Metadata-only workspace view used by matrix planning.
+#[derive(Debug, Clone)]
+pub(crate) struct PlanSnapshot {
+    pub snapshot: Arc<crate::workspace::WorkspaceSnapshot>,
+    pub workspace_authority: Arc<AuthorizedRoot>,
+}
+
+#[derive(Debug, Clone)]
+struct CargoSelection {
+    cargo: PathBuf,
+    /// Apply `+toolchain` to every stage (rustup shim fallback only).
+    selector: bool,
+}
+
+/// Resolve a rustup toolchain's direct cargo binary without invoking rustup.
+pub(crate) fn resolve_toolchain_cargo(toolchain: &str) -> Option<PathBuf> {
+    let rustup_home = std::env::var_os("RUSTUP_HOME").map_or_else(
+        || std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".rustup")),
+        |home| Some(PathBuf::from(home)),
+    )?;
+    let cargo = rustup_home
+        .join("toolchains")
+        .join(toolchain)
+        .join("bin")
+        .join(executable_name("cargo"));
+    cargo.is_file().then_some(cargo)
+}
+
+/// True when the configured cargo sits next to a rustup proxy, so
+/// `+toolchain` selection is honored.
+pub(crate) fn rustup_shim_available(cargo: &Path) -> bool {
+    cargo
+        .parent()
+        .is_some_and(|parent| parent.join(executable_name("rustup")).is_file())
 }
 
 #[derive(Debug)]
@@ -1008,6 +1223,17 @@ fn identity_for(
     )
 }
 
+fn apply_toolchain(targets: &mut [crate::gate::GateTarget], toolchain: Option<&str>) {
+    let Some(toolchain) = toolchain else {
+        return;
+    };
+    for target in targets {
+        target
+            .args
+            .insert(0, OsString::from(format!("+{toolchain}")));
+    }
+}
+
 fn authorize_external_roots(
     guard: &RootGuard,
     roots: &[PathBuf],
@@ -1371,5 +1597,29 @@ fn acceleration_error(context: &ScheduledJobContext, message: String) -> Schedul
         SchedulerError::TimedOut
     } else {
         SchedulerError::Internal(message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gate::{GateTarget, GateTargetId};
+
+    #[test]
+    fn toolchain_selector_precedes_the_cargo_subcommand_and_binds_the_command() {
+        let mut targets = vec![GateTarget {
+            id: GateTargetId::Check,
+            label: "cargo check",
+            args: vec![OsString::from("check"), OsString::from("--locked")],
+            timeout: Duration::from_secs(1),
+        }];
+        apply_toolchain(&mut targets, Some("1.88.0-x86_64-unknown-linux-gnu"));
+        assert_eq!(
+            targets[0].args[0],
+            OsString::from("+1.88.0-x86_64-unknown-linux-gnu")
+        );
+        assert_eq!(targets[0].args[1], OsString::from("check"));
+        apply_toolchain(&mut targets, None);
+        assert_eq!(targets[0].args.len(), 3);
     }
 }
