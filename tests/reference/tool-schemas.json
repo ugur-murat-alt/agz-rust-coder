@@ -442,10 +442,16 @@
     "type": "object",
     "properties": {
       "dir": { "type": "string" },
-      "action": { "type": "string", "enum": ["matrix_plan", "matrix_run"] },
+      "action": { "type": "string", "enum": ["matrix_plan", "matrix_run", "test_plan", "test_run", "test_candidate"] },
       "requiredConfigurations": { "type": "object" },
       "budget": { "type": "object" },
-      "changeId": { "type": "string" }
+      "changeId": { "type": "string" },
+      "configuration": { "type": "object" },
+      "testMappings": { "type": "array" },
+      "changedPaths": { "type": "array" },
+      "semanticReferences": { "type": "array" },
+      "testPatch": { "type": "object" },
+      "behaviorContract": { "type": "object" }
     },
     "required": ["dir"],
     "additionalProperties": false

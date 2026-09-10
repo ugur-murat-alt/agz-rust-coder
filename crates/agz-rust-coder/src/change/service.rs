@@ -156,6 +156,25 @@ impl ChangeService {
         self.store.root()
     }
 
+    /// Full configuration shared with the change engine (verify reuses the
+    /// candidate guard and isolated-cache contract).
+    pub(crate) fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Bounded raw record for server-internal verification flows.
+    pub(crate) fn record(&self, id: &str) -> Result<Option<ChangeRecord>, String> {
+        self.store.load(id)
+    }
+
+    pub(crate) fn candidate_dir(&self, id: &str) -> PathBuf {
+        self.store.candidate_dir(id)
+    }
+
+    pub(crate) fn cache_dir(&self, id: &str) -> PathBuf {
+        self.store.cache_dir(id)
+    }
+
     /// Executes one change action. `workspace` is the request-authorized root
     /// used only to capture the original or to compare the authorization epoch.
     pub async fn execute(

@@ -119,6 +119,8 @@ impl TestProject {
             VerifyConfig {
                 max_cells: 8,
                 max_wall_ms: 300_000,
+                max_tests: 8,
+                repeats: 2,
             },
         ))
     }
@@ -245,6 +247,13 @@ fn request(
         change_id: Some("change-42".to_owned()),
         required,
         budget,
+        test_configuration: agz_rust_coder::gate::ValidationOptions::default(),
+        test_mappings: Vec::new(),
+        changed_paths: Vec::new(),
+        semantic_references: Vec::new(),
+        test_patch: None,
+        behavior_contract: None,
+        workspace: None,
     }
 }
 
@@ -252,6 +261,8 @@ fn check_only_budget(cells: u32) -> VerifyBudget {
     VerifyBudget {
         max_cells: Some(cells),
         max_wall_ms: Some(240_000),
+        max_tests: None,
+        repeats: None,
     }
 }
 
@@ -787,6 +798,7 @@ async fn wall_budget_expiry_skips_the_running_cell_and_the_rest() {
                 VerifyBudget {
                     max_cells: Some(4),
                     max_wall_ms: Some(1_000),
+                    ..VerifyBudget::default()
                 },
             ),
             None,

@@ -24,13 +24,20 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    config::VerifyConfig,
+    change::{
+        ChangeAction, ChangeRequest, ChangeService, NewFileInput, PatchInput,
+        model::{ChangeRecord, RecordState},
+    },
+    config::{GateCache, VerifyConfig},
     gate::{
         GateDetail, GateEvidence, GateRequest, GateSource, GateStatus, GateTargetId,
         ProgressCallback, ProgressEvent, ProgressStage, TestRunner, ValidationOptions,
         validate_toolchain_name,
     },
-    workspace::{AuthorizedRoot, ClientRoots, DirectoryEntryKind, WorkspaceSnapshot},
+    workspace::{
+        AuthorizedRoot, ClientRoots, DirectoryEntryKind, RootGuard, WorkspaceRoot,
+        WorkspaceSnapshot,
+    },
 };
 
 use super::CheckService;
@@ -54,6 +61,9 @@ pub enum VerifyAction {
     #[default]
     MatrixPlan,
     MatrixRun,
+    TestPlan,
+    TestRun,
+    TestCandidate,
 }
 
 impl VerifyAction {
@@ -61,7 +71,14 @@ impl VerifyAction {
         match self {
             Self::MatrixPlan => "matrix_plan",
             Self::MatrixRun => "matrix_run",
+            Self::TestPlan => "test_plan",
+            Self::TestRun => "test_run",
+            Self::TestCandidate => "test_candidate",
         }
+    }
+
+    pub const fn is_test_action(self) -> bool {
+        matches!(self, Self::TestPlan | Self::TestRun | Self::TestCandidate)
     }
 }
 
@@ -196,9 +213,77 @@ pub struct VerifyBudget {
     #[serde(default)]
     #[schemars(range(min = 1_000, max = 3_600_000))]
     pub max_wall_ms: Option<u64>,
+    /// Maximum planned/runnable test items for test actions. Only narrows the
+    /// configured `verify.max_tests` ceiling.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 64))]
+    pub max_tests: Option<u32>,
+    /// Repeated baseline/candidate runs used to observe flakiness. Only
+    /// narrows the configured `verify.repeats` ceiling.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 5))]
+    pub repeats: Option<u32>,
 }
 
-/// One matrix request.
+/// One explicit user mapping from a changed path, package, or target to a test
+/// scope. Mappings are hints; they never hide the graph-derived plan entries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TestMapping {
+    /// Workspace-relative file or directory the mapping applies to.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Workspace package name the mapping applies to.
+    #[serde(default)]
+    pub package: Option<String>,
+    /// Target (integration test binary, lib, or bin) the mapping applies to.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Exact test function name to run.
+    #[serde(default)]
+    pub test_name: Option<String>,
+}
+
+/// A caller-provided semantic reference hint (for example from the `references`
+/// tool). The referenced file joins the changed set as an advisory input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SemanticReference {
+    /// Workspace-relative file containing the referenced symbol.
+    pub file: String,
+    /// Optional symbol name for display only.
+    #[serde(default)]
+    pub symbol: Option<String>,
+}
+
+/// Bounded regression-test patch supplied with `test_candidate`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TestPatchInput {
+    #[serde(default)]
+    pub patches: Vec<PatchInput>,
+    #[serde(default)]
+    pub new_files: Vec<NewFileInput>,
+}
+
+/// Behavior contract the regression test must demonstrate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BehaviorContract {
+    /// Exact test function name that must fail on the baseline snapshot.
+    pub test_name: String,
+    /// Workspace package that hosts the regression test.
+    #[serde(default)]
+    pub package: Option<String>,
+    /// Test binary or target name that hosts the regression test.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Substring that the baseline failure output must contain (the expected
+    /// assertion message). A failure without this text is not evidence.
+    pub expected_failure: String,
+}
+
+/// One matrix or test request.
 #[derive(Debug, Clone)]
 pub struct VerifyRequest {
     pub action: VerifyAction,
@@ -208,6 +293,15 @@ pub struct VerifyRequest {
     pub change_id: Option<String>,
     pub required: RequiredConfigurations,
     pub budget: VerifyBudget,
+    /// Test runner/features for test actions.
+    pub test_configuration: ValidationOptions,
+    pub test_mappings: Vec<TestMapping>,
+    pub changed_paths: Vec<String>,
+    pub semantic_references: Vec<SemanticReference>,
+    pub test_patch: Option<TestPatchInput>,
+    pub behavior_contract: Option<BehaviorContract>,
+    /// Request-authorized workspace root; required for `test_candidate`.
+    pub workspace: Option<WorkspaceRoot>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,12 +428,155 @@ pub struct BudgetOutcome {
     pub executed: u64,
 }
 
+/// One planned test scope with its full identity and selection reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TestPlanItemData {
+    pub id: String,
+    /// Lower runs first: cheapest, most directly relevant scopes.
+    pub rank: u64,
+    /// `unit`, `integration`, `doctest`, `mapping`, or `workspace`.
+    pub scope: String,
+    pub package: String,
+    pub package_id: String,
+    pub target: String,
+    pub target_kind: String,
+    /// Bounded test-name filter recorded exactly as it is applied.
+    pub filter: Option<String>,
+    /// Exact test name that must appear in executed results for this item to
+    /// count as evidence.
+    pub exact_test: Option<String>,
+    pub features: Vec<String>,
+    pub no_default_features: bool,
+    /// True when the item is planned as its own feature-gated scope.
+    pub feature_gated: bool,
+    /// Runner recorded for this scope (`cargo` or `nextest`). Doctest scopes
+    /// always record `cargo`.
+    pub runner: String,
+    pub reason: String,
+}
+
+/// Bounded test plan with every include/skip reason visible.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TestPlanData {
+    pub items: Vec<TestPlanItemData>,
+    pub skipped: Vec<SkippedCellData>,
+    pub sources: Vec<String>,
+    /// Conservative widening reasons; a narrow plan is never silently trusted.
+    pub widened_because: Vec<String>,
+    /// True only when the plan covers the whole workspace test inventory.
+    pub full: bool,
+    pub max_tests: u64,
+}
+
+/// One repeated baseline or candidate observation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TestRepeatData {
+    pub run: u64,
+    /// Classified run status (`PASS`, `FAIL`, `ZERO_MATCH`, `IGNORED_ONLY`,
+    /// `COMPILE_FAIL`, `TIMEOUT`, `CANCELLED`, `INCONCLUSIVE`, ...).
+    pub status: String,
+    pub gate_status: String,
+    pub exact_test_seen: bool,
+    pub expected_failure_seen: bool,
+    pub passed: u64,
+    pub failed: u64,
+    pub ignored: u64,
+    pub tests_executed: u64,
+    pub duration_ms: u64,
+    pub input_hash: Option<String>,
+    pub command_hash: Option<String>,
+    pub environment_hash: Option<String>,
+    pub reason: String,
+}
+
+/// Aggregated observations for one baseline/candidate side.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TestCandidateSideData {
+    pub repeats: Vec<TestRepeatData>,
+    pub pass_observed: u64,
+    pub fail_observed: u64,
+    pub other_observed: u64,
+    pub exact_test_seen: bool,
+}
+
+/// `test_candidate` comparison result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TestCandidateData {
+    pub change_id: String,
+    pub change_revision: u64,
+    pub change_base_identity: String,
+    /// Server-owned probe change id used for both snapshots.
+    pub probe_change_id: Option<String>,
+    /// True when the candidate snapshot was reconstructed from the recorded
+    /// change patches on a fresh capture of the same base identity.
+    pub reconstructed_candidate: bool,
+    pub test_name: String,
+    pub expected_failure: String,
+    pub repeats: u64,
+    pub baseline: TestCandidateSideData,
+    pub candidate: TestCandidateSideData,
+    /// `SATISFIED`, `VIOLATED`, `BASELINE_INCOMPATIBLE`, `REJECTED`, or
+    /// `INCONCLUSIVE`.
+    pub contract_status: String,
+    pub compatible: bool,
+    pub flaky: bool,
+    /// Visible cheat findings (test deletion, ignore addition, assertion
+    /// weakening, scope narrowing) detected before or during the comparison.
+    pub detections: Vec<String>,
+}
+
+/// One executed test scope with its exact identity and evidence binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TestRunItemData {
+    pub item: TestPlanItemData,
+    pub status: String,
+    pub reason: String,
+    /// True only when the exact requested test name was observed as executed.
+    pub exact_test_seen: bool,
+    pub tests_executed: u64,
+    pub passed: u64,
+    pub failed: u64,
+    pub ignored: u64,
+    /// Bounded list of executed test names parsed from libtest/nextest output.
+    pub executed_names: Vec<String>,
+    pub duration_ms: u64,
+    pub job_id: Option<String>,
+    pub gate_status: Option<String>,
+    pub input_hash: Option<String>,
+    pub command_hash: Option<String>,
+    pub environment_hash: Option<String>,
+    pub command: Option<String>,
+    pub diagnostics: Vec<String>,
+}
+
+/// `test_run` result. `suite` is `FULL_REQUESTED_SUITE` only when the plan is
+/// the full workspace test inventory and every item completed with a pass.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TestRunData {
+    pub full: bool,
+    pub requested: u64,
+    pub completed: u64,
+    pub missing: Vec<String>,
+    pub suite: String,
+    /// Doctest gate summary: nextest never removes the separate doctest scope.
+    pub doctest_gate: String,
+    pub items: Vec<TestRunItemData>,
+}
+
 /// Bounded matrix plan or run result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct VerifyOutcome {
     pub action: String,
-    /// `PLANNED`, `FULL_REQUESTED_MATRIX`, or `PARTIAL`.
+    /// `PLANNED`, `FULL_REQUESTED_MATRIX`, `PARTIAL`, `TESTED_SUBSET`,
+    /// `FULL_REQUESTED_SUITE`, `SATISFIED`, `VIOLATED`, ... .
     pub status: String,
     pub complete: bool,
     pub all_pass: bool,
@@ -364,6 +601,12 @@ pub struct VerifyOutcome {
     pub budget: BudgetOutcome,
     pub warnings: Vec<String>,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_plan: Option<TestPlanData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_run: Option<TestRunData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_candidate: Option<TestCandidateData>,
 }
 
 impl VerifyOutcome {
@@ -402,6 +645,9 @@ impl VerifyOutcome {
             },
             warnings: Vec::new(),
             reason,
+            test_plan: None,
+            test_run: None,
+            test_candidate: None,
         }
     }
 }
@@ -410,19 +656,30 @@ impl VerifyOutcome {
 #[derive(Debug, Clone)]
 pub struct VerifyService {
     check: Arc<CheckService>,
+    change: Option<Arc<ChangeService>>,
     config: VerifyConfig,
 }
 
 impl VerifyService {
     pub fn new(check: Arc<CheckService>, config: VerifyConfig) -> Self {
-        Self { check, config }
+        Self {
+            check,
+            change: None,
+            config,
+        }
+    }
+
+    /// Binds the revision-bound change engine for `test_candidate` snapshots.
+    pub fn with_change(mut self, change: Option<Arc<ChangeService>>) -> Self {
+        self.change = change;
+        self
     }
 
     pub fn config(&self) -> &VerifyConfig {
         &self.config
     }
 
-    /// Plan or run the requested matrix.
+    /// Plan or run the requested matrix or test action.
     pub async fn execute(
         &self,
         request: VerifyRequest,
@@ -431,6 +688,9 @@ impl VerifyService {
     ) -> VerifyOutcome {
         let action = request.action;
         let committed = cancellation.clone().unwrap_or_default();
+        if action.is_test_action() {
+            return Box::pin(self.execute_test(request, progress, committed)).await;
+        }
         let plan_snapshot = match self
             .check
             .plan_snapshot(
@@ -538,6 +798,9 @@ impl VerifyService {
             },
             warnings: plan.warnings.clone(),
             reason: String::new(),
+            test_plan: None,
+            test_run: None,
+            test_candidate: None,
         }
     }
 
@@ -1864,6 +2127,2117 @@ fn resolver_for_edition(edition: cargo_metadata::Edition) -> u8 {
     }
 }
 
+const MAX_EXECUTED_NAMES: usize = 64;
+const TEST_SCAN_MAX_FILES: usize = 4_000;
+const TEST_SCAN_MAX_FILE_BYTES: u64 = 1_048_576;
+const TEST_DETECTION_LIMIT: usize = 16;
+
+/// Internal plan item before protocol conversion.
+#[derive(Debug, Clone)]
+struct TestPlanItem {
+    id: String,
+    rank: u64,
+    scope: String,
+    package: String,
+    package_id: String,
+    target: String,
+    target_kind: String,
+    filter: Option<String>,
+    exact_test: Option<String>,
+    features: Vec<String>,
+    no_default_features: bool,
+    feature_gated: bool,
+    runner: VerifyRunner,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TestPlanBuild {
+    items: Vec<TestPlanItem>,
+    skipped: Vec<SkippedCell>,
+    sources: Vec<String>,
+    widened_because: Vec<String>,
+    full: bool,
+    max_tests: u64,
+    changed_packages: Vec<String>,
+}
+
+impl TestPlanBuild {
+    fn plan_data(&self) -> TestPlanData {
+        TestPlanData {
+            items: self.items.iter().map(test_plan_item_data).collect(),
+            skipped: self
+                .skipped
+                .iter()
+                .map(|skipped| SkippedCellData {
+                    id: skipped.id.clone(),
+                    status: skipped.status.as_str().to_owned(),
+                    reason: skipped.reason.clone(),
+                })
+                .collect(),
+            sources: self.sources.clone(),
+            widened_because: self.widened_because.clone(),
+            full: self.full,
+            max_tests: self.max_tests,
+        }
+    }
+}
+
+fn test_plan_item_data(item: &TestPlanItem) -> TestPlanItemData {
+    TestPlanItemData {
+        id: item.id.clone(),
+        rank: item.rank,
+        scope: item.scope.clone(),
+        package: item.package.clone(),
+        package_id: item.package_id.clone(),
+        target: item.target.clone(),
+        target_kind: item.target_kind.clone(),
+        filter: item.filter.clone(),
+        exact_test: item.exact_test.clone(),
+        features: item.features.clone(),
+        no_default_features: item.no_default_features,
+        feature_gated: item.feature_gated,
+        runner: item.runner.as_str().to_owned(),
+        reason: item.reason.clone(),
+    }
+}
+
+fn effective_max_tests(budget: &VerifyBudget, config: &VerifyConfig) -> u64 {
+    u64::from(budget.max_tests.unwrap_or(u32::MAX)).min(config.max_tests)
+}
+
+fn effective_repeats(budget: &VerifyBudget, config: &VerifyConfig) -> u64 {
+    u64::from(budget.repeats.unwrap_or(u32::MAX)).min(config.repeats)
+}
+
+fn test_outcome_header(
+    config: &VerifyConfig,
+    request: &VerifyRequest,
+    status: &str,
+    reason: String,
+) -> VerifyOutcome {
+    let mut outcome =
+        VerifyOutcome::failure(request.action, status, request.change_id.clone(), reason);
+    outcome.policy_source = "test-plan".to_owned();
+    outcome.resolver = "cargo-metadata".to_owned();
+    outcome.exhaustive_reason =
+        "test planning is a prioritization heuristic, not a complete test-impact oracle".to_owned();
+    outcome.budget = BudgetOutcome {
+        max_cells: effective_max_cells(&request.budget, config),
+        max_wall_ms: effective_max_wall_ms(&request.budget, config),
+        planned: 0,
+        executed: 0,
+    };
+    outcome
+}
+
+/// Resolves the changed set from the change record, explicit paths, and
+/// semantic reference hints. Every ambiguity becomes a visible widening reason.
+fn resolve_changed_set(
+    change: Option<&Arc<ChangeService>>,
+    change_id: Option<&str>,
+    request_paths: &[String],
+    references: &[SemanticReference],
+    snapshot: &WorkspaceSnapshot,
+    widened_because: &mut Vec<String>,
+) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let root = snapshot.canonical_worktree.clone();
+    let mut changed_from_record = false;
+    if let Some(id) = change_id {
+        match change {
+            Some(change) => match change.record(id) {
+                Ok(Some(record)) if !record.changed_files.is_empty() => {
+                    changed_from_record = true;
+                    for raw in &record.changed_files {
+                        push_changed_path(raw, &mut paths, widened_because, &root);
+                    }
+                }
+                Ok(Some(_)) => widened_because
+                    .push("the change record has no staged files; widened to workspace".to_owned()),
+                Ok(None) => widened_because.push(
+                    "the change id has no server-owned record; the changed set is unknown and \
+                     was widened to workspace"
+                        .to_owned(),
+                ),
+                Err(error) => widened_because.push(format!(
+                    "the change record could not be read ({error}); widened to workspace"
+                )),
+            },
+            None => widened_because.push(
+                "changeId was supplied but the change tool is disabled; widened to workspace"
+                    .to_owned(),
+            ),
+        }
+    }
+    if !changed_from_record {
+        for raw in request_paths {
+            push_changed_path(raw, &mut paths, widened_because, &root);
+        }
+    }
+    for reference in references {
+        push_changed_path(&reference.file, &mut paths, widened_because, &root);
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn push_changed_path(
+    raw: &str,
+    paths: &mut Vec<PathBuf>,
+    widened_because: &mut Vec<String>,
+    root: &Path,
+) {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        widened_because.push("an empty changed path was ignored".to_owned());
+        return;
+    }
+    let candidate = Path::new(trimmed);
+    if candidate.is_absolute()
+        || candidate
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+    {
+        widened_because.push(format!(
+            "changed path `{trimmed}` is not a bounded workspace-relative path"
+        ));
+        return;
+    }
+    paths.push(root.join(candidate));
+}
+
+fn owner_node<'a>(
+    snapshot: &'a WorkspaceSnapshot,
+    absolute: &Path,
+) -> Option<&'a crate::workspace::graph::PackageNode> {
+    snapshot
+        .graph
+        .nodes()
+        .values()
+        .filter(|node| node.workspace_member)
+        .filter(|node| absolute == node.root || absolute.starts_with(&node.root))
+        .max_by_key(|node| node.root.as_os_str().len())
+}
+
+fn global_cargo_input(path: &Path) -> Option<&'static str> {
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some("Cargo.toml") => Some("a Cargo manifest"),
+        Some("Cargo.lock") => Some("the lockfile"),
+        Some("build.rs") => Some("a build script"),
+        Some("rust-toolchain" | "rust-toolchain.toml") => Some("the toolchain file"),
+        _ if path
+            .components()
+            .any(|component| component.as_os_str() == ".cargo") =>
+        {
+            Some("Cargo configuration")
+        }
+        _ => None,
+    }
+}
+
+fn package_has_proc_macro(package: &cargo_metadata::Package) -> bool {
+    package
+        .targets
+        .iter()
+        .any(|target| target.kind.iter().any(is_proc_macro_kind))
+}
+
+fn is_proc_macro_kind(kind: &cargo_metadata::TargetKind) -> bool {
+    matches!(kind, cargo_metadata::TargetKind::ProcMacro)
+}
+
+fn lib_root_target(package: &cargo_metadata::Package, absolute: &Path) -> bool {
+    package.targets.iter().any(|target| {
+        target.kind.iter().any(|kind| {
+            matches!(
+                kind,
+                cargo_metadata::TargetKind::Lib | cargo_metadata::TargetKind::RLib
+            )
+        }) && target.src_path.as_std_path() == absolute
+    })
+}
+
+fn is_test_bearing_kind(kind: &cargo_metadata::TargetKind) -> bool {
+    matches!(
+        kind,
+        cargo_metadata::TargetKind::Lib
+            | cargo_metadata::TargetKind::RLib
+            | cargo_metadata::TargetKind::Bin
+            | cargo_metadata::TargetKind::Test
+            | cargo_metadata::TargetKind::ProcMacro
+    )
+}
+
+fn target_kind_name(target: &cargo_metadata::Target) -> &'static str {
+    for kind in &target.kind {
+        match kind {
+            cargo_metadata::TargetKind::Lib => return "lib",
+            cargo_metadata::TargetKind::RLib => return "rlib",
+            cargo_metadata::TargetKind::Bin => return "bin",
+            cargo_metadata::TargetKind::Test => return "test",
+            cargo_metadata::TargetKind::ProcMacro => return "proc-macro",
+            cargo_metadata::TargetKind::Bench => return "bench",
+            cargo_metadata::TargetKind::Example => return "example",
+            _ => {}
+        }
+    }
+    "unknown"
+}
+
+fn merged_features(base: &[String], required: &[String]) -> Vec<String> {
+    let mut merged = base.to_vec();
+    merged.extend(required.iter().cloned());
+    merged.sort();
+    merged.dedup();
+    merged
+}
+
+struct PackagePlanContext<'a> {
+    base_features: &'a [String],
+    no_default_features: bool,
+    runner: VerifyRunner,
+    package_scope: &'a str,
+    rank_base: u64,
+    reason_prefix: &'a str,
+}
+
+fn package_test_items(
+    package: &cargo_metadata::Package,
+    context: &PackagePlanContext<'_>,
+    skipped: &mut Vec<SkippedCell>,
+) -> Vec<TestPlanItem> {
+    let mut items = Vec::new();
+    for target in &package.targets {
+        let kind = target_kind_name(target);
+        if matches!(kind, "bench" | "example") {
+            skipped.push(SkippedCell {
+                id: format!(
+                    "{}--{kind}--{}",
+                    sanitize_id(&package.name),
+                    sanitize_id(&target.name)
+                ),
+                status: CellStatus::UnsupportedConfiguration,
+                reason: format!(
+                    "`{kind}` target {} is not executed by the default test suite and is not \
+                     selected by this plan",
+                    target.name
+                ),
+            });
+            continue;
+        }
+        if !is_test_bearing_kind_target(target) {
+            continue;
+        }
+        let feature_gated = !target.required_features.is_empty();
+        let gate_note = if feature_gated {
+            format!(
+                " and is planned as its own feature-gated scope ({})",
+                target.required_features.join(", ")
+            )
+        } else {
+            String::new()
+        };
+        if target.test {
+            items.push(TestPlanItem {
+                id: String::new(),
+                rank: context.rank_base,
+                scope: context.package_scope.to_owned(),
+                package: package.name.to_string(),
+                package_id: package.id.repr.clone(),
+                target: target.name.clone(),
+                target_kind: kind.to_owned(),
+                filter: None,
+                exact_test: None,
+                features: merged_features(context.base_features, &target.required_features),
+                no_default_features: context.no_default_features,
+                feature_gated,
+                runner: context.runner,
+                reason: format!(
+                    "{}: {kind} target `{}` executes unit/integration tests{gate_note}",
+                    context.reason_prefix, target.name
+                ),
+            });
+        }
+        let doctestable = target.doctest
+            && target.kind.iter().any(|kind| {
+                matches!(
+                    kind,
+                    cargo_metadata::TargetKind::Lib | cargo_metadata::TargetKind::RLib
+                )
+            });
+        if doctestable {
+            items.push(TestPlanItem {
+                id: String::new(),
+                rank: context.rank_base + 2,
+                scope: "doctest".to_owned(),
+                package: package.name.to_string(),
+                package_id: package.id.repr.clone(),
+                target: target.name.clone(),
+                target_kind: "doctest".to_owned(),
+                filter: None,
+                exact_test: None,
+                features: merged_features(context.base_features, &target.required_features),
+                no_default_features: context.no_default_features,
+                feature_gated,
+                runner: VerifyRunner::Cargo,
+                reason: format!(
+                    "{}: doctests for `{}` are a separate scope; a nextest run never replaces \
+                     the doctest gate{gate_note}",
+                    context.reason_prefix, target.name
+                ),
+            });
+        }
+    }
+    items
+}
+
+fn is_test_bearing_kind_target(target: &cargo_metadata::Target) -> bool {
+    target.kind.iter().any(is_test_bearing_kind)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_test_plan(
+    request: &VerifyRequest,
+    snapshot: &WorkspaceSnapshot,
+    record: Option<&ChangeRecord>,
+    change: Option<&Arc<ChangeService>>,
+    max_tests: u64,
+) -> TestPlanBuild {
+    let mut build = TestPlanBuild {
+        max_tests,
+        ..TestPlanBuild::default()
+    };
+    build
+        .sources
+        .push("cargo metadata test inventory".to_owned());
+    build
+        .sources
+        .push("workspace package graph (reverse dependents)".to_owned());
+    if !request.test_mappings.is_empty() {
+        build.sources.push("explicit user mappings".to_owned());
+    }
+    if !request.semantic_references.is_empty() {
+        build
+            .sources
+            .push("caller-provided semantic reference hints".to_owned());
+    }
+    if record.is_some_and(|record| !record.changed_files.is_empty()) {
+        build.sources.push("change record changed files".to_owned());
+    }
+
+    let mut changed = resolve_changed_set(
+        change,
+        request.change_id.as_deref(),
+        &request.changed_paths,
+        &request.semantic_references,
+        snapshot,
+        &mut build.widened_because,
+    );
+    changed.sort();
+    changed.dedup();
+
+    let mut changed_packages = BTreeSet::new();
+    for path in &changed {
+        if let Some(global) = global_cargo_input(path) {
+            build.widened_because.push(format!(
+                "{global} changed ({}); a narrow test plan cannot be trusted",
+                display_relative(path, snapshot)
+            ));
+            continue;
+        }
+        let Some(node) = owner_node(snapshot, path) else {
+            build.widened_because.push(format!(
+                "changed path {} has no owning workspace package",
+                display_relative(path, snapshot)
+            ));
+            continue;
+        };
+        let Some(package) = snapshot
+            .metadata
+            .packages
+            .iter()
+            .find(|package| package.id.repr == node.package_id)
+        else {
+            build.widened_because.push(format!(
+                "changed path {} belongs to package {} that is missing from metadata",
+                display_relative(path, snapshot),
+                node.name
+            ));
+            continue;
+        };
+        if package_has_proc_macro(package) {
+            build.widened_because.push(format!(
+                "procedural macro package {} changed; macro expansion affects consumers and \
+                 cannot be covered by a narrow plan",
+                node.name
+            ));
+            continue;
+        }
+        if lib_root_target(package, path) {
+            build.widened_because.push(format!(
+                "library root file {} changed; public API impact cannot be excluded",
+                display_relative(path, snapshot)
+            ));
+            continue;
+        }
+        changed_packages.insert(node.package_id.clone());
+    }
+    if !snapshot.external_paths.is_empty() {
+        build
+            .widened_because
+            .push("external path dependencies require workspace scope".to_owned());
+    }
+
+    let mut mapping_packages = BTreeSet::new();
+    for mapping in &request.test_mappings {
+        match mapping.package.as_deref() {
+            Some(name) => {
+                match snapshot
+                    .metadata
+                    .packages
+                    .iter()
+                    .find(|package| {
+                        snapshot.metadata.workspace_members.contains(&package.id)
+                            && package.name.as_str() == name
+                    }) {
+                    Some(package) => {
+                        mapping_packages.insert(package.id.repr.clone());
+                    }
+                    None => build.skipped.push(SkippedCell {
+                        id: format!("mapping-{}", sanitize_id(name)),
+                        status: CellStatus::UnsupportedConfiguration,
+                        reason: format!(
+                            "explicit mapping names package `{name}` which is not a workspace member"
+                        ),
+                    }),
+                }
+            }
+            None => {
+                if let Some(path) = mapping.path.as_deref() {
+                    let absolute = snapshot.canonical_worktree.join(path);
+                    match owner_node(snapshot, &absolute) {
+                        Some(node) => {
+                            mapping_packages.insert(node.package_id.clone());
+                        }
+                        None => build.skipped.push(SkippedCell {
+                            id: format!("mapping-{}", sanitize_id(path)),
+                            status: CellStatus::UnsupportedConfiguration,
+                            reason: format!(
+                                "explicit mapping path `{path}` has no owning workspace package"
+                            ),
+                        }),
+                    }
+                }
+            }
+        }
+    }
+
+    let changed_only = changed_packages.clone();
+    let dependents = snapshot
+        .graph
+        .reverse_dependents(changed_packages.iter().cloned())
+        .difference(&changed_packages)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    let no_changed_set = changed_packages.is_empty()
+        && mapping_packages.is_empty()
+        && request
+            .test_mappings
+            .iter()
+            .all(|mapping| mapping.test_name.is_none());
+    if no_changed_set {
+        build.widened_because.push(
+            "no changed set, mapping, or reference was provided; the plan conservatively \
+             covers the workspace"
+                .to_owned(),
+        );
+    }
+    let widened = !build.widened_because.is_empty();
+    if widened {
+        build.widened_because.sort();
+        build.widened_because.dedup();
+    }
+
+    let mut included = BTreeSet::new();
+    included.extend(changed_packages.iter().cloned());
+    included.extend(dependents.iter().cloned());
+    included.extend(mapping_packages.iter().cloned());
+    if widened {
+        included.extend(
+            snapshot
+                .metadata
+                .packages
+                .iter()
+                .filter(|package| snapshot.metadata.workspace_members.contains(&package.id))
+                .map(|package| package.id.repr.clone()),
+        );
+    }
+
+    let mut items: Vec<TestPlanItem> = Vec::new();
+    let mut used_ids = BTreeSet::new();
+    for package in &snapshot.metadata.packages {
+        if !snapshot.metadata.workspace_members.contains(&package.id) {
+            continue;
+        }
+        let package_id = package.id.repr.clone();
+        if !included.contains(&package_id) {
+            continue;
+        }
+        let (scope, rank_base, reason_prefix) = if mapping_packages.contains(&package_id)
+            && !changed_only.contains(&package_id)
+        {
+            (
+                "mapping",
+                0_u64,
+                format!("explicit user mapping selects package {}", package.name),
+            )
+        } else if changed_only.contains(&package_id) {
+            (
+                "changed",
+                1_u64,
+                format!(
+                    "directly changed package {} (changed paths resolved through the package graph)",
+                    package.name
+                ),
+            )
+        } else if dependents.contains(&package_id) {
+            (
+                "consumer",
+                4_u64,
+                format!(
+                    "reverse dependency consumer {} depends on a changed package",
+                    package.name
+                ),
+            )
+        } else {
+            (
+                "workspace",
+                7_u64,
+                format!(
+                    "workspace-wide conservative widening includes package {}",
+                    package.name
+                ),
+            )
+        };
+        let context = PackagePlanContext {
+            base_features: &request.test_configuration.features,
+            no_default_features: request.test_configuration.no_default_features,
+            runner: VerifyRunner::Cargo,
+            package_scope: scope,
+            rank_base,
+            reason_prefix: &reason_prefix,
+        };
+        for item in package_test_items(package, &context, &mut build.skipped) {
+            let mut item = item;
+            let id_source = format!(
+                "{}--{}--{}--{}",
+                item.package,
+                item.target_kind,
+                item.target,
+                item.filter.as_deref().unwrap_or("suite")
+            );
+            let id = unique_id(&mut used_ids, &id_source);
+            item.id = id.clone();
+            items.push(item);
+        }
+    }
+
+    let runner = match request.test_configuration.runner {
+        TestRunner::Cargo => VerifyRunner::Cargo,
+        TestRunner::Nextest => VerifyRunner::Nextest,
+    };
+    for (index, mapping) in request.test_mappings.iter().enumerate() {
+        let Some(test_name) = mapping.test_name.as_deref() else {
+            continue;
+        };
+        if !valid_test_name(test_name) {
+            build.skipped.push(SkippedCell {
+                id: format!("mapping-{}", index + 1),
+                status: CellStatus::UnsupportedConfiguration,
+                reason: "explicit mapping testName is not a bounded test name".to_owned(),
+            });
+            continue;
+        }
+        let package = mapping
+            .package
+            .clone()
+            .unwrap_or_else(|| "workspace".to_owned());
+        let target = mapping
+            .target
+            .clone()
+            .unwrap_or_else(|| "mapped-test".to_owned());
+        let doctest = target == "doctest" || mapping.target.as_deref() == Some("doctest");
+        let mut item = TestPlanItem {
+            id: String::new(),
+            rank: 0,
+            scope: "mapping".to_owned(),
+            package: package.clone(),
+            package_id: String::new(),
+            target: target.clone(),
+            target_kind: if doctest { "doctest" } else { "test" }.to_owned(),
+            filter: if doctest {
+                None
+            } else {
+                Some(test_name.to_owned())
+            },
+            exact_test: Some(test_name.to_owned()),
+            features: request.test_configuration.features.clone(),
+            no_default_features: request.test_configuration.no_default_features,
+            feature_gated: false,
+            runner: if doctest { VerifyRunner::Cargo } else { runner },
+            reason: format!(
+                "explicit user mapping requires exact test `{test_name}`{}",
+                mapping
+                    .package
+                    .as_deref()
+                    .map_or_else(String::new, |name| format!(" in package {name}"))
+            ),
+        };
+        item.id = unique_id(&mut used_ids, &format!("mapping-{}-{test_name}", index + 1));
+        items.push(item);
+    }
+
+    items.sort_by(|left, right| {
+        left.rank
+            .cmp(&right.rank)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let full_requested = widened;
+    if items.len() as u64 > max_tests {
+        let excess = items.split_off(usize::try_from(max_tests).unwrap_or(usize::MAX));
+        for item in excess {
+            build.skipped.push(SkippedCell {
+                id: item.id,
+                status: CellStatus::SkippedBudget,
+                reason: "verify.maxTests budget exhausted during test planning".to_owned(),
+            });
+        }
+    }
+    build.changed_packages = changed_packages.into_iter().collect();
+    build.full = full_requested
+        && build
+            .skipped
+            .iter()
+            .all(|skipped| skipped.status != CellStatus::SkippedBudget);
+    build.items = items;
+    build
+}
+
+fn display_relative(path: &Path, snapshot: &WorkspaceSnapshot) -> String {
+    path.strip_prefix(&snapshot.canonical_worktree).map_or_else(
+        |_| path.display().to_string(),
+        |relative| relative.display().to_string(),
+    )
+}
+
+fn valid_test_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 256
+        && !name.starts_with('-')
+        && !name.chars().any(char::is_control)
+}
+
+impl VerifyService {
+    fn change_record(&self, request: &VerifyRequest) -> Option<ChangeRecord> {
+        let id = request.change_id.as_deref()?;
+        let change = self.change.as_ref()?;
+        change.record(id).ok().flatten()
+    }
+
+    async fn execute_test(
+        &self,
+        request: VerifyRequest,
+        progress: Option<ProgressCallback>,
+        committed: CancellationToken,
+    ) -> VerifyOutcome {
+        let action = request.action;
+        let plan_snapshot = match self
+            .check
+            .plan_snapshot(
+                request.directory.clone(),
+                request.client_roots.clone(),
+                Some(committed.clone()),
+            )
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err((status, message)) => {
+                return VerifyOutcome::failure(
+                    action,
+                    status.as_str(),
+                    request.change_id.clone(),
+                    message,
+                );
+            }
+        };
+        match action {
+            VerifyAction::TestPlan => self.test_plan(&request, &plan_snapshot, &committed),
+            VerifyAction::TestRun => {
+                self.test_run(&request, &plan_snapshot, progress, &committed)
+                    .await
+            }
+            VerifyAction::TestCandidate => {
+                self.test_candidate(&request, &plan_snapshot, progress, &committed)
+                    .await
+            }
+            VerifyAction::MatrixPlan | VerifyAction::MatrixRun => {
+                unreachable!("execute_test is only reached for test actions")
+            }
+        }
+    }
+
+    fn test_plan(
+        &self,
+        request: &VerifyRequest,
+        plan_snapshot: &super::check::PlanSnapshot,
+        _committed: &CancellationToken,
+    ) -> VerifyOutcome {
+        let record = self.change_record(request);
+        let max_tests = effective_max_tests(&request.budget, &self.config);
+        let build = build_test_plan(
+            request,
+            &plan_snapshot.snapshot,
+            record.as_ref(),
+            self.change.as_ref(),
+            max_tests,
+        );
+        let plan = build.plan_data();
+        let mut outcome = test_outcome_header(&self.config, request, "PLANNED", String::new());
+        outcome.skipped = plan.skipped.clone();
+        outcome.missing_cell_ids = plan.skipped.iter().map(|row| row.id.clone()).collect();
+        outcome.budget.planned = plan.items.len() as u64;
+        outcome.complete = plan.full;
+        outcome.reason = format!(
+            "planned {} test scope(s), {} candidate(s) skipped; coverage: {}; sources: {}",
+            plan.items.len(),
+            plan.skipped.len(),
+            if plan.full {
+                "full workspace inventory"
+            } else {
+                "subset (development feedback; not the final gate)"
+            },
+            plan.sources.join(", ")
+        );
+        outcome.test_plan = Some(plan);
+        outcome
+    }
+
+    async fn test_run(
+        &self,
+        request: &VerifyRequest,
+        plan_snapshot: &super::check::PlanSnapshot,
+        progress: Option<ProgressCallback>,
+        committed: &CancellationToken,
+    ) -> VerifyOutcome {
+        let record = self.change_record(request);
+        let max_tests = effective_max_tests(&request.budget, &self.config);
+        let build = build_test_plan(
+            request,
+            &plan_snapshot.snapshot,
+            record.as_ref(),
+            self.change.as_ref(),
+            max_tests,
+        );
+        let plan = build.plan_data();
+        let mut outcome = test_outcome_header(&self.config, request, "INCONCLUSIVE", String::new());
+        outcome.skipped = plan.skipped.clone();
+        outcome.missing_cell_ids = plan.skipped.iter().map(|row| row.id.clone()).collect();
+        outcome.budget.planned = plan.items.len() as u64;
+        outcome.test_plan = Some(plan.clone());
+
+        let started = Instant::now();
+        let wall_deadline = started + Duration::from_millis(outcome.budget.max_wall_ms);
+        let root = plan_snapshot.snapshot.workspace_root.clone();
+        let total = build.items.len();
+        let mut runs = Vec::with_capacity(total);
+        let mut completed = 0_u64;
+        let mut passed = 0_u64;
+        let mut failed = false;
+        let mut missing = plan
+            .skipped
+            .iter()
+            .map(|row| row.id.clone())
+            .collect::<Vec<_>>();
+        for (index, item) in build.items.iter().enumerate() {
+            let planned = test_plan_item_data(item);
+            if committed.is_cancelled() {
+                runs.push(stopped_test_run(
+                    planned,
+                    "CANCELLED",
+                    "run stopped after client cancellation before this scope started",
+                ));
+                missing.push(item.id.clone());
+                continue;
+            }
+            if Instant::now() >= wall_deadline {
+                runs.push(stopped_test_run(
+                    planned,
+                    "SKIPPED_BUDGET",
+                    "verify.maxWallMs budget exhausted before this scope started",
+                ));
+                missing.push(item.id.clone());
+                continue;
+            }
+            if let Some(callback) = progress.as_ref() {
+                emit(
+                    callback,
+                    ProgressStage::Running,
+                    &format!("test scope {}/{}: {}", index + 1, total, item.id),
+                    started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                );
+            }
+            let run = self.run_test_item(item, request, &root, committed).await;
+            match run.status.as_str() {
+                "PASS" => passed = passed.saturating_add(1),
+                "FAIL" | "COMPILE_FAIL" => failed = true,
+                _ => {}
+            }
+            if run.status != "PASS" {
+                missing.push(item.id.clone());
+            }
+            completed = completed.saturating_add(1);
+            runs.push(run);
+        }
+        outcome.budget.executed = completed;
+
+        let doctest_items = runs
+            .iter()
+            .filter(|run| run.item.target_kind == "doctest")
+            .collect::<Vec<_>>();
+        let doctest_gate = if doctest_items.is_empty() {
+            "NOT_REQUIRED".to_owned()
+        } else {
+            let statuses = doctest_items
+                .iter()
+                .map(|run| run.status.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let nextest_note = if request.test_configuration.runner == TestRunner::Nextest {
+                "; the nextest runner does not replace the separate doctest gate"
+            } else {
+                ""
+            };
+            format!("REQUIRED: {statuses}{nextest_note}")
+        };
+
+        let all_pass = !runs.is_empty() && runs.iter().all(|run| run.status == "PASS");
+        let status = if runs.is_empty() {
+            "INCONCLUSIVE"
+        } else if failed {
+            "FAIL"
+        } else if all_pass && plan.full {
+            "FULL_REQUESTED_SUITE"
+        } else if passed > 0 {
+            "TESTED_SUBSET"
+        } else {
+            "INCONCLUSIVE"
+        };
+        outcome.status = status.to_owned();
+        outcome.complete = status == "FULL_REQUESTED_SUITE";
+        outcome.all_pass = outcome.complete;
+        outcome.reason = match status {
+            "FULL_REQUESTED_SUITE" => format!(
+                "every requested workspace test scope completed with a pass ({passed} scope(s))"
+            ),
+            "TESTED_SUBSET" => format!(
+                "{passed} of {total} test scope(s) passed; {} missing; a subset run is \
+                 development feedback and never the final gate",
+                missing.len()
+            ),
+            "FAIL" => format!(
+                "at least one executed test scope failed; {passed} scope(s) passed and {} did not",
+                (total as u64).saturating_sub(passed)
+            ),
+            _ => "no executable test evidence was produced; zero matches, ignored-only \
+                  results, custom harnesses, and missing summaries are never a pass"
+                .to_owned(),
+        };
+        if let Some(callback) = progress.as_ref() {
+            emit(
+                callback,
+                ProgressStage::Completed,
+                &outcome.reason,
+                started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            );
+        }
+        outcome.test_run = Some(TestRunData {
+            full: plan.full,
+            requested: total as u64,
+            completed,
+            missing,
+            suite: status.to_owned(),
+            doctest_gate,
+            items: runs,
+        });
+        outcome
+    }
+
+    async fn run_test_item(
+        &self,
+        item: &TestPlanItem,
+        request: &VerifyRequest,
+        root: &Path,
+        committed: &CancellationToken,
+    ) -> TestRunItemData {
+        let doctest = item.target_kind == "doctest";
+        let mut options = request.test_configuration.clone();
+        options.features = item.features.clone();
+        options.no_default_features = item.no_default_features;
+        options.runner = if doctest {
+            TestRunner::Cargo
+        } else {
+            item.runner.gate_runner()
+        };
+        options.test_filter = if doctest { None } else { item.filter.clone() };
+        let target = if doctest {
+            GateTargetId::Doc
+        } else {
+            GateTargetId::Test
+        };
+        let gate = GateRequest::new(root.to_path_buf(), target)
+            .with_options(options)
+            .with_detail(GateDetail::Compact)
+            .with_client_roots(request.client_roots.clone())
+            .with_root_epoch(request.root_epoch);
+        let evidence = self.check.run(gate, None, Some(committed.clone())).await;
+        let observation = observe_test_output(&evidence_text(&evidence));
+        let (status, reason, exact_test_seen) =
+            classify_test_evidence(item, &evidence, &observation);
+        let tests_executed = evidence
+            .steps
+            .iter()
+            .filter_map(|step| step.evidence.tests_executed)
+            .max()
+            .unwrap_or(0);
+        TestRunItemData {
+            item: test_plan_item_data(item),
+            status,
+            reason,
+            exact_test_seen,
+            tests_executed,
+            passed: observation.passed,
+            failed: observation.failed,
+            ignored: observation.ignored,
+            executed_names: observation
+                .executed
+                .iter()
+                .take(MAX_EXECUTED_NAMES)
+                .cloned()
+                .collect(),
+            duration_ms: evidence.response_ms,
+            job_id: Some(evidence.job_id.clone()),
+            gate_status: Some(evidence.status.as_str().to_owned()),
+            input_hash: Some(evidence.input_hash.clone()),
+            command_hash: Some(evidence.command_hash.clone()),
+            environment_hash: Some(evidence.environment_hash.clone()),
+            command: evidence
+                .steps
+                .first()
+                .map(|step| step.command.clone())
+                .filter(|command| !command.is_empty()),
+            diagnostics: evidence
+                .steps
+                .iter()
+                .flat_map(|step| step.diagnostics.iter())
+                .take(CELL_DIAGNOSTIC_LIMIT)
+                .map(|diagnostic| {
+                    let code = diagnostic
+                        .code
+                        .as_deref()
+                        .map_or_else(String::new, |code| format!("[{code}] "));
+                    format!("{code}{}: {}", diagnostic.level, diagnostic.message)
+                })
+                .collect(),
+        }
+    }
+
+    async fn test_candidate(
+        &self,
+        request: &VerifyRequest,
+        plan_snapshot: &super::check::PlanSnapshot,
+        _progress: Option<ProgressCallback>,
+        committed: &CancellationToken,
+    ) -> VerifyOutcome {
+        let mut outcome = test_outcome_header(&self.config, request, "INCONCLUSIVE", String::new());
+        let Some(contract) = request.behavior_contract.as_ref() else {
+            outcome.status = "INVALID".to_owned();
+            outcome.reason = "test_candidate requires behaviorContract".to_owned();
+            return outcome;
+        };
+        let Some(change) = self.change.as_ref() else {
+            outcome.reason = "test_candidate requires the change tool to be enabled".to_owned();
+            return outcome;
+        };
+        let result =
+            Box::pin(self.candidate_flow(request, &plan_snapshot.snapshot, contract, committed))
+                .await;
+        // The probe scratch is server-owned and always removed, including on
+        // early failure paths; cleanup uses a fresh token so a cancelled
+        // request still leaves no unbounded scratch behind.
+        let probe_id = match &result {
+            Ok(evaluation) => evaluation.data.probe_change_id.clone(),
+            Err(failure) => failure.probe_change_id.clone(),
+        };
+        if let (Some(probe_id), Some(workspace)) = (probe_id, request.workspace.as_ref()) {
+            let discard = change
+                .execute(
+                    change_discard_request(&probe_id),
+                    workspace,
+                    CancellationToken::new(),
+                    None,
+                )
+                .await;
+            if discard.status != "DISCARDED" {
+                outcome.warnings.push(format!(
+                    "probe scratch cleanup was incomplete: {}",
+                    discard.data.reason
+                ));
+            }
+        }
+        match result {
+            Ok(evaluation) => {
+                let data = evaluation.data;
+                outcome.status = data.contract_status.clone();
+                outcome.complete = data.contract_status == "SATISFIED";
+                outcome.all_pass = outcome.complete;
+                outcome.warnings.extend(evaluation.warnings);
+                outcome.reason = candidate_reason(&data);
+                outcome.test_candidate = Some(data);
+            }
+            Err(failure) => {
+                outcome.status = failure.status.to_owned();
+                outcome.reason = failure.reason;
+            }
+        }
+        outcome
+    }
+
+    async fn candidate_flow(
+        &self,
+        request: &VerifyRequest,
+        snapshot: &WorkspaceSnapshot,
+        contract: &BehaviorContract,
+        committed: &CancellationToken,
+    ) -> Result<CandidateEvaluation, CandidateFailure> {
+        let change = self
+            .change
+            .as_ref()
+            .ok_or_else(|| CandidateFailure::new("INCONCLUSIVE", "change tool disabled"))?;
+        let workspace = request
+            .workspace
+            .as_ref()
+            .ok_or_else(|| CandidateFailure::new("INCONCLUSIVE", "workspace root unavailable"))?;
+        let change_id = request
+            .change_id
+            .clone()
+            .ok_or_else(|| CandidateFailure::new("INVALID", "testCandidate requires changeId"))?;
+        let record = change
+            .record(&change_id)
+            .map_err(|error| {
+                CandidateFailure::new(
+                    "INVALID",
+                    format!("change record could not be read: {error}"),
+                )
+            })?
+            .ok_or_else(|| {
+                CandidateFailure::new(
+                    "NOT_FOUND",
+                    "the change id has no server-owned scratch record",
+                )
+            })?;
+        if record.state != RecordState::Ready {
+            return Err(CandidateFailure::new(
+                "FAILED_INCONSISTENT",
+                format!(
+                    "the change is {} and has no completed candidate revision",
+                    record.state.as_str()
+                ),
+            ));
+        }
+        if record.revision == 0 {
+            return Err(CandidateFailure::new(
+                "STALE",
+                "the change has no staged revision; testCandidate needs the fix applied to a candidate",
+            ));
+        }
+        if record.base_identity.is_empty() {
+            return Err(CandidateFailure::new(
+                "STALE",
+                "the change record has no base identity to compare against",
+            ));
+        }
+        if record.workspace_epoch != workspace.epoch() {
+            return Err(CandidateFailure::new(
+                "STALE",
+                "the authorization root epoch changed since the change was captured",
+            ));
+        }
+        if record.workspace_root != snapshot.workspace_root {
+            return Err(CandidateFailure::new(
+                "STALE",
+                "the change belongs to a different workspace root",
+            ));
+        }
+        let test_patch = request
+            .test_patch
+            .as_ref()
+            .ok_or_else(|| CandidateFailure::new("INVALID", "testCandidate requires testPatch"))?;
+
+        let repeats = effective_repeats(&request.budget, &self.config);
+        let mut detections = analyze_test_patch(test_patch, contract);
+        if !patch_provides_test(test_patch, contract) {
+            detections.push(format!(
+                "test-not-provided: contract test `{}` does not appear in the supplied test patch",
+                contract.test_name
+            ));
+        }
+        if !detections.is_empty() {
+            return Ok(CandidateEvaluation {
+                data: rejected_candidate_data(
+                    &change_id, &record, contract, repeats, detections, None,
+                ),
+                warnings: Vec::new(),
+            });
+        }
+
+        let create = change
+            .execute(change_create_request(), workspace, committed.clone(), None)
+            .await;
+        if create.status != "CREATED" {
+            return Err(CandidateFailure::new(
+                create.status,
+                format!("baseline probe capture failed: {}", create.data.reason),
+            ));
+        }
+        let probe_id = create.data.change_id.clone().ok_or_else(|| {
+            CandidateFailure::new("INCONCLUSIVE", "probe capture published no change id")
+        })?;
+        let probe_base = create.data.base_identity.clone().unwrap_or_default();
+        if probe_base != record.base_identity {
+            return Err(CandidateFailure {
+                status: "STALE",
+                reason: "the workspace content no longer matches the base identity recorded by \
+                         the change; both snapshots would not share the same baseline"
+                    .to_owned(),
+                probe_change_id: Some(probe_id),
+            });
+        }
+
+        let stage_test = change
+            .execute(
+                change_stage_request(
+                    &probe_id,
+                    create.data.revision,
+                    &probe_base,
+                    test_patch.patches.clone(),
+                    test_patch.new_files.clone(),
+                ),
+                workspace,
+                committed.clone(),
+                None,
+            )
+            .await;
+        if stage_test.status != "STAGED" {
+            return Err(CandidateFailure {
+                status: "INCONCLUSIVE",
+                reason: format!(
+                    "the regression test patch could not be staged: {}",
+                    stage_test.data.reason
+                ),
+                probe_change_id: Some(probe_id),
+            });
+        }
+        let baseline_revision = stage_test.data.revision;
+        let probe_root = change.candidate_dir(&probe_id);
+        let before = scan_test_markers(&probe_root);
+        let baseline = self
+            .run_candidate_side(change, &probe_id, request, contract, repeats, committed)
+            .await;
+
+        let stage_fix = change
+            .execute(
+                change_stage_request(
+                    &probe_id,
+                    baseline_revision,
+                    &probe_base,
+                    record
+                        .patches
+                        .iter()
+                        .map(|patch| PatchInput {
+                            file: patch.file.clone(),
+                            old_string: patch.old_string.clone(),
+                            new_string: patch.new_string.clone(),
+                        })
+                        .collect(),
+                    record
+                        .new_files
+                        .iter()
+                        .map(|file| NewFileInput {
+                            file: file.file.clone(),
+                            content: file.content.clone(),
+                        })
+                        .collect(),
+                ),
+                workspace,
+                committed.clone(),
+                None,
+            )
+            .await;
+        if stage_fix.status != "STAGED" {
+            return Err(CandidateFailure {
+                status: "INCONCLUSIVE",
+                reason: format!(
+                    "the candidate fix patches could not be reconstructed on the probe snapshot: {}",
+                    stage_fix.data.reason
+                ),
+                probe_change_id: Some(probe_id),
+            });
+        }
+        let after = scan_test_markers(&probe_root);
+        detections.extend(compare_test_markers(&before, &after));
+        detections.truncate(TEST_DETECTION_LIMIT);
+        if !detections.is_empty() {
+            return Ok(CandidateEvaluation {
+                data: rejected_candidate_data(
+                    &change_id,
+                    &record,
+                    contract,
+                    repeats,
+                    detections,
+                    Some(probe_id.clone()),
+                ),
+                warnings: Vec::new(),
+            });
+        }
+
+        let candidate = self
+            .run_candidate_side(change, &probe_id, request, contract, repeats, committed)
+            .await;
+        Ok(evaluate_candidate(
+            &change_id,
+            &record,
+            contract,
+            repeats,
+            Some(probe_id),
+            baseline,
+            candidate,
+        ))
+    }
+
+    async fn run_candidate_side(
+        &self,
+        change: &Arc<ChangeService>,
+        probe_id: &str,
+        request: &VerifyRequest,
+        contract: &BehaviorContract,
+        repeats: u64,
+        committed: &CancellationToken,
+    ) -> Vec<TestRepeatData> {
+        let root = change.candidate_dir(probe_id);
+        let dependency_roots = change
+            .record(probe_id)
+            .ok()
+            .flatten()
+            .map(|record| record.dependency_roots)
+            .unwrap_or_default();
+        let guard = match RootGuard::new([root.clone()], dependency_roots) {
+            Ok(guard) => Arc::new(guard),
+            Err(error) => {
+                return vec![failed_repeat(
+                    1,
+                    "INCONCLUSIVE",
+                    format!("probe snapshot could not be authorized: {error}"),
+                )];
+            }
+        };
+        let mut config = change.config().clone();
+        config.gate.cache = GateCache::Isolated;
+        config.gate.cache_dir = change.cache_dir(probe_id);
+        let service = CheckService::new(config, guard);
+        let mut runs = Vec::new();
+        for run in 1..=repeats {
+            if committed.is_cancelled() {
+                runs.push(failed_repeat(
+                    run,
+                    "CANCELLED",
+                    "candidate comparison was cancelled before this repeat started".to_owned(),
+                ));
+                break;
+            }
+            let mut options = request.test_configuration.clone();
+            options.test_filter = Some(contract.test_name.clone());
+            let gate = GateRequest::new(root.clone(), GateTargetId::Test)
+                .with_options(options)
+                .with_detail(GateDetail::Compact)
+                .with_root_epoch(0);
+            let evidence = service.run(gate, None, Some(committed.clone())).await;
+            runs.push(candidate_repeat(run, contract, &evidence));
+        }
+        service.close().await;
+        runs
+    }
+}
+
+struct CandidateFailure {
+    status: &'static str,
+    reason: String,
+    probe_change_id: Option<String>,
+}
+
+impl CandidateFailure {
+    fn new(status: &'static str, reason: impl Into<String>) -> Self {
+        Self {
+            status,
+            reason: reason.into(),
+            probe_change_id: None,
+        }
+    }
+}
+
+struct CandidateEvaluation {
+    data: TestCandidateData,
+    warnings: Vec<String>,
+}
+
+fn change_create_request() -> ChangeRequest {
+    ChangeRequest {
+        action: ChangeAction::Create,
+        change_id: None,
+        expected_revision: None,
+        base_identity: None,
+        patches: Vec::new(),
+        new_files: Vec::new(),
+        target: GateTargetId::Check,
+        options: ValidationOptions::default(),
+        detail: GateDetail::Compact,
+        timings: false,
+    }
+}
+
+fn change_stage_request(
+    id: &str,
+    revision: u64,
+    base_identity: &str,
+    patches: Vec<PatchInput>,
+    new_files: Vec<NewFileInput>,
+) -> ChangeRequest {
+    ChangeRequest {
+        action: ChangeAction::Stage,
+        change_id: Some(id.to_owned()),
+        expected_revision: Some(revision),
+        base_identity: Some(base_identity.to_owned()),
+        patches,
+        new_files,
+        target: GateTargetId::Check,
+        options: ValidationOptions::default(),
+        detail: GateDetail::Compact,
+        timings: false,
+    }
+}
+
+fn change_discard_request(id: &str) -> ChangeRequest {
+    ChangeRequest {
+        action: ChangeAction::Discard,
+        change_id: Some(id.to_owned()),
+        ..change_create_request()
+    }
+}
+
+fn stopped_test_run(planned: TestPlanItemData, status: &str, reason: &str) -> TestRunItemData {
+    TestRunItemData {
+        item: planned,
+        status: status.to_owned(),
+        reason: reason.to_owned(),
+        exact_test_seen: false,
+        tests_executed: 0,
+        passed: 0,
+        failed: 0,
+        ignored: 0,
+        executed_names: Vec::new(),
+        duration_ms: 0,
+        job_id: None,
+        gate_status: None,
+        input_hash: None,
+        command_hash: None,
+        environment_hash: None,
+        command: None,
+        diagnostics: Vec::new(),
+    }
+}
+
+fn evidence_text(evidence: &GateEvidence) -> String {
+    let mut text = String::new();
+    for step in &evidence.steps {
+        text.push_str(&step.stdout);
+        text.push('\n');
+        text.push_str(&step.stderr);
+        text.push('\n');
+        text.push_str(&step.tail);
+        text.push('\n');
+    }
+    text
+}
+
+fn evidence_is_compile_failure(evidence: &GateEvidence) -> bool {
+    evidence
+        .steps
+        .iter()
+        .any(|step| step.evidence.build_success == Some(false))
+}
+
+#[derive(Debug, Default, Clone)]
+struct TestObservation {
+    executed: BTreeSet<String>,
+    ignored_names: BTreeSet<String>,
+    passed: u64,
+    failed: u64,
+    ignored: u64,
+    summary_seen: bool,
+}
+
+/// Parses libtest and nextest human output. A missing summary is never treated
+/// as a pass, so custom harnesses cannot claim executed tests.
+fn observe_test_output(text: &str) -> TestObservation {
+    let mut observation = TestObservation::default();
+    for line in text.lines() {
+        let line = line.trim_end();
+        if let Some(rest) = line.strip_prefix("test ")
+            && let Some((name, tail)) = rest.rsplit_once(" ... ")
+        {
+            let name = name.trim();
+            if !name.is_empty() {
+                match tail.trim() {
+                    "ok" | "FAILED" => {
+                        observation.executed.insert(name.to_owned());
+                    }
+                    "ignored" => {
+                        observation.ignored_names.insert(name.to_owned());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some(summary) = line.strip_prefix("test result: ") {
+            observation.summary_seen = true;
+            if let Some((_, summary)) = summary.split_once(". ") {
+                for field in summary.split(';') {
+                    let field = field.trim();
+                    if let Some(value) = field.strip_suffix(" passed") {
+                        observation.passed = observation
+                            .passed
+                            .saturating_add(value.parse::<u64>().unwrap_or(0));
+                    } else if let Some(value) = field.strip_suffix(" failed") {
+                        observation.failed = observation
+                            .failed
+                            .saturating_add(value.parse::<u64>().unwrap_or(0));
+                    } else if let Some(value) = field.strip_suffix(" ignored") {
+                        observation.ignored = observation
+                            .ignored
+                            .saturating_add(value.parse::<u64>().unwrap_or(0));
+                    }
+                }
+            }
+        }
+        let trimmed = line.trim_start();
+        for marker in ["PASS ", "FAIL "] {
+            if let Some(rest) = trimmed.strip_prefix(marker)
+                && let Some((_, name)) = rest.split_once("] ")
+            {
+                let name = name.trim();
+                if !name.is_empty() {
+                    observation.executed.insert(name.to_owned());
+                }
+            }
+        }
+        for needle in [" tests run: ", " test run: ", "test run: "] {
+            if let Some((_, summary)) = line.split_once(needle) {
+                observation.summary_seen = true;
+                for field in summary.split(',') {
+                    let tokens = field.split_whitespace().collect::<Vec<_>>();
+                    if let (Some(value), Some(kind)) = (
+                        tokens.first().and_then(|token| token.parse::<u64>().ok()),
+                        tokens.get(1),
+                    ) {
+                        match *kind {
+                            "passed" => {
+                                observation.passed = observation.passed.saturating_add(value)
+                            }
+                            "failed" => {
+                                observation.failed = observation.failed.saturating_add(value)
+                            }
+                            "ignored" | "skipped" => {
+                                observation.ignored = observation.ignored.saturating_add(value);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
+    observation
+}
+
+/// Exact test-name evidence: libtest reports module paths (`tests::name`), so
+/// the requested bare name must match a whole final segment; a plain substring
+/// collision (for example `name_extra`) never matches.
+fn test_name_matches(observed: &str, requested: &str) -> bool {
+    observed == requested
+        || observed
+            .strip_suffix(requested)
+            .is_some_and(|prefix| prefix.ends_with("::"))
+}
+
+fn classify_test_evidence(
+    item: &TestPlanItem,
+    evidence: &GateEvidence,
+    observation: &TestObservation,
+) -> (String, String, bool) {
+    let exact_seen = item.exact_test.as_ref().is_none_or(|name| {
+        observation
+            .executed
+            .iter()
+            .any(|observed| test_name_matches(observed, name))
+    });
+    let exact_ignored = item.exact_test.as_ref().is_some_and(|name| {
+        observation
+            .ignored_names
+            .iter()
+            .any(|observed| test_name_matches(observed, name))
+    });
+    match evidence.status {
+        GateStatus::Fail => {
+            let compile = evidence_is_compile_failure(evidence);
+            let reason = evidence
+                .message
+                .clone()
+                .unwrap_or_else(|| evidence.status.as_str().to_owned());
+            let status = if compile { "COMPILE_FAIL" } else { "FAIL" };
+            (status.to_owned(), reason, exact_seen)
+        }
+        GateStatus::FastPass | GateStatus::FullPass => {
+            if exact_ignored {
+                return (
+                    "IGNORED_ONLY".to_owned(),
+                    "the requested test is marked #[ignore]; ignored-only results are never a pass"
+                        .to_owned(),
+                    false,
+                );
+            }
+            if !observation.summary_seen {
+                return (
+                    "INCONCLUSIVE".to_owned(),
+                    "no libtest or nextest summary was observed; a custom harness or missing \
+                     result is never a pass"
+                        .to_owned(),
+                    exact_seen,
+                );
+            }
+            if observation.passed == 0 && observation.failed == 0 {
+                if observation.ignored > 0 {
+                    return (
+                        "IGNORED_ONLY".to_owned(),
+                        "only ignored tests matched the filter; ignored-only results are never a pass"
+                            .to_owned(),
+                        false,
+                    );
+                }
+                return (
+                    "ZERO_MATCH".to_owned(),
+                    "the filter matched no executed test; a zero-match run is never a pass"
+                        .to_owned(),
+                    false,
+                );
+            }
+            if item.exact_test.is_some() && !exact_seen {
+                return (
+                    "INCONCLUSIVE".to_owned(),
+                    "the filter executed tests but not the exact requested test name; a substring \
+                     collision is not evidence"
+                        .to_owned(),
+                    false,
+                );
+            }
+            (
+                "PASS".to_owned(),
+                format!(
+                    "{} passed, {} failed, {} ignored",
+                    observation.passed, observation.failed, observation.ignored
+                ),
+                exact_seen,
+            )
+        }
+        GateStatus::Timeout => (
+            "TIMEOUT".to_owned(),
+            "the test run timed out and produced no complete evidence".to_owned(),
+            exact_seen,
+        ),
+        GateStatus::Cancelled => (
+            "CANCELLED".to_owned(),
+            "the test run was cancelled".to_owned(),
+            exact_seen,
+        ),
+        GateStatus::Unavailable => (
+            "RUNNER_UNAVAILABLE".to_owned(),
+            evidence
+                .message
+                .clone()
+                .unwrap_or_else(|| "the test runner was unavailable".to_owned()),
+            exact_seen,
+        ),
+        _ => {
+            // The bounded Cargo gate already maps filtered zero-execution runs
+            // to INCONCLUSIVE. Re-surface the more specific reason without ever
+            // granting a pass.
+            if exact_ignored
+                || (observation.passed == 0
+                    && observation.failed == 0
+                    && observation.ignored > 0
+                    && observation.summary_seen)
+            {
+                (
+                    "IGNORED_ONLY".to_owned(),
+                    "only ignored tests matched the filter; ignored-only results are never a pass"
+                        .to_owned(),
+                    false,
+                )
+            } else if observation.summary_seen && observation.passed == 0 && observation.failed == 0
+            {
+                (
+                    "ZERO_MATCH".to_owned(),
+                    "the filter matched no executed test; a zero-match run is never a pass"
+                        .to_owned(),
+                    false,
+                )
+            } else {
+                (
+                    "INCONCLUSIVE".to_owned(),
+                    evidence.message.clone().unwrap_or_else(|| {
+                        "the run did not produce authoritative test evidence".to_owned()
+                    }),
+                    exact_seen,
+                )
+            }
+        }
+    }
+}
+
+fn candidate_repeat(
+    run: u64,
+    contract: &BehaviorContract,
+    evidence: &GateEvidence,
+) -> TestRepeatData {
+    let text = evidence_text(evidence);
+    let observation = observe_test_output(&text);
+    let exact_test_seen = observation
+        .executed
+        .iter()
+        .any(|observed| test_name_matches(observed, &contract.test_name));
+    let expected_failure_seen = text.contains(&contract.expected_failure);
+    let compile = evidence_is_compile_failure(evidence);
+    let status = match evidence.status {
+        GateStatus::Fail if compile => "COMPILE_FAIL",
+        GateStatus::Fail => "FAIL",
+        GateStatus::FastPass | GateStatus::FullPass => {
+            if observation.passed == 0 && observation.failed == 0 {
+                if observation.ignored > 0 {
+                    "IGNORED_ONLY"
+                } else if observation.summary_seen {
+                    "ZERO_MATCH"
+                } else {
+                    "INCONCLUSIVE"
+                }
+            } else if !exact_test_seen {
+                "INCONCLUSIVE"
+            } else {
+                "PASS"
+            }
+        }
+        GateStatus::Timeout => "TIMEOUT",
+        GateStatus::Cancelled => "CANCELLED",
+        GateStatus::Unavailable => "RUNNER_UNAVAILABLE",
+        _ => "INCONCLUSIVE",
+    };
+    TestRepeatData {
+        run,
+        status: status.to_owned(),
+        gate_status: evidence.status.as_str().to_owned(),
+        exact_test_seen,
+        expected_failure_seen,
+        passed: observation.passed,
+        failed: observation.failed,
+        ignored: observation.ignored,
+        tests_executed: evidence
+            .steps
+            .iter()
+            .filter_map(|step| step.evidence.tests_executed)
+            .max()
+            .unwrap_or(0),
+        duration_ms: evidence.response_ms,
+        input_hash: Some(evidence.input_hash.clone()),
+        command_hash: Some(evidence.command_hash.clone()),
+        environment_hash: Some(evidence.environment_hash.clone()),
+        reason: evidence
+            .message
+            .clone()
+            .unwrap_or_else(|| evidence.status.as_str().to_owned()),
+    }
+}
+
+fn failed_repeat(run: u64, status: &str, reason: String) -> TestRepeatData {
+    TestRepeatData {
+        run,
+        status: status.to_owned(),
+        gate_status: status.to_owned(),
+        exact_test_seen: false,
+        expected_failure_seen: false,
+        passed: 0,
+        failed: 0,
+        ignored: 0,
+        tests_executed: 0,
+        duration_ms: 0,
+        input_hash: None,
+        command_hash: None,
+        environment_hash: None,
+        reason,
+    }
+}
+
+fn side_data(repeats: Vec<TestRepeatData>) -> TestCandidateSideData {
+    let pass_observed = repeats.iter().filter(|r| r.status == "PASS").count() as u64;
+    let fail_observed = repeats
+        .iter()
+        .filter(|r| r.status == "FAIL" || r.status == "COMPILE_FAIL")
+        .count() as u64;
+    let other_observed = repeats.len() as u64 - pass_observed - fail_observed;
+    let exact_test_seen = repeats.iter().any(|r| r.exact_test_seen);
+    TestCandidateSideData {
+        repeats,
+        pass_observed,
+        fail_observed,
+        other_observed,
+        exact_test_seen,
+    }
+}
+
+fn evaluate_candidate(
+    change_id: &str,
+    record: &ChangeRecord,
+    contract: &BehaviorContract,
+    repeats: u64,
+    probe_change_id: Option<String>,
+    baseline: Vec<TestRepeatData>,
+    candidate: Vec<TestRepeatData>,
+) -> CandidateEvaluation {
+    let baseline_pass_expected = baseline
+        .iter()
+        .filter(|r| r.status == "FAIL" && r.expected_failure_seen && r.exact_test_seen)
+        .count() as u64;
+    let baseline_other = repeats.saturating_sub(baseline_pass_expected);
+    let candidate_pass = candidate.iter().filter(|r| r.status == "PASS").count() as u64;
+    let candidate_other = repeats.saturating_sub(candidate_pass);
+    let baseline_incompatible = baseline.iter().any(|r| r.status == "COMPILE_FAIL");
+    let flaky = (baseline_pass_expected > 0 && baseline_other > 0)
+        || (candidate_pass > 0 && candidate_other > 0);
+    let contract_status = if baseline_incompatible {
+        "BASELINE_INCOMPATIBLE"
+    } else if flaky {
+        "INCONCLUSIVE"
+    } else if baseline_pass_expected == repeats && candidate_pass == repeats {
+        "SATISFIED"
+    } else {
+        "VIOLATED"
+    };
+    let mut warnings = Vec::new();
+    if flaky {
+        warnings.push(format!(
+            "flaky test: {} baseline and {} candidate repeat(s) passed across {repeats} \
+             repeat(s); a retry after a failure does not erase the observed instability",
+            candidate_pass, baseline_pass_expected
+        ));
+    }
+    if baseline_incompatible {
+        warnings.push(
+            "the regression test does not compile against the baseline API; this is a separate \
+             BASELINE_INCOMPATIBLE state, not evidence that the test catches the bug"
+                .to_owned(),
+        );
+    }
+    CandidateEvaluation {
+        data: TestCandidateData {
+            change_id: change_id.to_owned(),
+            change_revision: record.revision,
+            change_base_identity: record.base_identity.clone(),
+            probe_change_id,
+            reconstructed_candidate: true,
+            test_name: contract.test_name.clone(),
+            expected_failure: contract.expected_failure.clone(),
+            repeats,
+            baseline: side_data(baseline),
+            candidate: side_data(candidate),
+            contract_status: contract_status.to_owned(),
+            compatible: !baseline_incompatible,
+            flaky,
+            detections: Vec::new(),
+        },
+        warnings,
+    }
+}
+
+fn rejected_candidate_data(
+    change_id: &str,
+    record: &ChangeRecord,
+    contract: &BehaviorContract,
+    repeats: u64,
+    detections: Vec<String>,
+    probe_change_id: Option<String>,
+) -> TestCandidateData {
+    TestCandidateData {
+        change_id: change_id.to_owned(),
+        change_revision: record.revision,
+        change_base_identity: record.base_identity.clone(),
+        probe_change_id,
+        reconstructed_candidate: true,
+        test_name: contract.test_name.clone(),
+        expected_failure: contract.expected_failure.clone(),
+        repeats,
+        baseline: side_data(Vec::new()),
+        candidate: side_data(Vec::new()),
+        contract_status: "REJECTED".to_owned(),
+        compatible: false,
+        flaky: false,
+        detections,
+    }
+}
+
+fn candidate_reason(data: &TestCandidateData) -> String {
+    match data.contract_status.as_str() {
+        "SATISFIED" => format!(
+            "the regression test `{}` failed with the expected assertion on the baseline and \
+             passed on the candidate across {} repeat(s); the candidate snapshot was reconstructed \
+             from the recorded change patches on a server-owned baseline capture",
+            data.test_name, data.repeats
+        ),
+        "VIOLATED" => format!(
+            "the regression test `{}` did not show the required baseline failure and candidate \
+             pass; baseline {} pass / {} fail / {} other, candidate {} pass / {} fail / {} other",
+            data.test_name,
+            data.baseline.pass_observed,
+            data.baseline.fail_observed,
+            data.baseline.other_observed,
+            data.candidate.pass_observed,
+            data.candidate.fail_observed,
+            data.candidate.other_observed
+        ),
+        "BASELINE_INCOMPATIBLE" => {
+            "the regression test does not compile against the baseline API; \
+                                    this is not counted as catching the regression"
+                .to_owned()
+        }
+        "REJECTED" => format!(
+            "the regression test patch was rejected before comparison: {}",
+            data.detections.join("; ")
+        ),
+        "INCONCLUSIVE" => format!(
+            "observed outcomes were mixed across {} repeat(s) (baseline {} pass / {} fail, \
+             candidate {} pass / {} fail); flakiness is reported and never erased by a retry",
+            data.repeats,
+            data.baseline.pass_observed,
+            data.baseline.fail_observed,
+            data.candidate.pass_observed,
+            data.candidate.fail_observed
+        ),
+        other => format!("test candidate comparison finished with {other}"),
+    }
+}
+
+fn count_token(text: &str, needle: &str) -> u64 {
+    text.match_indices(needle).count() as u64
+}
+
+/// Bounded static analysis of the supplied regression-test patch. Deleting a
+/// test, adding `#[ignore]`, weakening assertions, and narrowing scope are
+/// rejected before any snapshot runs.
+fn analyze_test_patch(patch: &TestPatchInput, contract: &BehaviorContract) -> Vec<String> {
+    let mut detections = Vec::new();
+    for entry in &patch.patches {
+        let old_tests = count_token(&entry.old_string, "#[test]");
+        let new_tests = count_token(&entry.new_string, "#[test]");
+        if old_tests > 0 && new_tests < old_tests {
+            detections.push(format!(
+                "test-deletion: patch {} removes {} #[test] function(s)",
+                entry.file,
+                old_tests - new_tests
+            ));
+        }
+        let old_ignored = count_token(&entry.old_string, "#[ignore");
+        let new_ignored = count_token(&entry.new_string, "#[ignore");
+        if new_ignored > old_ignored {
+            detections.push(format!(
+                "ignore-added: patch {} adds #[ignore] in place of execution",
+                entry.file
+            ));
+        }
+        let old_asserts = count_token(&entry.old_string, "assert");
+        let new_asserts = count_token(&entry.new_string, "assert");
+        if old_asserts > new_asserts {
+            detections.push(format!(
+                "assertion-weakened: patch {} removes {} assertion reference(s)",
+                entry.file,
+                old_asserts - new_asserts
+            ));
+        }
+        let old_cfg = count_token(&entry.old_string, "#[cfg(");
+        let new_cfg = count_token(&entry.new_string, "#[cfg(");
+        if new_cfg > old_cfg {
+            detections.push(format!(
+                "scope-narrowed: patch {} adds a cfg gate that can skip execution",
+                entry.file
+            ));
+        }
+    }
+    if !detections.is_empty() {
+        detections.push(format!(
+            "contract test `{}` would not prove the behavior contract",
+            contract.test_name
+        ));
+    }
+    detections.truncate(TEST_DETECTION_LIMIT);
+    detections
+}
+
+fn declares_test_name(text: &str, name: &str) -> bool {
+    for line in text.lines() {
+        let Some(rest) = line.split("fn ").nth(1) else {
+            continue;
+        };
+        let identifier = rest
+            .trim_start()
+            .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+            .next()
+            .unwrap_or_default();
+        if identifier == name {
+            return true;
+        }
+    }
+    false
+}
+
+fn patch_provides_test(patch: &TestPatchInput, contract: &BehaviorContract) -> bool {
+    patch.patches.iter().any(|entry| {
+        declares_test_name(&entry.new_string, &contract.test_name)
+            || declares_test_name(&entry.old_string, &contract.test_name)
+    }) || patch
+        .new_files
+        .iter()
+        .any(|file| declares_test_name(&file.content, &contract.test_name))
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TestMarkerSummary {
+    test_functions: u64,
+    ignored: u64,
+    assertions: u64,
+    files: BTreeSet<String>,
+    truncated: bool,
+}
+
+fn scan_test_markers(root: &Path) -> TestMarkerSummary {
+    let mut summary = TestMarkerSummary::default();
+    let mut files = 0_usize;
+    let mut pending = vec![root.to_owned()];
+    while let Some(directory) = pending.pop() {
+        if files >= TEST_SCAN_MAX_FILES {
+            summary.truncated = true;
+            break;
+        }
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let name = entry.file_name();
+            if name == "target" || name == ".git" {
+                continue;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+                continue;
+            }
+            if files >= TEST_SCAN_MAX_FILES {
+                summary.truncated = true;
+                break;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.len() > TEST_SCAN_MAX_FILE_BYTES {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(&path) else {
+                continue;
+            };
+            files += 1;
+            let tests = count_token(&text, "#[test]");
+            if tests > 0 {
+                summary.test_functions = summary.test_functions.saturating_add(tests);
+                if let Ok(relative) = path.strip_prefix(root) {
+                    summary.files.insert(relative.display().to_string());
+                }
+            }
+            summary.ignored = summary
+                .ignored
+                .saturating_add(count_token(&text, "#[ignore"));
+            summary.assertions = summary
+                .assertions
+                .saturating_add(count_token(&text, "assert!"))
+                .saturating_add(count_token(&text, "assert_eq!"))
+                .saturating_add(count_token(&text, "assert_ne!"));
+        }
+    }
+    summary
+}
+
+fn compare_test_markers(before: &TestMarkerSummary, after: &TestMarkerSummary) -> Vec<String> {
+    let mut detections = Vec::new();
+    if after.test_functions < before.test_functions {
+        detections.push(format!(
+            "candidate-deletes-tests: {} test function(s) disappeared while applying the candidate",
+            before.test_functions - after.test_functions
+        ));
+    }
+    if after.ignored > before.ignored {
+        detections.push(format!(
+            "candidate-adds-ignore: {} #[ignore] attribute(s) were added by the candidate",
+            after.ignored - before.ignored
+        ));
+    }
+    if after.assertions < before.assertions {
+        detections.push(format!(
+            "candidate-weakens-assertions: {} assertion(s) disappeared while applying the candidate",
+            before.assertions - after.assertions
+        ));
+    }
+    for file in before.files.difference(&after.files) {
+        detections.push(format!("candidate-deletes-test-file: {file}"));
+    }
+    detections.truncate(TEST_DETECTION_LIMIT);
+    detections
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2177,18 +4551,305 @@ mod tests {
         let config = VerifyConfig {
             max_cells: 4,
             max_wall_ms: 10_000,
+            max_tests: 4,
+            repeats: 2,
         };
         let budget = VerifyBudget {
             max_cells: Some(16),
             max_wall_ms: Some(600_000),
+            ..VerifyBudget::default()
         };
         assert_eq!(effective_max_cells(&budget, &config), 4);
         assert_eq!(effective_max_wall_ms(&budget, &config), 10_000);
         let narrow = VerifyBudget {
             max_cells: Some(2),
             max_wall_ms: Some(3_000),
+            ..VerifyBudget::default()
         };
         assert_eq!(effective_max_cells(&narrow, &config), 2);
         assert_eq!(effective_max_wall_ms(&narrow, &config), 3_000);
+        assert_eq!(effective_max_tests(&budget, &config), 4);
+        assert_eq!(effective_repeats(&budget, &config), 2);
+    }
+
+    #[test]
+    fn observe_test_output_reads_libtest_and_nextest_summaries() {
+        let libtest = "running 2 tests\ntest tests::a ... ok\ntest tests::b ... FAILED\n\
+                       test tests::c ... ignored\n\ntest result: FAILED. 1 passed; 1 failed; 1 \
+                       ignored; 0 measured; 0 filtered out; finished in 0.01s\n";
+        let observation = observe_test_output(libtest);
+        assert!(observation.summary_seen);
+        assert_eq!(observation.passed, 1);
+        assert_eq!(observation.failed, 1);
+        assert_eq!(observation.ignored, 1);
+        assert!(observation.executed.contains("tests::a"));
+        assert!(observation.executed.contains("tests::b"));
+        assert!(observation.ignored_names.contains("tests::c"));
+
+        let nextest = "        PASS [   0.001s] pkg::a\n        FAIL [   0.002s] pkg::b\n\
+                       Summary [   0.003s] 2 tests run: 1 passed, 1 failed, 0 skipped\n";
+        let observation = observe_test_output(nextest);
+        assert!(observation.summary_seen);
+        assert_eq!(observation.passed, 1);
+        assert_eq!(observation.failed, 1);
+        assert!(observation.executed.contains("pkg::a"));
+        assert!(observation.executed.contains("pkg::b"));
+
+        let zero = "running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 \
+                    measured; 0 filtered out\n";
+        let observation = observe_test_output(zero);
+        assert!(observation.summary_seen);
+        assert_eq!(
+            observation.passed + observation.failed + observation.ignored,
+            0
+        );
+    }
+
+    fn mapping_item(exact: Option<&str>) -> TestPlanItem {
+        TestPlanItem {
+            id: "item".to_owned(),
+            rank: 0,
+            scope: "unit".to_owned(),
+            package: "fixture".to_owned(),
+            package_id: "fixture 0.1.0".to_owned(),
+            target: "fixture".to_owned(),
+            target_kind: "lib".to_owned(),
+            filter: None,
+            exact_test: exact.map(str::to_owned),
+            features: Vec::new(),
+            no_default_features: false,
+            feature_gated: false,
+            runner: VerifyRunner::Cargo,
+            reason: "test".to_owned(),
+        }
+    }
+
+    fn test_step() -> crate::gate::GateStepResult {
+        crate::gate::GateStepResult {
+            evidence: crate::diagnostics::EvidenceStats::default(),
+            diagnostics_omitted: 0,
+            contexts: Vec::new(),
+            target: GateTargetId::Test,
+            command: "cargo test".to_owned(),
+            exit_code: 0,
+            signal: None,
+            timed_out: false,
+            cancelled: false,
+            duration_ms: 1,
+            first_diagnostic_ms: None,
+            diagnostics: Vec::new(),
+            suggestion_package: None,
+            tail: String::new(),
+            stdout: String::new(),
+            stderr: String::new(),
+            output_truncated: false,
+            drain_complete: true,
+            cleanup_complete: true,
+            build: None,
+        }
+    }
+
+    fn evidence_with(
+        status: GateStatus,
+        stdout: &str,
+        build_success: Option<bool>,
+    ) -> GateEvidence {
+        let mut evidence =
+            GateEvidence::pending("job", &GateRequest::new("/tmp", GateTargetId::Test));
+        evidence.status = status;
+        evidence.input_hash = "input".to_owned();
+        evidence.command_hash = "command".to_owned();
+        evidence.environment_hash = "environment".to_owned();
+        let mut step = test_step();
+        step.evidence.build_success = build_success;
+        step.evidence.tests_executed = Some(1);
+        step.stdout = stdout.to_owned();
+        evidence.steps.push(step);
+        evidence
+    }
+
+    #[test]
+    fn ignored_only_and_zero_match_are_never_pass() {
+        let item = mapping_item(Some("tests::ignored"));
+        let stdout = "test tests::ignored ... ignored\n\ntest result: ok. 0 passed; 0 failed; 1 \
+                      ignored; 0 measured; 0 filtered out\n";
+        let evidence = evidence_with(GateStatus::FastPass, stdout, Some(true));
+        let observation = observe_test_output(&evidence_text(&evidence));
+        let (status, reason, seen) = classify_test_evidence(&item, &evidence, &observation);
+        assert_eq!(status, "IGNORED_ONLY", "{reason}");
+        assert!(!seen);
+        assert_ne!(status, "PASS");
+
+        let item = mapping_item(Some("tests::missing"));
+        let stdout = "running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 \
+                      measured; 0 filtered out\n";
+        let evidence = evidence_with(GateStatus::FastPass, stdout, Some(true));
+        let observation = observe_test_output(&evidence_text(&evidence));
+        let (status, reason, _) = classify_test_evidence(&item, &evidence, &observation);
+        assert_eq!(status, "ZERO_MATCH", "{reason}");
+
+        // A custom harness that exits zero without a summary is inconclusive.
+        let evidence = evidence_with(GateStatus::FastPass, "custom harness output\n", None);
+        let observation = observe_test_output(&evidence_text(&evidence));
+        let (status, reason, _) = classify_test_evidence(&item, &evidence, &observation);
+        assert_eq!(status, "INCONCLUSIVE", "{reason}");
+    }
+
+    #[test]
+    fn substring_collision_is_not_exact_test_evidence() {
+        let item = mapping_item(Some("tests::target"));
+        let stdout = "test tests::target_extra ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 \
+                      ignored; 0 measured; 0 filtered out\n";
+        let evidence = evidence_with(GateStatus::FastPass, stdout, Some(true));
+        let observation = observe_test_output(&evidence_text(&evidence));
+        let (status, reason, seen) = classify_test_evidence(&item, &evidence, &observation);
+        assert_eq!(status, "INCONCLUSIVE", "{reason}");
+        assert!(!seen);
+
+        let stdout = "test tests::target ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 \
+                      ignored; 0 measured; 0 filtered out\n";
+        let evidence = evidence_with(GateStatus::FastPass, stdout, Some(true));
+        let observation = observe_test_output(&evidence_text(&evidence));
+        let (status, _, seen) = classify_test_evidence(&item, &evidence, &observation);
+        assert_eq!(status, "PASS");
+        assert!(seen);
+    }
+
+    fn patch(file: &str, old: &str, new: &str) -> PatchInput {
+        PatchInput {
+            file: file.to_owned(),
+            old_string: old.to_owned(),
+            new_string: new.to_owned(),
+        }
+    }
+
+    #[test]
+    fn test_patch_analysis_catches_deletion_weakening_ignore_and_scope_narrowing() {
+        let contract = BehaviorContract {
+            test_name: "regression_catches_bug".to_owned(),
+            package: None,
+            target: None,
+            expected_failure: "assertion `left == right` failed".to_owned(),
+        };
+        let clean = TestPatchInput {
+            patches: vec![patch(
+                "tests/regression.rs",
+                "",
+                "#[test]\nfn regression_catches_bug() { assert_eq!(2 + 2, 4); }\n",
+            )],
+            new_files: Vec::new(),
+        };
+        assert!(analyze_test_patch(&clean, &contract).is_empty());
+        assert!(patch_provides_test(&clean, &contract));
+
+        let deletion = TestPatchInput {
+            patches: vec![patch(
+                "tests/old.rs",
+                "#[test]\nfn old_regression() { assert!(true); }\n",
+                "",
+            )],
+            new_files: Vec::new(),
+        };
+        let detections = analyze_test_patch(&deletion, &contract);
+        assert!(
+            detections
+                .iter()
+                .any(|row| row.starts_with("test-deletion")),
+            "{detections:#?}"
+        );
+        assert!(
+            detections
+                .iter()
+                .any(|row| row.contains("would not prove the behavior contract")),
+            "{detections:#?}"
+        );
+
+        let weakening = TestPatchInput {
+            patches: vec![patch(
+                "tests/regression.rs",
+                "#[test]\nfn regression_catches_bug() { assert_eq!(value(), 4); }\n",
+                "#[test]\nfn regression_catches_bug() { }\n",
+            )],
+            new_files: Vec::new(),
+        };
+        let detections = analyze_test_patch(&weakening, &contract);
+        assert!(
+            detections
+                .iter()
+                .any(|row| row.starts_with("assertion-weakened")),
+            "{detections:#?}"
+        );
+
+        let ignored = TestPatchInput {
+            patches: vec![patch(
+                "tests/regression.rs",
+                "#[test]\nfn regression_catches_bug() { assert_eq!(value(), 4); }\n",
+                "#[test]\n#[ignore]\nfn regression_catches_bug() { assert_eq!(value(), 4); }\n",
+            )],
+            new_files: Vec::new(),
+        };
+        let detections = analyze_test_patch(&ignored, &contract);
+        assert!(
+            detections.iter().any(|row| row.starts_with("ignore-added")),
+            "{detections:#?}"
+        );
+
+        let narrowed = TestPatchInput {
+            patches: vec![patch(
+                "tests/regression.rs",
+                "#[test]\nfn regression_catches_bug() { assert_eq!(value(), 4); }\n",
+                "#[cfg(feature = \"never\")]\n#[test]\nfn regression_catches_bug() { \
+                 assert_eq!(value(), 4); }\n",
+            )],
+            new_files: Vec::new(),
+        };
+        let detections = analyze_test_patch(&narrowed, &contract);
+        assert!(
+            detections
+                .iter()
+                .any(|row| row.starts_with("scope-narrowed")),
+            "{detections:#?}"
+        );
+        assert!(patch_provides_test(&narrowed, &contract));
+    }
+
+    #[test]
+    fn marker_comparison_detects_candidate_test_regressions() {
+        let before = TestMarkerSummary {
+            test_functions: 3,
+            ignored: 0,
+            assertions: 5,
+            files: ["tests/old.rs".to_owned()].into_iter().collect(),
+            truncated: false,
+        };
+        let after = TestMarkerSummary {
+            test_functions: 2,
+            ignored: 1,
+            assertions: 3,
+            files: BTreeSet::new(),
+            truncated: false,
+        };
+        let detections = compare_test_markers(&before, &after);
+        assert!(
+            detections
+                .iter()
+                .any(|row| row.starts_with("candidate-deletes-tests"))
+        );
+        assert!(
+            detections
+                .iter()
+                .any(|row| row.starts_with("candidate-adds-ignore"))
+        );
+        assert!(
+            detections
+                .iter()
+                .any(|row| row.starts_with("candidate-weakens-assertions"))
+        );
+        assert!(
+            detections
+                .iter()
+                .any(|row| row.starts_with("candidate-deletes-test-file"))
+        );
+        assert!(compare_test_markers(&before, &before).is_empty());
     }
 }

@@ -213,6 +213,8 @@ use the platform path-list separator.
 | `profile.compare_samples` | `3` | Required samples per side before any speed claim. |
 | `verify.max_cells` | `8` | Hard ceiling for matrix cells planned or executed per request. |
 | `verify.max_wall_ms` | `120000` | Hard wall-clock ceiling for one matrix run. |
+| `verify.max_tests` | `16` | Hard ceiling for planned test scopes in `test_plan`/`test_run`. |
+| `verify.repeats` | `2` | Hard ceiling for repeated baseline/candidate runs in `test_candidate`. |
 | `rust_analyzer.path` | PATH or rustup | Optional binary override. |
 | `rust_analyzer.timeout_ms` | `30000` | Semantic request deadline. |
 | `rust_analyzer.idle_ms` | `900000` | Idle process lifetime. |
@@ -316,6 +318,46 @@ the existing network policy.
 The planner is a bounded enumerator and marks its output `NOT exhaustive`.
 Each result binds source/lock/config/toolchain through the gate identity and
 command hashes; a completed `PASS` is never reused for a new explicit run.
+
+### Test planning, runs, and candidate verification
+
+Starting with **0.2.0**, `verify` also supports `action=test_plan`, `test_run`,
+and `test_candidate`. These reuse the same bounded `CheckService` runner; no
+arbitrary shell command, automatic dependency installation, or workspace source
+write is introduced.
+
+- `test_plan` combines the `cargo metadata` test inventory, the workspace
+  package graph (reverse dependents), caller-provided semantic reference hints,
+  explicit user mappings, and the changed set (`changeId` record or
+  `changedPaths`). Scopes are ranked cheapest/most relevant first: explicit
+  mappings, directly changed packages (unit, integration, doctest), reverse
+  dependency consumers, then workspace-wide widening. A manifest, lockfile,
+  build script, toolchain file, `.cargo` configuration, proc-macro package, or
+  library-root change forces conservative workspace widening instead of a
+  narrow plan; every include and skip reason is visible in `testPlan`.
+- `test_run` executes the planned scopes one by one and records the exact
+  package, target/binary, filter, feature selection, runner, command/input/
+  environment hashes, and the executed test names. Zero-match, ignored-only,
+  custom-harness, and missing-result runs are never `PASS`; a substring filter
+  that does not execute the exact requested test name is `INCONCLUSIVE`.
+  Doctests, integration tests, and feature-gated targets are separate scopes,
+  and using the `nextest` runner never removes the separate doctest gate.
+  `FULL_REQUESTED_SUITE` is returned only when the plan covers the full
+  workspace inventory and every scope passed; otherwise `TESTED_SUBSET` is
+  returned and is development feedback, not the final gate.
+- `test_candidate` takes `changeId` (a staged fix), `testPatch` (a regression
+  test patch), and `behaviorContract` (`testName` plus `expectedFailure`). It
+  creates a server-owned probe capture through `ChangeService`, stages the test
+  patch on the baseline, reruns the change's recorded fix patches on the same
+  base identity, and runs the same test on both snapshots — never on the
+  original workspace. The contract is `SATISFIED` only when the baseline fails
+  with the expected assertion text and the candidate passes. A test that does
+  not compile against the baseline API is the separate `BASELINE_INCOMPATIBLE`
+  state and is not counted as catching the bug. Test deletion, assertion
+  weakening, `#[ignore]` addition, and scope narrowing are rejected before or
+  during the comparison, `budget.repeats` (clamped by `verify.repeats`) reports
+  observed pass/fail counts, and flakiness is reported as `INCONCLUSIVE` — a
+  retry after a failure never erases the observed instability.
 
 ## Explicit validation options
 

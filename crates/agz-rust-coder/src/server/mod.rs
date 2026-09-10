@@ -163,10 +163,10 @@ impl AppState {
             Duration::from_millis(config.context.capsule_ttl_ms),
         ));
         let profile = ProfileService::new(config.clone(), Arc::clone(&check), processes.clone());
-        let verify = Arc::new(VerifyService::new(
-            Arc::clone(&check),
-            config.verify.clone(),
-        ));
+        let verify = Arc::new(
+            VerifyService::new(Arc::clone(&check), config.verify.clone())
+                .with_change(change.clone()),
+        );
         let audit = AuditService::new(AuditLimits::from_u64(
             config.limits.audit_files,
             config.limits.audit_file_bytes,

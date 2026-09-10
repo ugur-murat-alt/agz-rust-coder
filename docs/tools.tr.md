@@ -212,6 +212,8 @@ platformun path-list ayırıcısını kullanır.
 | `profile.compare_samples` | `3` | Hız iddiası öncesi her taraf için gereken örnek sayısı. |
 | `verify.max_cells` | `8` | İstek başına planlanan veya çalıştırılan matris hücresi için kesin üst sınır. |
 | `verify.max_wall_ms` | `120000` | Tek matris çalıştırması için kesin duvar saati üst sınırı. |
+| `verify.max_tests` | `16` | `test_plan`/`test_run` için planlanan test kapsamı üst sınırı. |
+| `verify.repeats` | `2` | `test_candidate` için yinelenen baseline/aday çalıştırma üst sınırı. |
 | `rust_analyzer.path` | PATH or rustup | İsteğe bağlı binary değişimi. |
 | `rust_analyzer.timeout_ms` | `30000` | Semantik istek son süresi. |
 | `rust_analyzer.idle_ms` | `900000` | Boş süreç ömrü. |
@@ -316,6 +318,45 @@ Planlayıcı sınırlı bir numaralandırıcıdır ve çıktısını `NOT exhaus
 işaretler. Her sonuç kaynak/lock/yapılandırma/toolchain bağını kapı kimliği ve
 komut hash'leri üzerinden kurar; tamamlanmış bir `PASS` yeni açık çalıştırma için
 yeniden kullanılmaz.
+
+### Test planlama, çalıştırma ve aday doğrulama
+
+**0.2.0 sürümünden itibaren** `verify` ayrıca `action=test_plan`, `test_run` ve
+`test_candidate` destekler. Bu eylemler aynı sınırlı `CheckService` yürütücüsünü
+kullanır; keyfi kabuk komutu, otomatik bağımlılık kurulumu veya workspace
+kaynağına yazma eklenmez.
+
+- `test_plan`; `cargo metadata` test envanterini, workspace paket grafını (ters
+  bağımlılıklar), çağıranın verdiği semantik referans ipuçlarını, açık kullanıcı
+  eşlemelerini ve değişen kümeyi (`changeId` kaydı veya `changedPaths`) birleştirir.
+  Kapsamlar en ucuz/en ilgili önce sıralanır: açık eşlemeler, doğrudan değişen
+  paketler (unit, integration, doctest), ters bağımlılık tüketicileri, ardından
+  workspace geneline genişleme. Manifest, lockfile, build script, toolchain
+  dosyası, `.cargo` yapılandırması, proc-macro paketi veya kütüphane kökü
+  değişikliği dar plana kör güvenmek yerine konservatif workspace genişlemesini
+  zorunlu kılar; her dahil etme ve atlama gerekçesi `testPlan` içinde görünür.
+- `test_run` planlanan kapsamları sırayla çalıştırır; tam paket, hedef/binary,
+  filtre, feature seçimi, runner, komut/girdi/ortam hash'leri ve çalışan test
+  adlarını kaydeder. Sıfır eşleşme, ignored-only, custom harness ve eksik sonuç
+  asla `PASS` değildir; tam istenen test adını çalıştırmayan alt dizge filtresi
+  `INCONCLUSIVE` olur. Doctest, integration ve feature'a bağlı hedefler ayrı
+  kapsamlardır ve `nextest` runner'ı ayrı doctest kapısını ortadan kaldırmaz.
+  `FULL_REQUESTED_SUITE` yalnız plan tüm workspace envanterini kapsıyor ve her
+  kapsam geçtiyse döner; aksi halde `TESTED_SUBSET` döner ve bu geliştirme geri
+  bildirimidir, final kapı değildir.
+- `test_candidate`; `changeId` (aşamalanmış düzeltme), `testPatch` (regresyon
+  testi yaması) ve `behaviorContract` (`testName` ve `expectedFailure`) alır.
+  `ChangeService` üzerinden sunucuya ait bir deneme kopyası oluşturur, test
+  yamasını baseline'a uygular, aynı temel kimlik üzerinde değişikliğin kayıtlı
+  düzeltme yamalarını yeniden uygular ve aynı testi iki anlık görüntüde çalıştırır
+  — hiçbir zaman orijinal workspace'te değil. Sözleşme yalnız baseline beklenen
+  assertion metniyle fail ve aday pass olduğunda `SATISFIED` olur. Baseline
+  API'sine karşı derlenemeyen test ayrı `BASELINE_INCOMPATIBLE` durumudur ve
+  hatayı yakaladığı sayılmaz. Test silme, assertion boşaltma, `#[ignore]` ekleme
+  ve kapsam daraltma karşılaştırma öncesinde veya sırasında reddedilir;
+  `budget.repeats` (`verify.repeats` ile sınırlanır) gözlenen pass/fail sayılarını
+  raporlar ve kararsızlık `INCONCLUSIVE` olarak bildirilir — başarısızlık sonrası
+  bir retry gözlenen kararsızlığı silmez.
 
 ## Açık doğrulama seçenekleri
 
