@@ -76,10 +76,12 @@ pub fn select_gate_cache(
         if !project_safe {
             return Err(CacheError::OutsideWorkspace(requested));
         }
-        let requested = win32_spelling(&requested).unwrap_or(requested);
+        // Only the environment handed to Cargo gets the ordinary spelling:
+        // `target_directory` itself is compared against canonical paths when
+        // excluding build artifacts from the input identity.
         environment.insert(
             OsString::from("CARGO_TARGET_DIR"),
-            requested.clone().into_os_string(),
+            primary_spelling(&requested).into_os_string(),
         );
         return Ok(CacheSelection {
             mode: CacheMode::Project,
@@ -89,10 +91,9 @@ pub fn select_gate_cache(
         });
     }
     if matches!(config.cache, GateCache::Auto) && project_safe {
-        let requested = win32_spelling(&requested).unwrap_or(requested);
         environment.insert(
             OsString::from("CARGO_TARGET_DIR"),
-            requested.clone().into_os_string(),
+            primary_spelling(&requested).into_os_string(),
         );
         return Ok(CacheSelection {
             mode: CacheMode::Project,
@@ -113,11 +114,11 @@ pub fn select_gate_cache(
     ensure_directory(&target_directory)?;
     // The isolated directory may live under a canonical (verbatim) path; Cargo
     // must receive an identity-preserving ordinary spelling so the linker can
-    // open its build artifacts on Windows.
-    let target_directory = win32_spelling(&target_directory).unwrap_or(target_directory);
+    // open its build artifacts on Windows. `target_directory` stays canonical
+    // for input-identity comparisons.
     environment.insert(
         OsString::from("CARGO_TARGET_DIR"),
-        target_directory.clone().into_os_string(),
+        primary_spelling(&target_directory).into_os_string(),
     );
     Ok(CacheSelection {
         mode: CacheMode::Isolated,
@@ -125,6 +126,12 @@ pub fn select_gate_cache(
         environment,
         owned: true,
     })
+}
+
+/// Spelling handed to Cargo: an identity-preserving ordinary Win32 form where
+/// one exists, otherwise the canonical path.
+fn primary_spelling(path: &Path) -> PathBuf {
+    win32_spelling(path).unwrap_or_else(|| path.to_owned())
 }
 
 fn is_safe_project_target(workspace_root: &Path, target: &Path) -> bool {
