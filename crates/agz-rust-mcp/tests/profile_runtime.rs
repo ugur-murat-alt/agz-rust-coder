@@ -158,9 +158,16 @@ fn runtime_request(id: &str, revision: u64, workspace: &WorkspaceRoot) -> Runtim
         adapter: "sleepy".to_owned(),
         workload: "tiny".to_owned(),
         hypothesis: "the staged change removes redundant work".to_owned(),
-        threshold_percent: 10.0,
-        samples: Some(3),
-        warmup: Some(1),
+        // Shared macOS/Linux runners routinely move a sleep sample's median by
+        // more than 10% under load (a real CI failure flipped the verdict at
+        // 0.5 s / 3 samples / 10%). 25% of a 2 s workload tolerates a 500 ms
+        // median shift while still deciding the equal-workload comparison
+        // against a concrete, predeclared threshold.
+        threshold_percent: 25.0,
+        // Five measured samples make the median reject up to two outliers;
+        // two warmup pairs absorb first-run process effects.
+        samples: Some(5),
+        warmup: Some(2),
         gate_target: GateTargetId::Check,
         gate_options: ValidationOptions::default(),
         budget: ProfileBudget {
@@ -181,10 +188,11 @@ fn sleep_adapter() -> RuntimeAdapterConfig {
         prepare_args: Vec::new(),
         workloads: vec![RuntimeWorkloadConfig {
             name: "tiny".to_owned(),
-            // Long enough that scheduler jitter on loaded CI runners stays far
-            // below the comparison's 50% relative-spread noise threshold. The
-            // duration is not asserted anywhere, so it cannot mask a regression.
-            args: vec!["0.5".to_owned()],
+            // Two seconds keeps a fixed scheduler stall small relative to the
+            // measured duration (the previous 0.5 s fixture failed on macOS).
+            // The duration is not asserted anywhere, so it cannot mask a
+            // regression; both sides run the identical argv.
+            args: vec!["2.0".to_owned()],
         }],
         metric: RuntimeMetric::Duration,
     }
@@ -291,11 +299,17 @@ async fn runtime_compare_measures_balanced_samples_and_binds_evidence() {
     assert!(gates.baseline.passed && gates.candidate.passed);
     let experiment = &comparison.experiment;
     assert!(!experiment.command.is_empty());
-    assert_eq!(experiment.samples_per_side, 3);
-    assert_eq!(experiment.warmup_per_side, 1);
+    assert_eq!(experiment.samples_per_side, 5);
+    assert_eq!(experiment.warmup_per_side, 2);
+    assert!(
+        (experiment.threshold_percent - 25.0).abs() < f64::EPSILON,
+        "declared threshold: {}",
+        experiment.threshold_percent
+    );
     assert!(experiment.threshold_declared_before_measurement);
     let measurements = comparison.measurements.as_ref().expect("measurements");
-    assert!(measurements.raw_samples.len() >= 4);
+    let warmup_samples = usize::try_from(experiment.warmup_per_side).expect("warmup fits");
+    assert_eq!(measurements.raw_samples.len(), 2 * (warmup_samples + 5));
     assert!(
         measurements
             .raw_samples
@@ -308,14 +322,24 @@ async fn runtime_compare_measures_balanced_samples_and_binds_evidence() {
             .iter()
             .all(|sample| sample.stdout_sha256.len() == 64)
     );
-    // Balanced order: the first pair runs baseline first, the second candidate
-    // first, and every sample carries its global sequence.
-    assert_eq!(measurements.raw_samples[0].side, "baseline");
-    assert_eq!(measurements.raw_samples[0].order, "baseline-candidate");
-    assert_eq!(measurements.raw_samples[2].side, "candidate");
-    assert_eq!(measurements.raw_samples[2].order, "candidate-baseline");
-    assert_eq!(measurements.baseline.samples, 3);
-    assert_eq!(measurements.candidate.samples, 3);
+    // Balanced order: the first measured pair runs baseline first, the second
+    // candidate first, and every sample carries its global sequence.
+    let first_measured = 2 * warmup_samples;
+    assert_eq!(measurements.raw_samples[first_measured].side, "baseline");
+    assert_eq!(
+        measurements.raw_samples[first_measured].order,
+        "baseline-candidate"
+    );
+    assert_eq!(
+        measurements.raw_samples[first_measured + 2].side,
+        "candidate"
+    );
+    assert_eq!(
+        measurements.raw_samples[first_measured + 2].order,
+        "candidate-baseline"
+    );
+    assert_eq!(measurements.baseline.samples, 5);
+    assert_eq!(measurements.candidate.samples, 5);
     assert!(!comparison.measured_findings.is_empty());
     assert_eq!(
         comparison.interpretation.hypothesis,

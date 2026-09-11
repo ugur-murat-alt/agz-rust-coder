@@ -810,36 +810,12 @@ impl RuntimeCompareService {
             comparison.reason = "baseline median is zero; no ratio is measurable".to_owned();
             return comparison;
         }
-        let delta = cand_median as f64 - base_median as f64;
-        let improvement_percent = -delta / base_median as f64 * 100.0;
-        let (verdict, reason) = if improvement_percent >= request.threshold_percent {
-            (
-                "CANDIDATE_FASTER",
-                format!(
-                    "candidate median improved {improvement_percent:+.1}% against the declared \
-                     {:.1}% threshold across {samples_per_side} samples per side",
-                    request.threshold_percent
-                ),
-            )
-        } else if improvement_percent <= -request.threshold_percent {
-            (
-                "BASELINE_FASTER",
-                format!(
-                    "candidate median regressed {improvement_percent:+.1}% against the declared \
-                     {:.1}% threshold across {samples_per_side} samples per side",
-                    request.threshold_percent
-                ),
-            )
-        } else {
-            (
-                "NO_MATERIAL_DIFFERENCE",
-                format!(
-                    "candidate median changed {improvement_percent:+.1}%, within the declared \
-                     {:.1}% threshold",
-                    request.threshold_percent
-                ),
-            )
-        };
+        let (verdict, reason) = classify_runtime_verdict(
+            base_median,
+            cand_median,
+            request.threshold_percent,
+            samples_per_side,
+        );
         comparison.verdict = Some(verdict.to_owned());
         comparison.reason = reason;
         comparison.status = "COMPARABLE".to_owned();
@@ -1248,6 +1224,46 @@ fn unavailable_metrics() -> Vec<UnavailableMetric> {
     .collect()
 }
 
+/// Classify median durations against the predeclared threshold.
+///
+/// Extracted so the exact boundary behavior (faster at `>=`, slower at `<=`)
+/// is unit-tested with crafted measurements instead of depending on wall-clock
+/// noise from a real fixture run.
+fn classify_runtime_verdict(
+    baseline_median_ms: u64,
+    candidate_median_ms: u64,
+    threshold_percent: f64,
+    samples_per_side: u64,
+) -> (&'static str, String) {
+    let delta = candidate_median_ms as f64 - baseline_median_ms as f64;
+    let improvement_percent = -delta / baseline_median_ms as f64 * 100.0;
+    if improvement_percent >= threshold_percent {
+        (
+            "CANDIDATE_FASTER",
+            format!(
+                "candidate median improved {improvement_percent:+.1}% against the declared \
+                 {threshold_percent:.1}% threshold across {samples_per_side} samples per side"
+            ),
+        )
+    } else if improvement_percent <= -threshold_percent {
+        (
+            "BASELINE_FASTER",
+            format!(
+                "candidate median regressed {improvement_percent:+.1}% against the declared \
+                 {threshold_percent:.1}% threshold across {samples_per_side} samples per side"
+            ),
+        )
+    } else {
+        (
+            "NO_MATERIAL_DIFFERENCE",
+            format!(
+                "candidate median changed {improvement_percent:+.1}%, within the declared \
+                 {threshold_percent:.1}% threshold"
+            ),
+        )
+    }
+}
+
 fn findings(
     baseline: &RuntimeSeries,
     candidate: &RuntimeSeries,
@@ -1322,5 +1338,42 @@ mod tests {
         assert_eq!(one.samples, 1);
         assert_eq!(one.mad_ms, None);
         assert!(max_relative_spread(&one, &one).is_none());
+    }
+
+    #[test]
+    fn verdict_classification_pins_threshold_boundaries() {
+        // Equal medians can never move the verdict.
+        let (verdict, _) = classify_runtime_verdict(2_000, 2_000, 25.0, 5);
+        assert_eq!(verdict, "NO_MATERIAL_DIFFERENCE");
+
+        // Exactly at the declared threshold in either direction is material.
+        assert_eq!(
+            classify_runtime_verdict(2_000, 1_500, 25.0, 5).0,
+            "CANDIDATE_FASTER"
+        );
+        assert_eq!(
+            classify_runtime_verdict(2_000, 2_500, 25.0, 5).0,
+            "BASELINE_FASTER"
+        );
+
+        // Just inside the threshold stays neutral.
+        assert_eq!(
+            classify_runtime_verdict(2_000, 1_510, 25.0, 5).0,
+            "NO_MATERIAL_DIFFERENCE"
+        );
+        assert_eq!(
+            classify_runtime_verdict(2_000, 2_490, 25.0, 5).0,
+            "NO_MATERIAL_DIFFERENCE"
+        );
+
+        // The boundary follows the declared threshold, not a fixed percentage.
+        assert_eq!(
+            classify_runtime_verdict(2_000, 1_810, 10.0, 5).0,
+            "NO_MATERIAL_DIFFERENCE"
+        );
+        assert_eq!(
+            classify_runtime_verdict(2_000, 1_800, 10.0, 5).0,
+            "CANDIDATE_FASTER"
+        );
     }
 }
