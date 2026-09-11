@@ -1378,6 +1378,14 @@ fn probe_data(
                 .to_owned(),
         );
     }
+    if !compile_passed && diagnostics.is_empty() && !validated.reason.trim().is_empty() {
+        // Without compiler diagnostics the gate's own bounded reason is the
+        // only explanation available for an unexplained candidate verdict.
+        notes.push(format!(
+            "candidate validation detail: {}",
+            bounded_chars(&validated.reason, MAX_DIAGNOSTIC_CHARS)
+        ));
+    }
     let (original_source, original_unchanged) = verify_original_unchanged(env, plan);
     notes.push(format!(
         "Harness module {} and change {change_id} were discarded after revision {probe_revision}; binding label: {}.",
