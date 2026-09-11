@@ -253,9 +253,22 @@ fn path_is_within(root: &Path, candidate: &Path) -> bool {
             .is_ok_and(|relative| !relative.is_absolute())
 }
 
+/// Stable per-workspace cache subdirectory name.
+///
+/// The digest is deliberately truncated to 64 bits: it only has to separate
+/// workspace roots that share one configured cache directory, and Windows
+/// build tools (the MSVC linker in particular) still fail once an assembled
+/// artifact path exceeds the legacy `MAX_PATH` limit. A 64-hex-character name
+/// pushed isolated test binaries past that limit on CI runners, so the shorter
+/// name keeps the deepest Cargo artifact comfortably bounded.
 fn hash_path(path: &Path) -> String {
     let mut hash = Sha256::new();
     hash.update(b"agz-rust-mcp-gate-target\0");
     hash.update(path.as_os_str().to_string_lossy().as_bytes());
-    format!("{:x}", hash.finalize())
+    let digest = hash.finalize();
+    let mut name = String::with_capacity(16);
+    for byte in &digest[..8] {
+        name.push_str(&format!("{byte:02x}"));
+    }
+    name
 }

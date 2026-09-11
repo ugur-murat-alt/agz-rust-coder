@@ -1616,10 +1616,24 @@ impl ChangeService {
         let verified = updated.current_revision_fresh_pass();
         let mut data = data_for_record(ChangeAction::Validate, &updated, None);
         data.verified = verified;
-        data.reason = match (&save_error, fresh) {
-            (Some(error), _) => format!("evidence could not be persisted: {error}"),
-            (None, true) => format!("{status} with fresh candidate evidence"),
-            (None, false) => "evidence is not usable for the current revision".to_owned(),
+        // Surface why a gate did not produce usable evidence so a refused
+        // validation is never a silent, unexplained status.
+        let gate_detail = evidence
+            .message
+            .as_deref()
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+            .map(|message| truncate(message, 256));
+        data.reason = match (&save_error, fresh, gate_detail) {
+            (Some(error), _, _) => format!("evidence could not be persisted: {error}"),
+            (None, true, Some(detail)) => {
+                format!("{status} with fresh candidate evidence: {detail}")
+            }
+            (None, true, None) => format!("{status} with fresh candidate evidence"),
+            (None, false, Some(detail)) => {
+                format!("evidence is not usable for the current revision: {detail}")
+            }
+            (None, false, None) => "evidence is not usable for the current revision".to_owned(),
         };
         self.finish(
             status,

@@ -3883,11 +3883,45 @@ fn candidate_repeat(
         input_hash: Some(evidence.input_hash.clone()),
         command_hash: Some(evidence.command_hash.clone()),
         environment_hash: Some(evidence.environment_hash.clone()),
-        reason: evidence
-            .message
-            .clone()
-            .unwrap_or_else(|| evidence.status.as_str().to_owned()),
+        reason: repeat_reason(evidence, status),
     }
+}
+
+/// Bounded explanation for one candidate-side repeat. A failing repeat carries
+/// the first compiler/linker diagnostic (or a stderr excerpt) so a build
+/// failure is self-describing instead of only reporting a target count.
+fn repeat_reason(evidence: &GateEvidence, status: &str) -> String {
+    let base = evidence
+        .message
+        .clone()
+        .unwrap_or_else(|| evidence.status.as_str().to_owned());
+    if !matches!(status, "FAIL" | "COMPILE_FAIL") {
+        return base;
+    }
+    let detail = evidence.steps.iter().find_map(|step| {
+        step.diagnostics
+            .first()
+            .map(|diagnostic| diagnostic.message.clone())
+            .or_else(|| {
+                let stderr = step.stderr.trim();
+                (!stderr.is_empty()).then(|| bounded_reason(stderr))
+            })
+    });
+    match detail {
+        Some(detail) if !detail.is_empty() && !base.contains(&detail) => {
+            bounded_reason(&format!("{base}: {detail}"))
+        }
+        _ => base,
+    }
+}
+
+fn bounded_reason(text: &str) -> String {
+    const MAX_REASON_CHARS: usize = 512;
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= MAX_REASON_CHARS {
+        return trimmed.to_owned();
+    }
+    trimmed.chars().take(MAX_REASON_CHARS).collect()
 }
 
 fn failed_repeat(run: u64, status: &str, reason: String) -> TestRepeatData {
