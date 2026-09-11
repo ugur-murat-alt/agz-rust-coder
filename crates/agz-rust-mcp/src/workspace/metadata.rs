@@ -738,26 +738,11 @@ impl<R: MetadataRunner> MetadataService<R> {
         checkpoint(control)?;
         let workspace_root = canonical_metadata_workspace_root(&run.metadata, selection)?;
         let target_directory = PathBuf::from(run.metadata.target_directory.as_std_path());
-        let external_paths = metadata
-            .packages
-            .iter()
-            .filter_map(|package| {
-                let is_member = run
-                    .metadata
-                    .workspace_members
-                    .iter()
-                    .any(|member| member == &package.id);
-                (!is_member && package.source.is_none()).then(|| {
-                    PathBuf::from(
-                        package
-                            .manifest_path
-                            .as_std_path()
-                            .parent()
-                            .unwrap_or(package.manifest_path.as_std_path()),
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
+        let external_paths = external_path_dependencies(
+            &metadata,
+            &run.metadata.workspace_members,
+            selection.authority(),
+        );
         checkpoint(control)?;
         let snapshot = WorkspaceSnapshot {
             requested_dir: selection.requested_dir().to_owned(),
@@ -1257,6 +1242,40 @@ fn canonical_utf8(path: &cargo_metadata::camino::Utf8Path) -> cargo_metadata::ca
         .unwrap_or_else(|_| path.to_owned())
 }
 
+/// Path-dependency roots that genuinely live outside the selected workspace.
+///
+/// Cargo's `workspace_members` list is not authoritative here: with a verbatim
+/// `--manifest-path` on Windows an in-workspace path dependency can be missing
+/// from it, which previously reported the candidate's own `dep` copy as
+/// external and made dependency authorization fail closed before Cargo ran.
+/// A package inside the authorized workspace is captured with the workspace
+/// copy and needs no dependency authorization. Only roots that containment
+/// cannot prove inside stay external, so genuinely outside paths still require
+/// an authorized dependency root.
+fn external_path_dependencies(
+    metadata: &Metadata,
+    members: &[cargo_metadata::PackageId],
+    authority: &AuthorizedRoot,
+) -> Vec<PathBuf> {
+    metadata
+        .packages
+        .iter()
+        .filter_map(|package| {
+            if package.source.is_some() || members.iter().any(|member| member == &package.id) {
+                return None;
+            }
+            let root = PathBuf::from(
+                package
+                    .manifest_path
+                    .as_std_path()
+                    .parent()
+                    .unwrap_or(package.manifest_path.as_std_path()),
+            );
+            (!authority.contains(&root)).then_some(root)
+        })
+        .collect()
+}
+
 fn validate_metadata(
     metadata: &Metadata,
     selection: &WorkspaceSelection,
@@ -1644,5 +1663,101 @@ mod tests {
             wait_for_flight(&flight, Some(&timed_out)),
             Err(MetadataError::TimedOut)
         ));
+    }
+
+    fn package_json(name: &str, manifest_dir: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "version": "0.1.0",
+            "id": format!("path+file:///{}#{name}@0.1.0", manifest_dir.display()),
+            "license": null,
+            "license_file": null,
+            "description": null,
+            "source": null,
+            "dependencies": [],
+            "targets": [{
+                "kind": ["lib"],
+                "crate_types": ["lib"],
+                "name": name,
+                "src_path": manifest_dir.join("src/lib.rs").display().to_string(),
+                "edition": "2024",
+                "doc": true,
+                "doctest": true,
+                "test": true
+            }],
+            "features": {},
+            "manifest_path": manifest_dir.join("Cargo.toml").display().to_string(),
+            "metadata": null,
+            "publish": null,
+            "authors": [],
+            "categories": [],
+            "keywords": [],
+            "readme": null,
+            "repository": null,
+            "homepage": null,
+            "documentation": null,
+            "edition": "2024",
+            "links": null,
+            "default_run": null,
+            "rust_version": null
+        })
+    }
+
+    /// Windows cargo can omit an in-workspace path dependency from
+    /// `workspace_members` when the manifest path is verbatim. Such a package
+    /// is captured with the workspace and must never be an external dependency;
+    /// a root outside the workspace must still be reported so authorization
+    /// stays fail-closed.
+    #[test]
+    fn in_workspace_path_dependency_is_not_external_without_membership() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let base = std::fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!("agz-external-paths-{}-{stamp}", std::process::id()));
+        let root = base.join("workspace");
+        std::fs::create_dir_all(&root).expect("create workspace");
+        let inside = root.join("dep");
+        std::fs::create_dir_all(&inside).expect("create workspace dependency");
+        let outside = base.join("outside-dep");
+        std::fs::create_dir_all(&outside).expect("create outside dependency");
+        let guard =
+            Arc::new(RootGuard::new([root.clone()], std::iter::empty()).expect("root guard"));
+        let authority = guard.configured_roots()[0].clone();
+        // Cargo reports ordinary drive paths while the authorized root is
+        // canonical; the in-workspace dependency must be recognized even when
+        // the two spellings differ (Windows only).
+        let inside_cargo =
+            crate::process::win32_spelling(&inside).unwrap_or_else(|| inside.clone());
+        let metadata: Metadata = serde_json::from_value(serde_json::json!({
+            "packages": [
+                package_json("inside-dep", &inside_cargo),
+                package_json("outside-dep", &outside),
+            ],
+            // Deliberately empty: simulates the Windows membership omission.
+            "workspace_members": [],
+            "workspace_default_members": [],
+            "resolve": null,
+            "workspace_root": root.display().to_string(),
+            "target_directory": root.join("target").display().to_string(),
+            "metadata": null,
+            "version": 1
+        }))
+        .expect("metadata fixture");
+
+        let paths = external_path_dependencies(&metadata, &[], &authority);
+        assert_eq!(paths.len(), 1, "{paths:?}");
+        assert_eq!(
+            super::super::canonical_spelling(&paths[0]),
+            super::super::canonical_spelling(&outside),
+            "{paths:?}"
+        );
+        // Windows: cap-std opens the authorized root without FILE_SHARE_DELETE,
+        // so the directory handle must be closed before the fixture is removed.
+        drop(authority);
+        drop(guard);
+        std::fs::remove_dir_all(&base).expect("cleanup");
     }
 }
