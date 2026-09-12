@@ -8,6 +8,43 @@ Changelog structure.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-13
+
+### Added
+
+- Four bundled Rust workflow, repair, refactor and performance skills, available
+  offline through MCP prompts/resources and `skills list/show/export`.
+- Exact workspace package and typed Cargo target selection for validation, plus
+  a `build` target for compilation and linking without running tests.
+- Execution-group and streaming test evidence for configuration-wide Cargo suites.
+
+### Fixed
+
+- Resolve authorized main checkouts, linked worktrees, package/source directories
+  and inherited/shared path dependencies consistently across compiler and source tools.
+- Refresh added/removed Cargo targets and reject stale combined verification;
+  incomplete audits no longer claim clean source.
+- Preserve Cargo feature unification and conditional target eligibility by running
+  full configurations together. Separate mapped/impact/nextest passes cannot grant
+  a full-suite result. Zero-test and opaque harness results remain inconclusive.
+- Include enabled example/bench tests and doctests while keeping ordinary example
+  compilation separate from executed-test counts.
+- Stop unrelated check/test commands from superseding one another on unchanged source.
+
+### Changed
+
+- Share the configured quiet-input window for unchanged source within one MCP
+  process without reusing completed validation evidence.
+- Remove duplicate Cargo JSON from compact responses while preserving diagnostics,
+  omissions and bounded human output; share benchmark transport helpers.
+- Advance the pre-1.0 minor version for public Rust request/evidence fields and
+  enum variants. Struct-literal consumers must include new fields or use builders;
+  exhaustive enum matches may need updating. Existing MCP required inputs remain
+  compatible, and the tool catalog remains at 20 tools.
+- Keep measured fixture gains and source/binary provenance in
+  `docs/workflow-improvement-evidence.json`; historical measurements are not claims
+  of universal speedups or measurements of the release binary.
+
 ## [0.3.0] - 2026-09-11
 
 ### Added
@@ -127,7 +164,8 @@ Changelog structure.
 - Cargo distribution through crates.io and discovery metadata for the official
   MCP Registry.
 
-[Unreleased]: https://github.com/ugur-murat-alt/agz-rust-mcp/compare/agz-rust-mcp-v0.3.0...HEAD
+[Unreleased]: https://github.com/ugur-murat-alt/agz-rust-mcp/compare/agz-rust-mcp-v0.4.0...HEAD
+[0.4.0]: https://github.com/ugur-murat-alt/agz-rust-mcp/compare/agz-rust-mcp-v0.3.0...agz-rust-mcp-v0.4.0
 [0.3.0]: https://github.com/ugur-murat-alt/agz-rust-mcp/compare/agz-rust-coder-v0.2.0...agz-rust-mcp-v0.3.0
 [0.2.0]: https://github.com/ugur-murat-alt/rust-code-mcp/compare/agz-rust-coder-v0.1.1...agz-rust-coder-v0.2.0
 [0.1.1]: https://github.com/ugur-murat-alt/rust-code-mcp/compare/agz-rust-coder-v0.1.0...agz-rust-coder-v0.1.1

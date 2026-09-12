@@ -16,7 +16,7 @@ prompt/resource ve bağımsız `skills` CLI üzerinden sunar; 20 araçlık katal
 için bu referansı kullanın. Bu araçların arkasındaki süreç modelini
 [Mimari](architecture.tr.md) açıklar.
 
-Bu belge `agz-rust-mcp` `0.3.0` sürümünün açık araç ve yapılandırma yüzeyini
+Bu belge `agz-rust-mcp` `0.4.0` sürümünün açık araç ve yapılandırma yüzeyini
 tanımlar.
 
 İstek zaman aşımı ve iptal denetimleri, Cargo öncesi ve sonrasındaki Git

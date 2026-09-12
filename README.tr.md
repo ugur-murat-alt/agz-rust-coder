@@ -43,7 +43,7 @@ Güncel kaynak dört çevrimdışı skill de içerir: `agz-rust-workflow`,
 dosya, araçlarla iş akışlarını MCP prompt/resource üzerinden sunar; ikinci bir
 MCP gerekmez. Dosya tabanlı istemciler `agz-rust-mcp skills export` kullanabilir.
 [Paketli skilller](docs/install.tr.md#paketli-skilller-güncel-kaynak) bölümüne bakın.
-Bu ek henüz yayımlanmadı; yayımlanmış `0.3.0` binary'lerinde bulunmaz.
+Paketli skilller `0.4.0` ile gelir; `0.3.0` binary'lerinde bulunmaz.
 
 Minimal OpenCode2 yapılandırması (`opencode.jsonc`):
 
@@ -105,7 +105,7 @@ Tam okuma yolunu içeren iki dilli dizin:
 | --- | --- |
 | Crate, binary, server | `agz-rust-mcp` |
 | MCP Registry | `io.github.ugur-murat-alt/agz-rust-mcp` |
-| Güncel sürüm | `0.3.0` |
+| Kaynak sürümü | `0.4.0` |
 | İlk sürüm | `0.1.0` |
 | Release tag | `agz-rust-mcp-v<version>` |
 | Rust edition / MSRV | `2024` / `1.88.0` |

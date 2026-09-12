@@ -11,7 +11,7 @@ method below installs the same `agz-rust-mcp` executable.
 
 ## Bundled skills (current source)
 
-The unreleased source bundles four versioned `SKILL.md` files inside the same
+Version `0.4.0` bundles four versioned `SKILL.md` files inside the same
 executable. They work offline and need no separate skill package or MCP server.
 `prompts/list` discovers `workflow`, `repair`, `refactor`, and `performance`;
 `prompts/get` accepts an optional `task` string (bounded to 4,000 sanitized
@@ -88,7 +88,7 @@ release page instead. Environment overrides:
 | `AGZ_RUST_MCP_INSTALL_DIR` | `$HOME/.local/bin` | Absolute install directory. |
 
 ```bash
-AGZ_RUST_MCP_VERSION=0.3.0 AGZ_RUST_MCP_INSTALL_DIR="$HOME/.local/bin" bash install.sh
+AGZ_RUST_MCP_VERSION=0.4.0 AGZ_RUST_MCP_INSTALL_DIR="$HOME/.local/bin" bash install.sh
 ```
 
 The installer also verifies the archive layout and the extracted binary's
@@ -148,7 +148,7 @@ agz-rust-mcp --version
 ```
 
 `--locked` builds with the exact dependency versions recorded in `Cargo.lock`.
-Pin a release with `cargo install agz-rust-mcp --version 0.3.0 --locked`.
+Pin a release with `cargo install agz-rust-mcp --version 0.4.0 --locked`.
 Cargo installs to `$HOME/.cargo/bin` (`%USERPROFILE%\.cargo\bin` on Windows);
 ensure that directory is on `PATH`.
 

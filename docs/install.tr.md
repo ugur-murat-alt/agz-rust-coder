@@ -13,7 +13,7 @@ Context Protocol konuşur. Aşağıdaki yöntemlerin tümü aynı `agz-rust-mcp`
 
 ## Paketli skilller (güncel kaynak)
 
-Henüz yayımlanmamış kaynak dört sürümlenmiş `SKILL.md` dosyasını aynı
+`0.4.0` sürümü dört sürümlenmiş `SKILL.md` dosyasını aynı
 çalıştırılabilir dosyada taşır. Çevrimdışı çalışırlar; ayrı skill paketi veya MCP
 sunucusu gerekmez. `prompts/list`, `workflow`, `repair`, `refactor` ve `performance`
 akışlarını listeler. `prompts/get` isteğe bağlı `task` metni kabul eder (temizlenmiş
@@ -90,7 +90,7 @@ yeniden indirin. Ortam değişkenleri:
 | `AGZ_RUST_MCP_INSTALL_DIR` | `$HOME/.local/bin` | Mutlak kurulum dizini. |
 
 ```bash
-AGZ_RUST_MCP_VERSION=0.3.0 AGZ_RUST_MCP_INSTALL_DIR="$HOME/.local/bin" bash install.sh
+AGZ_RUST_MCP_VERSION=0.4.0 AGZ_RUST_MCP_INSTALL_DIR="$HOME/.local/bin" bash install.sh
 ```
 
 Betik ayrıca arşiv düzenini ve çıkarılan binary'nin `--version` çıktısını
@@ -152,7 +152,7 @@ agz-rust-mcp --version
 ```
 
 `--locked`, `Cargo.lock` içinde kayıtlı tam bağımlılık sürümleriyle derler.
-Belirli bir sürüm için `cargo install agz-rust-mcp --version 0.3.0 --locked`
+Belirli bir sürüm için `cargo install agz-rust-mcp --version 0.4.0 --locked`
 kullanın. Cargo `$HOME/.cargo/bin` (Windows'ta `%USERPROFILE%\.cargo\bin`)
 dizinine kurar; bu dizinin `PATH` içinde olduğundan emin olun.
 
