@@ -484,7 +484,16 @@ async fn one_server_checks_real_nested_worktrees_and_member_source_directories()
     let nested = project.root.join(".worktrees/feature ü with spaces");
     git(
         &project.root,
-        &["worktree", "add", "--detach", nested.to_str().unwrap()],
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            nested
+                .strip_prefix(&project.root)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+        ],
     );
     // An unrelated parent Cargo workspace must not absorb the nested checkout.
     let service = project.service();
@@ -558,7 +567,16 @@ async fn worktree_checks_hash_authorized_shared_dependencies_under_the_parent_ro
     let nested = project.root.join(".worktrees/shared-feature");
     git(
         &project.root,
-        &["worktree", "add", "--detach", nested.to_str().unwrap()],
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            nested
+                .strip_prefix(&project.root)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+        ],
     );
 
     let mut config = Config::defaults_at(&project.root);

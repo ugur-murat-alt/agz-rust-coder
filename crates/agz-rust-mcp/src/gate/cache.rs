@@ -76,31 +76,10 @@ pub fn select_gate_cache(
         if !project_safe {
             return Err(CacheError::OutsideWorkspace(requested));
         }
-        // Only the environment handed to Cargo gets the ordinary spelling:
-        // `target_directory` itself is compared against canonical paths when
-        // excluding build artifacts from the input identity.
-        environment.insert(
-            OsString::from("CARGO_TARGET_DIR"),
-            primary_spelling(&requested).into_os_string(),
-        );
-        return Ok(CacheSelection {
-            mode: CacheMode::Project,
-            target_directory: requested,
-            environment,
-            owned: false,
-        });
+        return project_cache(&snapshot.workspace_root, &requested, environment);
     }
     if matches!(config.cache, GateCache::Auto) && project_safe {
-        environment.insert(
-            OsString::from("CARGO_TARGET_DIR"),
-            primary_spelling(&requested).into_os_string(),
-        );
-        return Ok(CacheSelection {
-            mode: CacheMode::Project,
-            target_directory: requested,
-            environment,
-            owned: false,
-        });
+        return project_cache(&snapshot.workspace_root, &requested, environment);
     }
 
     let cache_root = lexical_absolute(&config.cache_dir)?;
@@ -125,6 +104,32 @@ pub fn select_gate_cache(
         target_directory,
         environment,
         owned: true,
+    })
+}
+
+fn project_cache(
+    workspace_root: &Path,
+    requested: &Path,
+    mut environment: BTreeMap<OsString, OsString>,
+) -> Result<CacheSelection, CacheError> {
+    // Win32 aliases can only be checked for existing paths. Materialize the
+    // authorized target before choosing Cargo's spelling so a cold build and
+    // its final freshness check use the same environment identity.
+    ensure_directory(requested)?;
+    let target_directory = canonical_existing(requested)?;
+    let workspace_root = canonical_existing(workspace_root)?;
+    if !path_is_within(&workspace_root, &target_directory) || target_directory == workspace_root {
+        return Err(CacheError::OutsideWorkspace(target_directory));
+    }
+    environment.insert(
+        OsString::from("CARGO_TARGET_DIR"),
+        primary_spelling(&target_directory).into_os_string(),
+    );
+    Ok(CacheSelection {
+        mode: CacheMode::Project,
+        target_directory,
+        environment,
+        owned: false,
     })
 }
 
@@ -271,4 +276,49 @@ fn hash_path(path: &Path) -> String {
         name.push_str(&format!("{byte:02x}"));
     }
     name
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_cache_is_ready_before_cargo_and_keeps_its_spelling() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("agz-project-cache-{}-{stamp}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let requested = root.join("build output");
+        let result = || {
+            let first = project_cache(&root, &requested, BTreeMap::new()).unwrap();
+            assert!(
+                first.target_directory.is_dir(),
+                "materialize the target before choosing the Win32 Cargo spelling"
+            );
+            let cargo_path = PathBuf::from(&first.environment[OsStr::new("CARGO_TARGET_DIR")]);
+            assert_eq!(
+                fs::canonicalize(cargo_path).unwrap(),
+                first.target_directory
+            );
+            fs::write(first.target_directory.join("build-artifact"), b"output").unwrap();
+            let second = project_cache(&root, &requested, BTreeMap::new()).unwrap();
+            assert_eq!(first.target_directory, second.target_directory);
+            assert_eq!(first.environment, second.environment);
+            #[cfg(windows)]
+            assert!(
+                !first.environment[OsStr::new("CARGO_TARGET_DIR")]
+                    .to_string_lossy()
+                    .starts_with(r"\\?\")
+            );
+        };
+        let outcome = std::panic::catch_unwind(result);
+        fs::remove_dir_all(root).unwrap();
+        if let Err(error) = outcome {
+            std::panic::resume_unwind(error);
+        }
+    }
 }

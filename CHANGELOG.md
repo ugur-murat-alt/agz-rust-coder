@@ -30,6 +30,8 @@ Changelog structure.
 - Include enabled example/bench tests and doctests while keeping ordinary example
   compilation separate from executed-test counts.
 - Stop unrelated check/test commands from superseding one another on unchanged source.
+- Keep Windows target path identities stable across cold builds and final freshness
+  checks, avoiding false stale results when Cargo first creates its output directory.
 
 ### Changed
 
