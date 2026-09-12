@@ -26,8 +26,11 @@
     "work"
   ],
   "prompts": [
-    "workflow"
+    "workflow",
+    "repair",
+    "refactor",
+    "performance"
   ],
-  "resource_count": 4,
+  "resource_count": 8,
   "provider_requests": 0
 }

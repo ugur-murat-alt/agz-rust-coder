@@ -21,6 +21,7 @@ use super::{
 const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(500);
 const DEFAULT_HARD_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_HEARTBEAT: Duration = Duration::from_secs(8);
+const MAX_DEBOUNCE_ROOTS: usize = 256;
 #[cfg(target_os = "linux")]
 const RESOURCE_MEMORY_PATH: &str = "/proc/meminfo";
 
@@ -231,6 +232,7 @@ struct JobState {
     identity_key: String,
     generation: u64,
     requested_at: Instant,
+    debounce_until: Instant,
     cancellation: CancellationToken,
     cancel_reason: Mutex<Option<CancelReason>>,
     subscribers: AtomicUsize,
@@ -415,7 +417,56 @@ impl Drop for JobSubscription {
 struct SchedulerState {
     generations: BTreeMap<PathBuf, u64>,
     jobs: BTreeMap<String, Arc<JobState>>,
+    debounce_windows: BTreeMap<PathBuf, DebounceWindow>,
     closing: bool,
+}
+
+#[derive(Debug)]
+struct DebounceWindow {
+    identity_key: String,
+    ready_at: Instant,
+    touched_at: Instant,
+}
+
+impl SchedulerState {
+    /// One quiet-input window per workspace source state, shared by distinct
+    /// commands. Remembering a settled window never reuses completed evidence.
+    fn debounce_until(
+        &mut self,
+        root: &Path,
+        identity_key: &str,
+        now: Instant,
+        debounce: Duration,
+    ) -> Instant {
+        if let Some(window) = self.debounce_windows.get_mut(root) {
+            window.touched_at = now;
+            if window.identity_key != identity_key {
+                window.identity_key = identity_key.to_owned();
+                window.ready_at = now + debounce;
+            }
+            return window.ready_at;
+        }
+        if self.debounce_windows.len() >= MAX_DEBOUNCE_ROOTS {
+            let oldest = self
+                .debounce_windows
+                .iter()
+                .min_by_key(|(_, window)| window.touched_at)
+                .map(|(root, _)| root.clone());
+            if let Some(oldest) = oldest {
+                self.debounce_windows.remove(&oldest);
+            }
+        }
+        let ready_at = now + debounce;
+        self.debounce_windows.insert(
+            root.to_owned(),
+            DebounceWindow {
+                identity_key: identity_key.to_owned(),
+                ready_at,
+                touched_at: now,
+            },
+        );
+        ready_at
+    }
 }
 
 #[derive(Clone)]
@@ -465,6 +516,7 @@ impl GateScheduler {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.debounce_windows.remove(&root);
         let generation = {
             let generation = state.generations.entry(root.clone()).or_insert(0);
             *generation = generation.saturating_add(1);
@@ -591,6 +643,8 @@ impl GateScheduler {
                 });
             }
             let progress = ProgressHub::new(requested_at);
+            let debounce_until =
+                state.debounce_until(&root, &identity_key, Instant::now(), self.options.debounce);
             let job = Arc::new(JobState {
                 id: make_job_id(),
                 root: root.clone(),
@@ -598,6 +652,7 @@ impl GateScheduler {
                 identity_key,
                 generation,
                 requested_at,
+                debounce_until,
                 cancellation: CancellationToken::new(),
                 cancel_reason: Mutex::new(None),
                 subscribers: AtomicUsize::new(0),
@@ -657,7 +712,7 @@ where
         + 'static,
 {
     let deadline = job.requested_at + options.hard_timeout;
-    wait_debounce(options.debounce, deadline, &job.cancellation)
+    wait_debounce(job.debounce_until, deadline, &job.cancellation)
         .await
         .map_err(|error| cancellation_error(job, error))?;
     let lease_root = options.lease_dir.join("worktrees");
@@ -760,10 +815,11 @@ async fn wait_for_job(job: &JobState) {
 }
 
 async fn wait_debounce(
-    debounce: Duration,
+    debounce_until: Instant,
     deadline: Instant,
     cancellation: &CancellationToken,
 ) -> Result<(), SchedulerError> {
+    let debounce = debounce_until.saturating_duration_since(Instant::now());
     if debounce.is_zero() {
         if cancellation.is_cancelled() {
             return Err(SchedulerError::Cancelled);
@@ -903,6 +959,74 @@ mod scheduler_tests {
     use super::*;
     use crate::gate::types::{GateAuthority, GateRequest, GateStatus, GateTargetId};
 
+    #[test]
+    fn stable_source_shares_a_window_and_changed_source_rearms_it() {
+        let mut state = SchedulerState::default();
+        let root = Path::new("workspace");
+        let now = Instant::now();
+        let debounce = Duration::from_millis(500);
+        let first = state.debounce_until(root, "source-1", now, debounce);
+        assert_eq!(first, now + debounce);
+        let during = now + Duration::from_millis(200);
+        assert_eq!(
+            state.debounce_until(root, "source-1", during, debounce),
+            first
+        );
+        let settled = now + Duration::from_secs(1);
+        assert!(state.debounce_until(root, "source-1", settled, debounce) < settled);
+        assert_eq!(
+            state.debounce_until(root, "source-2", settled, debounce),
+            settled + debounce
+        );
+        let other = Path::new("other-worktree");
+        assert_eq!(
+            state.debounce_until(other, "source-1", settled, debounce),
+            settled + debounce
+        );
+    }
+
+    #[test]
+    fn debounce_history_is_bounded_and_eviction_restarts_a_full_window() {
+        let mut state = SchedulerState::default();
+        let now = Instant::now();
+        let debounce = Duration::from_millis(500);
+        for index in 0..=MAX_DEBOUNCE_ROOTS {
+            state.debounce_until(
+                Path::new(&format!("root-{index}")),
+                "source",
+                now + Duration::from_millis(index as u64),
+                debounce,
+            );
+        }
+        assert_eq!(state.debounce_windows.len(), MAX_DEBOUNCE_ROOTS);
+        assert!(!state.debounce_windows.contains_key(Path::new("root-0")));
+        let later = now + Duration::from_secs(5);
+        assert_eq!(
+            state.debounce_until(Path::new("root-0"), "source", later, debounce),
+            later + debounce
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_and_deadline_apply_during_a_shared_window() {
+        let now = Instant::now();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        assert_eq!(
+            wait_debounce(
+                now + Duration::from_secs(1),
+                now + Duration::from_secs(2),
+                &cancellation
+            )
+            .await,
+            Err(SchedulerError::Cancelled)
+        );
+        assert_eq!(
+            wait_debounce(now + Duration::from_secs(1), now, &CancellationToken::new()).await,
+            Err(SchedulerError::TimedOut)
+        );
+    }
+
     fn retained_job(root: &Path, key: &str, identity_key: &str) -> Arc<JobState> {
         Arc::new(JobState {
             id: "retained".to_owned(),
@@ -911,6 +1035,7 @@ mod scheduler_tests {
             identity_key: identity_key.to_owned(),
             generation: 0,
             requested_at: Instant::now(),
+            debounce_until: Instant::now(),
             cancellation: CancellationToken::new(),
             cancel_reason: Mutex::new(None),
             subscribers: AtomicUsize::new(0),

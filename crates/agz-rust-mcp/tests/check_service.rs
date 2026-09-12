@@ -89,6 +89,224 @@ impl TestProject {
 }
 
 #[tokio::test]
+async fn build_target_checks_linking_for_the_selected_example() {
+    use agz_rust_mcp::gate::{CargoTargetSelection, ValidationOptions};
+    let project = TestProject::new("build-example", "pub fn value() {}\n", None);
+    fs::create_dir(project.root.join("examples")).unwrap();
+    fs::write(project.root.join("examples/demo.rs"), "fn main() {}\n").unwrap();
+    fs::create_dir(project.root.join(".cargo")).unwrap();
+    fs::write(
+        project.root.join(".cargo/config.toml"),
+        "[build]\nrustflags=[\"-C\",\"linker=agz-missing-linker-for-build-test\"]\n",
+    )
+    .unwrap();
+    let service = project.service();
+    let options = ValidationOptions {
+        packages: vec!["check-fixture".to_owned()],
+        cargo_target: Some(CargoTargetSelection::Example {
+            name: "demo".to_owned(),
+        }),
+        ..Default::default()
+    };
+    let checked = service
+        .run(
+            GateRequest::new(&project.root, GateTargetId::Check).with_options(options.clone()),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(checked.status, GateStatus::FastPass, "{checked:#?}");
+    let built = service
+        .run(
+            GateRequest::new(&project.root, GateTargetId::Build).with_options(options),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(built.status, GateStatus::Fail, "{built:#?}");
+    assert_eq!(built.scope.strategy, GateScopeStrategy::Explicit);
+    assert!(
+        built.steps[0].command.contains(" build ")
+            && built.steps[0].command.contains("--example demo")
+    );
+    service.close().await;
+}
+
+#[tokio::test]
+async fn explicit_scope_runs_the_selected_test_despite_unrequested_target_failures() {
+    use agz_rust_mcp::gate::{CargoTargetSelection, ValidationOptions};
+    let project = TestProject::new("explicit-scope", "pub fn value() -> u8 { 7 }\n", None);
+    let manifest = project.root.join("Cargo.toml");
+    fs::write(
+        &manifest,
+        fs::read_to_string(&manifest).unwrap().replace(
+            "[workspace]",
+            "[workspace]\nmembers=[\"sibling\"]\n\n[features]\nchosen=[]",
+        ),
+    )
+    .unwrap();
+    fs::create_dir_all(project.root.join("sibling/src")).unwrap();
+    fs::write(
+        project.root.join("sibling/Cargo.toml"),
+        "[package]\nname=\"unrequested\"\nversion=\"0.1.0\"\nedition=\"2024\"\n",
+    )
+    .unwrap();
+    fs::write(
+        project.root.join("sibling/src/lib.rs"),
+        "compile_error!(\"unrequested package\");\n",
+    )
+    .unwrap();
+    let lock = project.root.join("Cargo.lock");
+    fs::write(
+        &lock,
+        format!(
+            "{}\n[[package]]\nname=\"unrequested\"\nversion=\"0.1.0\"\n",
+            fs::read_to_string(&lock).unwrap()
+        ),
+    )
+    .unwrap();
+    fs::create_dir_all(project.root.join("tests")).unwrap();
+    fs::write(project.root.join("tests/focused.rs"),
+        "#[cfg(feature=\"chosen\")]\n#[test]\nfn scope_focus() { assert_eq!(check_fixture::value(), 7); }\n").unwrap();
+    fs::write(
+        project.root.join("tests/unrelated.rs"),
+        "compile_error!(\"unrequested target\");\n",
+    )
+    .unwrap();
+    let service = project.service_with_scope(ConfigGateScope::Affected);
+    let broad = service
+        .run(
+            GateRequest::new(&project.root, GateTargetId::Test),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(broad.status, GateStatus::Fail, "{broad:#?}");
+    for (stage, cargo_target) in [
+        (GateTargetId::Check, None),
+        (GateTargetId::Clippy, Some(CargoTargetSelection::Lib {})),
+    ] {
+        let scoped = service
+            .run(
+                GateRequest::new(&project.root, stage).with_options(ValidationOptions {
+                    packages: vec!["check-fixture".into()],
+                    cargo_target,
+                    ..Default::default()
+                }),
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(scoped.status, GateStatus::FastPass, "{scoped:#?}");
+        assert_eq!(scoped.scope.packages, ["check-fixture"]);
+        assert!(!scoped.steps[0].command.contains("--workspace"));
+    }
+    let options = ValidationOptions {
+        packages: vec!["check-fixture".into()],
+        cargo_target: Some(CargoTargetSelection::Test {
+            name: "focused".into(),
+        }),
+        features: vec!["chosen".into()],
+        test_filter: Some("scope_focus".into()),
+        ..Default::default()
+    };
+    let selected = service
+        .run(
+            GateRequest::new(project.root.join("src"), GateTargetId::Test)
+                .with_options(options.clone()),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(selected.status, GateStatus::FastPass, "{selected:#?}");
+    assert_eq!(selected.authority, GateAuthority::Fast);
+    assert_eq!(selected.scope.strategy, GateScopeStrategy::Explicit);
+    assert_eq!(selected.scope.packages, ["check-fixture"]);
+    assert_eq!(selected.steps[0].evidence.tests_executed, Some(1));
+    assert!(selected.steps[0].command.contains("--test focused"));
+    assert!(!selected.steps[0].command.contains("--all-targets"));
+    assert!(!selected.steps[0].command.contains("--workspace"));
+    assert_eq!(selected.profile.as_ref().unwrap().options, options);
+    assert_ne!(selected.command_hash, broad.command_hash);
+    let broken = service
+        .run(
+            GateRequest::new(&project.root, GateTargetId::Test).with_options(ValidationOptions {
+                cargo_target: Some(CargoTargetSelection::Test {
+                    name: "unrelated".into(),
+                }),
+                ..options
+            }),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(broken.status, GateStatus::Fail, "{broken:#?}");
+    assert_ne!(selected.command_hash, broken.command_hash);
+    service.close().await;
+}
+
+#[tokio::test]
+async fn invalid_explicit_scope_never_falls_back_to_a_workspace_build() {
+    use agz_rust_mcp::gate::{CargoTargetSelection, ValidationOptions};
+    let project = TestProject::new("invalid-selection", "pub fn value() {}\n", None);
+    let service = project.service();
+    for (target, package, cargo_target) in [
+        (GateTargetId::All, "check-fixture", None),
+        (GateTargetId::Fmt, "check-fixture", None),
+        (GateTargetId::Check, "missing", None),
+        (GateTargetId::Check, "check-*", None),
+        (
+            GateTargetId::Test,
+            "check-fixture",
+            Some(CargoTargetSelection::Test {
+                name: "missing".into(),
+            }),
+        ),
+        (
+            GateTargetId::Doc,
+            "check-fixture",
+            Some(CargoTargetSelection::Lib {}),
+        ),
+    ] {
+        let evidence = service
+            .run(
+                GateRequest::new(&project.root, target).with_options(ValidationOptions {
+                    packages: vec![package.into()],
+                    cargo_target,
+                    ..Default::default()
+                }),
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(evidence.status, GateStatus::Inconclusive, "{evidence:#?}");
+        assert_eq!(evidence.authority, GateAuthority::None);
+        assert!(
+            evidence.steps.is_empty(),
+            "invalid selection compiled: {evidence:#?}"
+        );
+    }
+    let empty_test = service
+        .run(
+            GateRequest::new(&project.root, GateTargetId::Test).with_options(ValidationOptions {
+                packages: vec!["check-fixture".into()],
+                cargo_target: Some(CargoTargetSelection::Lib {}),
+                ..Default::default()
+            }),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(
+        empty_test.status,
+        GateStatus::Inconclusive,
+        "{empty_test:#?}"
+    );
+    assert_eq!(empty_test.steps[0].evidence.tests_executed, Some(0));
+    service.close().await;
+}
+
+#[tokio::test]
 async fn check_scope_applies_workspace_shadow_and_affected_contracts() {
     let project = TestProject::new("scope", "pub fn value() -> usize { 1 }\n", None);
     let affected = project.service_with_scope(ConfigGateScope::Affected);
@@ -233,6 +451,186 @@ async fn active_identical_requests_singleflight_but_completed_pass_is_not_reused
     let later = service.run(request, None, None).await;
     assert_eq!(later.status, GateStatus::FastPass);
     assert_ne!(later.job_id, first.job_id);
+    service.close().await;
+}
+
+#[tokio::test]
+async fn compact_failing_test_keeps_human_panic_evidence() {
+    let project = TestProject::new(
+        "compact-panic",
+        "#[test]\nfn broken() { panic!(\"expected useful panic evidence\"); }\n",
+        None,
+    );
+    let service = project.service();
+    let evidence = service
+        .run(
+            GateRequest::new(&project.root, GateTargetId::Test),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(evidence.status, GateStatus::Fail, "{evidence:#?}");
+    let step = &evidence.steps[0];
+    assert_eq!(step.evidence.tests_executed, Some(1));
+    assert!(step.stdout.contains("expected useful panic evidence"));
+    assert!(!step.stdout.contains("compiler-artifact"));
+    assert!(step.tail.is_empty());
+    service.close().await;
+}
+
+#[tokio::test]
+async fn one_server_checks_real_nested_worktrees_and_member_source_directories() {
+    let project = TestProject::new("worktree-paths", "pub fn value() -> u8 { 1 }\n", None);
+    let nested = project.root.join(".worktrees/feature ü with spaces");
+    git(
+        &project.root,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            nested
+                .strip_prefix(&project.root)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+        ],
+    );
+    // An unrelated parent Cargo workspace must not absorb the nested checkout.
+    let service = project.service();
+    let main = service
+        .run(
+            GateRequest::new(&project.root, GateTargetId::Check),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(main.status, GateStatus::FastPass, "{main:#?}");
+    let worktree = service
+        .run(
+            GateRequest::new(nested.join("src"), GateTargetId::Check),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(worktree.status, GateStatus::FastPass, "{worktree:#?}");
+    assert_eq!(worktree.workspace_root, Some(nested.clone()));
+    assert_ne!(main.job_id, worktree.job_id);
+    assert_ne!(
+        main.build.as_ref().unwrap().target_directory,
+        worktree.build.as_ref().unwrap().target_directory
+    );
+    fs::write(
+        nested.join("src/lib.rs"),
+        "pub fn value() -> u8 { \"broken\" }\n",
+    )
+    .unwrap();
+    let broken = service
+        .run(GateRequest::new(&nested, GateTargetId::Check), None, None)
+        .await;
+    assert_eq!(broken.status, GateStatus::Fail, "{broken:#?}");
+    let main_again = service
+        .run(
+            GateRequest::new(&project.root, GateTargetId::Check),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(main_again.status, GateStatus::FastPass, "{main_again:#?}");
+    service.close().await;
+}
+
+#[tokio::test]
+async fn worktree_checks_hash_authorized_shared_dependencies_under_the_parent_root() {
+    let project = TestProject::new(
+        "worktree-shared",
+        "pub fn value() -> u8 { shared::value() }\n",
+        None,
+    );
+    let shared = project.root.join("shared");
+    fs::create_dir_all(shared.join("src")).unwrap();
+    fs::write(
+        shared.join("Cargo.toml"),
+        "[package]\nname='shared'\nversion='0.1.0'\nedition='2024'\n[workspace]\n",
+    )
+    .unwrap();
+    fs::write(shared.join("src/lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
+    fs::write(project.root.join("Cargo.toml"), format!(
+        "[package]\nname='check-fixture'\nversion='0.1.0'\nedition='2024'\n[workspace]\nexclude=['shared']\n[dependencies]\nshared={{path={}}}\n",
+        toml::Value::String(shared.to_string_lossy().into_owned())
+    )).unwrap();
+    fs::write(project.root.join("Cargo.lock"), "version=4\n[[package]]\nname='check-fixture'\nversion='0.1.0'\ndependencies=['shared']\n[[package]]\nname='shared'\nversion='0.1.0'\n").unwrap();
+    git(&project.root, &["add", "."]);
+    git(
+        &project.root,
+        &["commit", "--quiet", "-m", "shared dependency fixture"],
+    );
+    let nested = project.root.join(".worktrees/shared-feature");
+    git(
+        &project.root,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            nested
+                .strip_prefix(&project.root)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+        ],
+    );
+
+    let mut config = Config::defaults_at(&project.root);
+    config.server.allow_dependency_roots = vec![shared.clone()];
+    config.gate.cache_dir = project.state.join("cache");
+    config.gate.lease_dir = project.state.join("leases");
+    config.gate.hard_timeout_ms = 60_000;
+    config.gate.debounce_ms = 10;
+    let guard = Arc::new(RootGuard::new([project.root.clone()], [shared.clone()]).unwrap());
+    let service = CheckService::new(config, guard);
+    let request = GateRequest::new(nested.join("src"), GateTargetId::Check);
+    let first = service.run(request.clone(), None, None).await;
+    assert_eq!(first.status, GateStatus::FastPass, "{first:#?}");
+    fs::write(shared.join("src/lib.rs"), "pub fn value() -> u8 { 2 }\n").unwrap();
+    let changed = service.run(request.clone(), None, None).await;
+    assert_eq!(changed.status, GateStatus::FastPass, "{changed:#?}");
+    assert_ne!(
+        first.input_hash, changed.input_hash,
+        "shared dependency changes must enter the worktree input identity"
+    );
+    fs::write(
+        shared.join("src/lib.rs"),
+        "pub fn value() -> u8 { \"broken\" }\n",
+    )
+    .unwrap();
+    let broken = service.run(request, None, None).await;
+    assert_eq!(broken.status, GateStatus::Fail, "{broken:#?}");
+    service.close().await;
+}
+
+#[tokio::test]
+async fn source_directory_checks_without_git_hash_the_whole_workspace() {
+    let project = TestProject::new("no-git-subdir", "pub fn value() -> u8 { 1 }\n", None);
+    fs::remove_dir_all(project.root.join(".git")).unwrap();
+    fs::write(
+        project.root.join("build.rs"),
+        "fn main() { println!(\"cargo:rustc-cfg=first\"); }\n",
+    )
+    .unwrap();
+    let service = project.service();
+    let request = GateRequest::new(project.root.join("src"), GateTargetId::Check);
+    let before = service.run(request.clone(), None, None).await;
+    assert_eq!(before.status, GateStatus::FastPass, "{before:#?}");
+    fs::write(
+        project.root.join("build.rs"),
+        "fn main() { println!(\"cargo:rustc-cfg=other\"); }\n",
+    )
+    .unwrap();
+    let after = service.run(request, None, None).await;
+    assert_eq!(after.status, GateStatus::FastPass, "{after:#?}");
+    assert_ne!(
+        before.input_hash, after.input_hash,
+        "build.rs outside the requested src directory is a workspace input"
+    );
     service.close().await;
 }
 
@@ -511,6 +909,67 @@ async fn different_root_epochs_do_not_join_an_active_job() {
     assert_eq!(second.status, GateStatus::FastPass, "{second:#?}");
     assert_ne!(first.job_id, second.job_id);
     service.close().await;
+}
+
+#[tokio::test]
+async fn different_validation_profiles_do_not_supersede_unchanged_source() {
+    let project = TestProject::new(
+        "concurrent-profiles",
+        "#[test] fn exact_test() { assert_eq!(2 + 2, 4); }\n",
+        None,
+    );
+    let ready = project.state.join("ready");
+    let release = project.state.join("release");
+    fs::write(project.root.join("build.rs"), format!(
+        "fn main() {{ std::fs::write({ready:?}, b\"ready\").unwrap(); let start = std::time::Instant::now(); while !std::path::Path::new({release:?}).exists() {{ assert!(start.elapsed() < std::time::Duration::from_secs(45)); std::thread::sleep(std::time::Duration::from_millis(10)); }} }}\n"
+    )).expect("write bounded build barrier");
+    let service = project.service();
+    let first = {
+        let service = Arc::clone(&service);
+        let root = project.root.clone();
+        tokio::spawn(async move {
+            service
+                .run(GateRequest::new(root, GateTargetId::Check), None, None)
+                .await
+        })
+    };
+    let started = tokio::time::timeout(Duration::from_secs(30), async {
+        while !ready.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if started.is_err() {
+        fs::write(&release, b"release").unwrap();
+        service.close().await;
+        panic!("first Cargo build never reached the barrier");
+    }
+    let second = {
+        let service = Arc::clone(&service);
+        let root = project.root.clone();
+        tokio::spawn(async move {
+            service
+                .run(GateRequest::new(root, GateTargetId::Test), None, None)
+                .await
+        })
+    };
+    let submitted = tokio::time::timeout(Duration::from_secs(20), async {
+        while service.active_count() < 2 && !first.is_finished() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    fs::write(&release, b"release").expect("release queued profiles");
+    let first = first.await.expect("first profile");
+    let second = second.await.expect("second profile");
+    service.close().await;
+    submitted.expect("second profile reaches scheduler");
+    assert_eq!(first.status, GateStatus::FastPass, "{first:#?}");
+    assert_eq!(second.status, GateStatus::FastPass, "{second:#?}");
+    assert_eq!(second.steps[0].evidence.tests_executed, Some(1));
+    assert_ne!(first.command_hash, second.command_hash);
+    assert_ne!(first.input_hash, second.input_hash);
+    assert_ne!(first.job_id, second.job_id);
 }
 
 #[tokio::test]

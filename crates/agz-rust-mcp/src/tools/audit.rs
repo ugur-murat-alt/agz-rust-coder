@@ -426,7 +426,7 @@ impl AuditService {
         let mut total_bytes = 0u64;
         while let Some((relative, depth)) = pending.pop() {
             check_cancellation(cancellation)?;
-            let entries = match root.list_directory(&relative) {
+            let entries = match root.requested_authority().list_directory(&relative) {
                 Ok(entries) => entries,
                 Err(_) => {
                     push_skip(&mut summary, relative, AuditSkipReason::Unreadable);
@@ -465,7 +465,10 @@ impl AuditService {
                             push_skip(&mut summary, child, AuditSkipReason::FileLimit);
                             continue;
                         }
-                        let bytes = match root.read_file(&child, self.limits.max_file_bytes) {
+                        let bytes = match root
+                            .requested_authority()
+                            .read_file(&child, self.limits.max_file_bytes)
+                        {
                             Ok(bytes) => bytes,
                             Err(error) => {
                                 let reason = skip_reason_for_root_error(&error);
@@ -530,7 +533,10 @@ impl AuditService {
         cancellation: Option<&AuditCancellation>,
     ) -> Result<(), AuditError> {
         check_cancellation(cancellation)?;
-        let bytes = match root.read_file(&path, self.limits.max_file_bytes) {
+        let bytes = match root
+            .requested_authority()
+            .read_file(&path, self.limits.max_file_bytes)
+        {
             Ok(bytes) => bytes,
             Err(error) => {
                 push_skip(summary, path, skip_reason_for_root_error(&error));

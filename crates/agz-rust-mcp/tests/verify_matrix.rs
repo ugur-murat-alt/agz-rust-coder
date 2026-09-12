@@ -281,6 +281,46 @@ fn cell<'a>(outcome: &'a VerifyOutcome, id_part: &str) -> &'a agz_rust_mcp::tool
 }
 
 #[tokio::test]
+async fn build_matrix_stage_detects_linker_failures_after_a_successful_check() {
+    let project = TestProject::new("build-stage", "", "pub fn value() {}\n");
+    fs::write(project.root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    fs::create_dir(project.root.join(".cargo")).unwrap();
+    fs::write(
+        project.root.join(".cargo/config.toml"),
+        "[build]\nrustflags=[\"-C\",\"linker=agz-missing-linker-for-matrix-test\"]\n",
+    )
+    .unwrap();
+    let outcome = project
+        .service()
+        .execute(
+            request(
+                VerifyAction::MatrixRun,
+                &project.root,
+                RequiredConfigurations {
+                    include_default: true,
+                    include_no_default: false,
+                    include_policy: false,
+                    stages: vec![VerifyStage::Check, VerifyStage::Build],
+                    ..Default::default()
+                },
+                check_only_budget(2),
+            ),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(outcome.cells.len(), 2, "{outcome:#?}");
+    assert_eq!(cell(&outcome, "--check").status, "PASS");
+    assert_eq!(cell(&outcome, "--build").status, "FAIL");
+    assert!(!cell(&outcome, "--build").test_execution_claimed);
+    assert_ne!(
+        cell(&outcome, "--check").command_hash,
+        cell(&outcome, "--build").command_hash
+    );
+    assert!(!outcome.all_pass);
+}
+
+#[tokio::test]
 async fn default_pass_and_no_default_failure_are_distinct_and_bound() {
     let project = TestProject::new(
         "default",

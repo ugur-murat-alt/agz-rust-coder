@@ -5,9 +5,11 @@ pub mod cache;
 pub mod lease;
 pub mod profile;
 pub mod scheduler;
+pub(crate) mod selection;
 pub mod targets;
 pub mod types;
 pub use profile::{TestRunner, ValidationOptions};
+pub use selection::CargoTargetSelection;
 
 pub use cache::{CacheMode, CacheSelection, select_gate_cache};
 pub use scheduler::{

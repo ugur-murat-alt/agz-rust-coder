@@ -87,7 +87,7 @@ fn semantic_annotations_are_conservative_when_workspace_code_is_allowed() {
 }
 
 #[test]
-fn rust_inputs_preserve_legacy_fields_and_add_only_optional_check_options() {
+fn rust_inputs_preserve_legacy_fields_with_documented_optional_options_and_build_target() {
     let reference: BTreeMap<String, Value> =
         serde_json::from_str(include_str!("../../../tests/reference/tool-schemas.json"))
             .expect("legacy schema fixture is valid JSON");
@@ -126,6 +126,24 @@ fn rust_inputs_preserve_legacy_fields_and_add_only_optional_check_options() {
 
         for property in property_names(expected) {
             if expected["properties"][&property].get("enum").is_some() {
+                if property == "target" && matches!(tool.name.as_ref(), "check" | "change") {
+                    let mut values = enum_values(&actual, &property)
+                        .as_array()
+                        .expect("target enum")
+                        .clone();
+                    let build = values
+                        .iter()
+                        .position(|value| value == "build")
+                        .expect("additive build target");
+                    values.remove(build);
+                    assert_eq!(
+                        Value::Array(values),
+                        *enum_values(expected, &property),
+                        "{} preserves every legacy target in order",
+                        tool.name
+                    );
+                    continue;
+                }
                 assert_eq!(
                     enum_values(&actual, &property),
                     enum_values(expected, &property),

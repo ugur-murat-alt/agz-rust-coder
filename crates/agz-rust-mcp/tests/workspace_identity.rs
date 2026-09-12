@@ -138,6 +138,40 @@ fn identity_hashes_source_and_changed_paths_with_a_complete_git_probe() {
 }
 
 #[test]
+fn source_identity_is_shared_across_profiles_but_full_identity_is_not() {
+    let root = TestDir::new("profile-source");
+    let workspace = workspace(&root);
+    let git = FakeGit {
+        status: 128,
+        head: Vec::new(),
+        changed: Vec::new(),
+        truncated: false,
+    };
+    let mut input = identity_input(&root, &workspace, &git, IdentityLimits::default());
+    let check = compute_input_identity(&input).expect("check identity");
+    let command = [OsString::from("test"), OsString::from("--lib")];
+    input.command = &command;
+    let test = compute_input_identity(&input).expect("test identity");
+    assert_eq!(check.source_hash, test.source_hash);
+    assert_ne!(check.hash, test.hash);
+    assert_ne!(check.command_hash, test.command_hash);
+    let mut environment = input.environment.clone();
+    environment.insert(
+        OsString::from("RUSTFLAGS"),
+        OsString::from("-C opt-level=1"),
+    );
+    input.environment = &environment;
+    let optimized = compute_input_identity(&input).expect("profile environment identity");
+    assert_eq!(test.source_hash, optimized.source_hash);
+    assert_ne!(test.hash, optimized.hash);
+    assert_ne!(test.environment_hash, optimized.environment_hash);
+    fs::write(root.path().join("src/lib.rs"), "pub fn changed() {}\n").unwrap();
+    let changed = compute_input_identity(&input).expect("changed source identity");
+    assert_ne!(optimized.source_hash, changed.source_hash);
+    assert_ne!(optimized.hash, changed.hash);
+}
+
+#[test]
 fn identity_budget_exhaustion_is_incomplete_and_never_silent() {
     let root = TestDir::new("budget");
     fs::write(root.path().join("changed.txt"), b"changed").expect("write changed file");

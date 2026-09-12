@@ -432,6 +432,7 @@ impl ProfileService {
         let run_cancel = cancellation.child_token();
         let timer = spawn_budget_timer(run_cancel.clone(), deadline);
         let gate_request = GateRequest {
+            cargo_test_defaults: false,
             options: request.options.clone(),
             directory: request.directory.clone(),
             toolchain: None,

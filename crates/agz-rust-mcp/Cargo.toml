@@ -11,7 +11,7 @@ homepage.workspace = true
 readme = "README.md"
 keywords = ["mcp", "rust", "rust-analyzer", "cargo", "developer-tools"]
 categories = ["development-tools"]
-include = ["src/**", "Cargo.toml", "README.md", "LICENSE"]
+include = ["src/**", "skills/**", "Cargo.toml", "README.md", "LICENSE"]
 
 [lib]
 name = "agz_rust_mcp"

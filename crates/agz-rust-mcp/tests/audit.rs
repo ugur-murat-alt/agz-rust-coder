@@ -163,6 +163,39 @@ fn fixture_audit_matches_the_reference_patterns_and_skips_generated_code() {
 }
 
 #[test]
+fn audit_paths_and_tree_are_relative_to_the_selected_directory() {
+    let projects = TestRoot::new("selected-dir");
+    projects.write("src/lib.rs", "pub fn parent() {}\n");
+    projects.write(
+        "worktree ü/src/lib.rs",
+        "pub fn selected() { let _ = Some(1).unwrap(); }\n",
+    );
+    let guard = RootGuard::new([projects.path().to_owned()], std::iter::empty()).unwrap();
+    let snapshot = guard.snapshot(ClientRoots::unsupported()).unwrap();
+    let selected = snapshot
+        .select(Some(&projects.path().join("worktree ü")))
+        .unwrap();
+    let service = AuditService::default();
+    let file = service
+        .audit(&AuditRequest::new(&selected).with_path("src/lib.rs"))
+        .unwrap();
+    let tree = service.audit(&AuditRequest::new(&selected)).unwrap();
+    assert_eq!(file.scanned_files, 1);
+    assert_eq!(tree.scanned_files, 1, "must not scan the configured parent");
+    assert!(!file.findings.is_empty());
+    assert_eq!(file.findings, tree.findings);
+    assert_eq!(file.findings[0].file, Path::new("src/lib.rs"));
+    let src = snapshot
+        .select(Some(&projects.path().join("worktree ü/src")))
+        .unwrap();
+    let from_src = service
+        .audit(&AuditRequest::new(&src).with_path("lib.rs"))
+        .unwrap();
+    assert_eq!(from_src.scanned_files, 1);
+    assert!(!from_src.findings.is_empty());
+}
+
+#[test]
 fn masker_ignores_comments_strings_raw_strings_and_test_modules() {
     let root = TestRoot::new("masking");
     root.write(

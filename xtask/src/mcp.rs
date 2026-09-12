@@ -113,7 +113,18 @@ pub async fn protocol_smoke(root: &Path) -> Result<ProtocolEvidence> {
     }
 
     let prompts = client.peer().list_prompts(None).await?;
-    if prompts.prompts.len() != fixture["prompts"].as_array().map_or(0, Vec::len) {
+    let prompt_names: Vec<_> = prompts
+        .prompts
+        .iter()
+        .map(|prompt| prompt.name.as_str())
+        .collect();
+    let expected_prompts: Vec<_> = fixture["prompts"]
+        .as_array()
+        .context("protocol fixture prompt names")?
+        .iter()
+        .map(|name| name.as_str().context("prompt name must be a string"))
+        .collect::<Result<_>>()?;
+    if prompt_names != expected_prompts {
         bail!("MCP prompt catalog does not match the frozen protocol fixture");
     }
     let resources = client.peer().list_resources(None).await?;

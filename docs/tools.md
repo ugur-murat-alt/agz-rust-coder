@@ -7,7 +7,7 @@ and operate it. [Architecture](architecture.md) explains the process model
 behind these tools.
 
 This document defines the public tool and configuration surface of
-`agz-rust-mcp` `0.3.0`.
+`agz-rust-mcp` `0.4.0`.
 
 Request deadlines and cancellation also cover Git probes and input-identity
 collection before and after Cargo. Git subprocesses use the shared process
@@ -41,11 +41,48 @@ Failed compilations are revalidated before offering edit/context evidence. Trunc
 | `repair` | Server-owned scratch + Cargo/rustc for candidate validation and bounded minimization | Never writes the workspace; creates and compiles only temporary candidate copies | Grouped diagnostics with reasoned root-cause hypotheses and source-backed ownership evidence, per-candidate measured compile/test results, behavior/performance guards, a measured selection with residual risks, and an export-verified minimized reproducer with pinned configuration. |
 | `work` | Server-owned work record over change/validate | Never writes the workspace; compiles only the bound candidate copy | Typed intent execution with explicit gates and budgets: honest `READY` requested-gate evidence, a bounded `NEEDS_MODEL` handoff with a single-use revision-bound token, or a typed `BLOCKED`/`FAILED`/`CANCELLED` stop reason. |
 
-`check` targets are `check`, `clippy`, `test`, `doc`, `fmt`, and `all`. Formatting
+`check` targets are `check`, `build`, `clippy`, `test`, `doc`, `fmt`, and `all`. Formatting
 uses check-only behavior. A completed explicit validation is never reused as
 authority for a later request; only an active identical job may be joined.
 
-`profile` runs exactly one of `check`, `clippy`, `test`, or `doc`. It separates
+The current source supports focused package and target selection in `check`:
+
+```json
+{"dir":"/workspace","target":"test","options":{"packages":["app"],"cargoTarget":{"kind":"test","name":"integration"},"testFilter":"one_case"}}
+```
+
+`packages` is a bounded list of exact workspace-member names. `cargoTarget`
+selects one `lib`, `bin`, `test`, `example` or `bench` target within each selected
+package; all except `lib` require `name`. It requires explicit packages and a
+check/build/clippy/test stage. Names are validated against Cargo metadata before
+compilation; unknown names, paths and globs never fall back to a broad build.
+Package-only selection also works for the `doc` stage. Full (`all`) and `fmt`
+validation cannot be narrowed. Feature selection remains bound to the explicit
+packages. The response reports `scope.strategy="explicit"`, package IDs, exact
+command and configuration; its pass does not establish workspace-wide coverage.
+Selected/filtered Cargo tests need evidence of at least one executed test;
+zero matches or an unrecognized custom harness produce `INCONCLUSIVE`.
+For compilation including the linker, use `target="build"`; check/clippy do not establish successful linking. Cargo still builds required dependencies.
+
+In the current source, compact check output preserves structured diagnostics,
+omission counts and suggestions, plus a separate human stdout tail (4,000 bytes)
+and stderr tail (2,000 characters). Cargo JSON records are excluded from compact
+stdout, and the redundant mixed `tail` is empty. `reason` summarizes stage exits;
+diagnostics and logs are in `steps`. Standard/full detail retains the raw bounded
+tails. All detail levels still obey the wire cap and report truncation. These
+presentation limits do not change compiler authority or executed-test counters.
+The same executable also serves four [bundled workflow skills](install.md#bundled-skills-current-source)
+through prompts/resources and the standalone `skills` CLI; the 20-tool catalog
+is unchanged.
+
+In the current source, `audit` paths and directory walks are relative to the
+explicit `dir`, even when the server permits its parent directory. Unreadable,
+unsupported, or omitted inputs produce `INCONCLUSIVE` with partial findings;
+only a complete bounded scan can report `CLEAN`. Explicit generated/ignored
+paths remain intentional exclusions. Context and API source evidence use the
+same selected-directory boundary.
+
+`profile` runs exactly one of `check`, `build`, `clippy`, `test`, or `doc`. It separates
 protocol admission, scheduler queue, metadata/identity preflight, Cargo process
 time, and finalization; parallel unit durations are never summed as wall time.
 The stable Cargo `--timings` HTML report is stored as a bounded server-owned
@@ -394,6 +431,18 @@ use the platform path-list separator.
 
 ## Configuration Reference
 
+The scheduler applies `gate.debounce_ms` once to a newly observed source state
+in a workspace, rather than restarting the wait for each validation command.
+Unchanged source shares the remaining window; a changed source or explicit dirty
+notification starts a new one. This history is local to one MCP process and
+bounded to 256 recently used roots; an evicted root starts a full window again.
+Different Cargo commands on the same source queue independently without
+superseding each other. Identical active requests may share a job, while later
+explicit requests always execute fresh Cargo work. Worktree/host leases,
+cancellation, deadlines and post-execution identity checks still apply.
+`check.queueMs` includes admission, metadata/source preflight and scheduler wait;
+it must not be added to preflight time as though they were disjoint metrics.
+
 | Key | Default | Notes |
 | --- | --- | --- |
 | `server.allow_roots` | canonical CWD | Primary authorized workspace roots. |
@@ -415,7 +464,7 @@ use the platform path-list separator.
 | `tools.work` | `true` | Register `work`. |
 | `cargo.path` | PATH `cargo` | Optional Cargo executable override. |
 | `gate.hard_timeout_ms` | `600000` | One Cargo operation deadline. |
-| `gate.debounce_ms` | `500` | Stable-input debounce. |
+| `gate.debounce_ms` | `500` | Quiet-input window per observed workspace source state. |
 | `gate.host_concurrency` | `1` | Host-wide Cargo permits. |
 | `gate.scope` | `shadow` | `workspace`, `shadow`, or `affected`. |
 | `gate.cache` | `auto` | `auto`, `project`, or `isolated`. |
@@ -513,7 +562,7 @@ the process. `allow` is an explicit opt-in to workspace code execution.
 `verify` plans (`action=matrix_plan`) or executes (`action=matrix_run`) a bounded
 matrix over features, targets, toolchains, and development stages. Each cell
 records package scope, features/default-features, target triple, toolchain/MSRV,
-profile, stage (`check`, `clippy`, `test`, `doc`), and runner.
+profile, stage (`check`, `build`, `clippy`, `test`, `doc`), and runner.
 
 Planning derives candidates from `cargo metadata` plus explicit project policy
 under `[workspace.metadata.agz-verify]` (or the first workspace member's
@@ -560,6 +609,60 @@ and `test_candidate`. These reuse the same bounded `CheckService` runner; no
 arbitrary shell command, automatic dependency installation, or workspace source
 write is introduced.
 
+`configuration.packages` and `configuration.cargoTarget` constrain both test
+planning and execution. Conflicting explicit mappings return an unsupported
+configuration gap. An explicit selection always reports subset coverage, even
+when changed inputs would normally widen the plan.
+
+For complete Cargo configurations without mappings or substring filters,
+`testPlan.executionGroups` records one canonical Cargo test invocation. The
+`items` list remains the advisory target inventory, including conditional targets;
+`testRun.items` records the actual execution group instead of claiming separate
+package executions. Workspace runs use `cargo test --workspace`, preserving
+Cargo's dependency feature unification. Explicit package/target selections keep
+the caller's flags together. `required-features` never enables an unrequested
+feature: Cargo decides which conditional targets participate. Both `extra` and
+`package/extra` feature forms remain unchanged in the executed command.
+
+Manifest `test=true` includes examples and benchmarks; an explicit named target
+overrides `test=false`. Native library tests and procedural macro doctests are
+included. Cargo's default suite compiles ordinary examples without counting them
+as tests and runs doctests in the same invocation. Separately planned compilation
+scopes use `cargo build --example` and report `COMPILED` with zero tests. These
+choices follow [Cargo target selection](https://doc.rust-lang.org/cargo/commands/cargo-test.html#target-selection)
+and [feature selection](https://doc.rust-lang.org/cargo/reference/features.html).
+A full result requires positive test evidence, no empty summaries, and enough
+summaries for Cargo's reported test executables and declared doctest scopes.
+Unsupported or budget-skipped requested scopes prevent a full result.
+
+Unit, integration, binary and doctest results cannot borrow successful tests
+from another scope. A test target with no executed-test evidence remains a
+visible gap, even when another target passes. Mapping package/path hints must
+resolve to the same workspace owner; unknown or ambiguous targets are rejected
+before execution. A mapping without a package may select matching named targets
+across packages, with the actual package flags recorded in its command.
+
+`configuration.runner` applies to ordinary inventory tests; doctests and
+compilation-only examples keep Cargo. Opaque custom-harness success remains
+`INCONCLUSIVE`; a failing harness is still a failure.
+`allFeatures` does not add conflicting explicit required-feature flags.
+`configuration.testFilter` runs a substring-filtered ordinary-test subset and
+lists the omitted unfiltered doctest scope as a gap. Do not combine this filter
+with exact `testMappings.testName` mappings; choose one filter source.
+
+`test_run` also compares the bounded whole-workspace input identity before
+planning and after execution, using a fixed preflight command without compiling
+an extra stage. Changed inputs return `STALE`; an incomplete final identity cannot
+grant full success. Per-item results remain visible but do not prove one common
+source state. This is a pre/post identity check, not an atomic filesystem snapshot.
+
+Metadata caching includes the bounded automatic target layout (`src/lib.rs`,
+`src/main.rs`, `src/bin`, `tests`, `examples`, `benches`, and `build.rs`) for the
+workspace and declared path dependencies. Adding/removing targets invalidates
+the cache; editing target bodies alone does not. Unverifiable layouts bypass
+the cache. Inputs that change during metadata discovery are rejected before the
+snapshot can be cached, so the next request must obtain fresh metadata.
+
 - `test_plan` combines the `cargo metadata` test inventory, the workspace
   package graph (reverse dependents), caller-provided semantic reference hints,
   explicit user mappings, and the changed set (`changeId` record or
@@ -569,16 +672,21 @@ write is introduced.
   build script, toolchain file, `.cargo` configuration, proc-macro package, or
   library-root change forces conservative workspace widening instead of a
   narrow plan; every include and skip reason is visible in `testPlan`.
-- `test_run` executes the planned scopes one by one and records the exact
+- `test_run` executes the configuration groups, or individual mapped/impact
+  scopes when no group is present, and records the exact
   package, target/binary, filter, feature selection, runner, command/input/
   environment hashes, and the executed test names. Zero-match, ignored-only,
   custom-harness, and missing-result runs are never `PASS`; a substring filter
   that does not execute the exact requested test name is `INCONCLUSIVE`.
-  Doctests, integration tests, and feature-gated targets are separate scopes,
-  and using the `nextest` runner never removes the separate doctest gate.
+  Inventory entries remain separate from execution claims. Using the `nextest`
+  runner never removes its separate Cargo doctest gate.
   `FULL_REQUESTED_SUITE` is returned only when the plan covers the full
-  workspace inventory and every scope passed; otherwise `TESTED_SUBSET` is
-  returned and is development feedback, not the final gate.
+  workspace inventory and its canonical Cargo configuration group passed.
+  Separate mapped/impact/nextest runs cannot prove workspace feature unification,
+  even when `testPlan.full`/`testRun.full` describe full inventory coverage.
+  Otherwise `TESTED_SUBSET` is returned when a passing subset exists; otherwise
+  the result is inconclusive.
+  Subset evidence is development feedback, not the final gate.
 - `test_candidate` takes `changeId` (a staged fix), `testPatch` (a regression
   test patch), and `behaviorContract` (`testName` plus `expectedFailure`). It
   creates a server-owned probe capture through `ChangeService`, stages the test

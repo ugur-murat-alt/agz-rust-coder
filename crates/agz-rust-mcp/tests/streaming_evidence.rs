@@ -73,3 +73,60 @@ fn future_cargo_records_are_not_mislabeled_as_corruption() {
     let (_, stats) = stream.finish();
     assert_eq!(stats.malformed_lines, 0);
 }
+
+#[test]
+fn human_output_survives_compiler_json_and_chunk_boundaries() {
+    let input = format!(
+        "before\n{}{{\"reason\":\"build-finished\",\"success\":false}}\n\
+        thread 'test' panicked: expected 42\n{{\"user\":\"payload\"}}\n\
+        test result: FAILED. 0 passed; 1 failed; 0 ignored;\nlast line",
+        diagnostic("error", "wrong type", "package", 1)
+    );
+    let expected = "before\nthread 'test' panicked: expected 42\n{\"user\":\"payload\"}\n\
+        test result: FAILED. 0 passed; 1 failed; 0 ignored;\nlast line\n";
+    for chunk in [1, 7, 64, input.len()] {
+        let mut stream = CargoStream::default();
+        for bytes in input.as_bytes().chunks(chunk) {
+            stream.push(bytes);
+        }
+        let (output, stats, human) = stream.finish_with_human_output();
+        assert_eq!(human, expected);
+        assert_eq!(output.diagnostics.len(), 1);
+        assert_eq!(stats.tests_executed, Some(1));
+        assert_eq!(stats.build_success, Some(false));
+    }
+}
+
+#[test]
+fn suite_counts_survive_tail_truncation_and_distinguish_empty_scopes() {
+    let input = concat!(
+        "{\"reason\":\"compiler-artifact\",\"profile\":{\"test\":true},\"executable\":\"/tmp/tests\"}\n",
+        "{\"reason\":\"compiler-artifact\",\"profile\":{\"test\":false},\"executable\":\"/tmp/example\"}\n",
+        "test result: ok. 2 passed; 0 failed; 0 ignored;\n",
+        "test result: ok. 0 passed; 0 failed; 1 ignored;\n",
+    );
+    for chunk in [1, 17, input.len()] {
+        let mut stream = CargoStream::default();
+        for bytes in input.as_bytes().chunks(chunk) {
+            stream.push(bytes);
+        }
+        stream.push("filler\n".repeat(2000).as_bytes());
+        let (_, stats, tail) = stream.finish_with_human_output();
+        assert!(!tail.contains("test result:"));
+        assert_eq!(stats.test_summaries, 2);
+        assert_eq!(stats.empty_test_summaries, 1);
+        assert_eq!(stats.test_binaries, 1);
+        assert_eq!(stats.tests_executed, Some(2));
+    }
+}
+
+#[test]
+fn human_output_tail_is_bounded_and_utf8_safe() {
+    let mut stream = CargoStream::default();
+    stream.push("😀".repeat(3000).as_bytes());
+    stream.push(b"\n\x1b[31mfinal panic\x1b[0m\n");
+    let (_, _, human) = stream.finish_with_human_output();
+    assert!(human.len() <= 4000);
+    assert!(human.ends_with("final panic\n"));
+    assert!(!human.contains('\x1b'));
+}

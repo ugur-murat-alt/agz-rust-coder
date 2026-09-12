@@ -16,7 +16,7 @@ use agz_rust_mcp::{
     Config,
     change::{ChangeAction, ChangeRequest, ChangeService, NewFileInput, PatchInput},
     config::VerifyConfig,
-    gate::{GateDetail, GateTargetId, TestRunner, ValidationOptions},
+    gate::{CargoTargetSelection, GateDetail, GateTargetId, TestRunner, ValidationOptions},
     process::ProcessSupervisor,
     tools::{
         BehaviorContract, CheckService, SemanticReference, TestMapping, TestPatchInput,
@@ -27,6 +27,8 @@ use agz_rust_mcp::{
 use tokio_util::sync::CancellationToken;
 
 const PACKAGE: &str = "verify-tests-fixture";
+const TESTED_LIBRARY: &str =
+    "/// ```\n/// assert_eq!(2+2,4);\n/// ```\npub fn value() {}\n#[test] fn unit() {}\n";
 
 struct Fixture {
     root: PathBuf,
@@ -268,6 +270,495 @@ fn patch(file: &str, old: &str, new: &str) -> PatchInput {
 }
 
 #[tokio::test]
+async fn requested_features_and_workspace_unification_match_cargo() {
+    let fixture = Fixture::new(
+        "workspace-features",
+        "// unused virtual workspace source\n",
+        &[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers=[\"a\",\"b\"]\nresolver=\"3\"\n",
+            ),
+            (
+                "Cargo.lock",
+                "version=4\n[[package]]\nname=\"a\"\nversion=\"0.1.0\"\n[[package]]\nname=\"b\"\nversion=\"0.1.0\"\ndependencies=[\"a\"]\n",
+            ),
+            (
+                "a/Cargo.toml",
+                "[package]\nname=\"a\"\nversion=\"0.1.0\"\nedition=\"2024\"\n[features]\nextra=[]\n",
+            ),
+            ("a/src/lib.rs", TESTED_LIBRARY),
+            (
+                "b/Cargo.toml",
+                "[package]\nname=\"b\"\nversion=\"0.1.0\"\nedition=\"2024\"\n[dependencies]\na={path=\"../a\"}\n",
+            ),
+            ("b/src/lib.rs", TESTED_LIBRARY),
+        ],
+    );
+    let service = fixture.verify();
+    for features in [vec!["extra".to_owned()], vec!["a/extra".to_owned()]] {
+        for packages in [Vec::new(), vec!["a".to_owned(), "b".to_owned()]] {
+            let selected = request(
+                &fixture,
+                VerifyAction::TestRun,
+                ValidationOptions {
+                    features: features.clone(),
+                    packages: packages.clone(),
+                    ..ValidationOptions::default()
+                },
+            );
+            let outcome = execute(&service, selected).await;
+            assert_eq!(
+                outcome.status,
+                if packages.is_empty() {
+                    "FULL_REQUESTED_SUITE"
+                } else {
+                    "TESTED_SUBSET"
+                },
+                "{outcome:#?}"
+            );
+            let plan = outcome.test_plan.unwrap();
+            assert_eq!(plan.items.len(), 4);
+            assert_eq!(plan.execution_groups.len(), 1);
+            let run = outcome.test_run.unwrap();
+            assert_eq!(run.items.len(), 1);
+            assert_eq!(run.items[0].tests_executed, 4);
+            assert!(
+                run.items[0]
+                    .command
+                    .as_ref()
+                    .unwrap()
+                    .contains(&format!("--features {}", features[0]))
+            );
+        }
+    }
+    fs::write(fixture.root.join("a/src/lib.rs"), format!("{TESTED_LIBRARY}\n#[test] fn unified_failure() {{ assert!(!cfg!(feature=\"extra\")); }}\n")).unwrap();
+    let b_manifest = fixture.root.join("b/Cargo.toml");
+    fs::write(
+        &b_manifest,
+        fs::read_to_string(&b_manifest)
+            .unwrap()
+            .replace("path=\"../a\"", "path=\"../a\",features=[\"extra\"]"),
+    )
+    .unwrap();
+    let outcome = execute(
+        &service,
+        request(
+            &fixture,
+            VerifyAction::TestRun,
+            ValidationOptions::default(),
+        ),
+    )
+    .await;
+    assert_eq!(outcome.status, "FAIL", "{outcome:#?}");
+    let run = outcome.test_run.unwrap();
+    assert_eq!(run.items.len(), 1);
+    assert!(
+        run.items[0]
+            .executed_names
+            .iter()
+            .any(|name| name.ends_with("unified_failure"))
+    );
+    assert!(
+        run.items[0]
+            .command
+            .as_ref()
+            .unwrap()
+            .contains("--workspace")
+    );
+    // A path hint keeps execution per target even when Cargo.toml widens the
+    // inventory. Individually passing packages cannot prove feature unification.
+    let mut mapped = request(
+        &fixture,
+        VerifyAction::TestRun,
+        ValidationOptions::default(),
+    );
+    mapped.changed_paths = vec!["Cargo.toml".to_owned()];
+    mapped.test_mappings = vec![TestMapping {
+        path: Some("a/src/lib.rs".to_owned()),
+        package: None,
+        target: None,
+        test_name: None,
+    }];
+    let mapped = execute(&service, mapped).await;
+    assert_eq!(mapped.status, "TESTED_SUBSET", "{mapped:#?}");
+    assert!(!mapped.complete);
+    assert!(!mapped.all_pass);
+    assert!(mapped.reason.contains("feature unification"));
+    assert!(mapped.test_plan.unwrap().full);
+    let run = mapped.test_run.unwrap();
+    assert_eq!(run.items.len(), 4);
+    assert!(run.items.iter().all(|item| item.status == "PASS"));
+    assert_eq!(run.suite, "TESTED_SUBSET");
+    fixture.check.close().await;
+}
+
+#[tokio::test]
+async fn required_features_are_not_enabled_without_a_request() {
+    let fixture = Fixture::new(
+        "conditional-example",
+        TESTED_LIBRARY,
+        &[(
+            "examples/conditional.rs",
+            "compile_error!(\"explicit feature failure\");\nfn main() {}\n",
+        )],
+    );
+    let manifest = fixture.root.join("Cargo.toml");
+    fs::write(&manifest, format!("{}\n[features]\nextra=[]\n[[example]]\nname=\"conditional\"\nrequired-features=[\"extra\"]\n",fs::read_to_string(&manifest).unwrap())).unwrap();
+    let service = fixture.verify();
+    for no_default_features in [false, true] {
+        let outcome = execute(
+            &service,
+            request(
+                &fixture,
+                VerifyAction::TestRun,
+                ValidationOptions {
+                    no_default_features,
+                    ..ValidationOptions::default()
+                },
+            ),
+        )
+        .await;
+        assert_eq!(outcome.status, "FULL_REQUESTED_SUITE", "{outcome:#?}");
+        assert!(
+            outcome
+                .test_plan
+                .unwrap()
+                .items
+                .iter()
+                .all(|item| item.features.is_empty())
+        );
+        let run = outcome.test_run.unwrap();
+        assert_eq!(run.items[0].tests_executed, 2);
+        assert!(
+            !run.items[0]
+                .command
+                .as_ref()
+                .unwrap()
+                .contains("--features")
+        );
+    }
+    let outcome = execute(
+        &service,
+        request(
+            &fixture,
+            VerifyAction::TestRun,
+            ValidationOptions {
+                features: vec!["extra".to_owned()],
+                ..ValidationOptions::default()
+            },
+        ),
+    )
+    .await;
+    assert_eq!(outcome.status, "FAIL", "{outcome:#?}");
+    assert_eq!(outcome.test_run.unwrap().items[0].status, "COMPILE_FAIL");
+    fixture.check.close().await;
+}
+
+#[tokio::test]
+async fn enabled_example_and_bench_failures_are_part_of_the_default_suite() {
+    for (kind, directory) in [("example", "examples"), ("bench", "benches")] {
+        let path = format!("{directory}/case.rs");
+        let fixture = Fixture::new(
+            kind,
+            TESTED_LIBRARY,
+            &[(
+                &path,
+                "fn main() {}\n#[test] fn broken() { panic!(\"target failure\"); }\n",
+            )],
+        );
+        let manifest = fixture.root.join("Cargo.toml");
+        fs::write(
+            &manifest,
+            format!(
+                "{}\n[[{kind}]]\nname=\"case\"\ntest=true\n",
+                fs::read_to_string(&manifest).unwrap()
+            ),
+        )
+        .unwrap();
+        let outcome = execute(
+            &fixture.verify(),
+            request(
+                &fixture,
+                VerifyAction::TestRun,
+                ValidationOptions::default(),
+            ),
+        )
+        .await;
+        assert_eq!(outcome.status, "FAIL", "{outcome:#?}");
+        assert!(
+            outcome
+                .test_plan
+                .as_ref()
+                .unwrap()
+                .items
+                .iter()
+                .any(|item| item.target_kind == kind)
+        );
+        let run = outcome.test_run.unwrap();
+        assert!(
+            run.items
+                .iter()
+                .any(|item| item.item.target_kind == "cargo-suite"
+                    && item.status == "FAIL"
+                    && item.tests_executed > 0),
+            "{run:#?}"
+        );
+        fixture.check.close().await;
+    }
+}
+
+#[tokio::test]
+async fn canonical_suite_builds_ordinary_examples_without_counting_them_as_tests() {
+    let fixture = Fixture::new(
+        "ordinary-example",
+        TESTED_LIBRARY,
+        &[(
+            "examples/case.rs",
+            "#[cfg(not(test))]\ncompile_error!(\"normal build failure\");\nfn main() {}\n",
+        )],
+    );
+    let service = fixture.verify();
+    let failed = execute(
+        &service,
+        request(
+            &fixture,
+            VerifyAction::TestRun,
+            ValidationOptions::default(),
+        ),
+    )
+    .await;
+    assert_eq!(failed.status, "FAIL", "{failed:#?}");
+    let run = failed.test_run.unwrap();
+    assert!(
+        run.items
+            .iter()
+            .any(|item| item.item.target_kind == "cargo-suite"
+                && item.status == "COMPILE_FAIL"
+                && item
+                    .command
+                    .as_deref()
+                    .is_some_and(|command| command.contains(" test "))
+                && item
+                    .command
+                    .as_deref()
+                    .is_some_and(|command| command.contains("--workspace")
+                        && !command.contains("--all-targets"))),
+        "{run:#?}"
+    );
+    fs::write(fixture.root.join("examples/case.rs"), "fn main() {}\n").unwrap();
+    let passed = execute(
+        &service,
+        request(
+            &fixture,
+            VerifyAction::TestRun,
+            ValidationOptions::default(),
+        ),
+    )
+    .await;
+    assert_eq!(passed.status, "FULL_REQUESTED_SUITE", "{passed:#?}");
+    let run = passed.test_run.unwrap();
+    let example = run
+        .items
+        .iter()
+        .find(|item| item.item.target_kind == "cargo-suite")
+        .unwrap();
+    assert_eq!(example.status, "PASS");
+    assert_eq!(example.tests_executed, 2);
+    assert_eq!(example.passed, 2);
+    assert!(
+        !example
+            .executed_names
+            .iter()
+            .any(|name| name.contains("example"))
+    );
+    assert!(run.missing.is_empty());
+    fixture.check.close().await;
+}
+
+#[tokio::test]
+async fn procedural_macro_doctests_and_native_library_tests_are_included() {
+    for (label, settings, source, kind) in [
+        (
+            "proc-doc",
+            "proc-macro=true",
+            "extern crate proc_macro;\n/// ```\n/// assert_eq!(2+2,5);\n/// ```\n#[proc_macro] pub fn identity(input: proc_macro::TokenStream) -> proc_macro::TokenStream { input }\n#[test] fn unit() {}\n",
+            "doctest",
+        ),
+        (
+            "cdylib-unit",
+            "crate-type=[\"cdylib\"]",
+            "#[test] fn broken() { panic!(\"native library test failure\"); }\n",
+            "cdylib",
+        ),
+    ] {
+        let fixture = Fixture::new(label, source, &[]);
+        let manifest = fixture.root.join("Cargo.toml");
+        fs::write(
+            &manifest,
+            format!(
+                "{}\n[lib]\n{settings}\n",
+                fs::read_to_string(&manifest).unwrap()
+            ),
+        )
+        .unwrap();
+        let outcome = execute(
+            &fixture.verify(),
+            request(
+                &fixture,
+                VerifyAction::TestRun,
+                ValidationOptions::default(),
+            ),
+        )
+        .await;
+        assert_eq!(outcome.status, "FAIL", "{outcome:#?}");
+        assert!(
+            outcome
+                .test_plan
+                .as_ref()
+                .unwrap()
+                .items
+                .iter()
+                .any(|item| item.target_kind == kind)
+        );
+        assert!(
+            outcome
+                .test_run
+                .unwrap()
+                .items
+                .iter()
+                .any(|item| item.item.target_kind == "cargo-suite" && item.status == "FAIL")
+        );
+        fixture.check.close().await;
+    }
+}
+
+#[tokio::test]
+async fn explicit_named_targets_override_test_false_in_the_manifest() {
+    for (kind, path, target) in [
+        (
+            "example",
+            "examples/case.rs",
+            CargoTargetSelection::Example {
+                name: "case".to_owned(),
+            },
+        ),
+        (
+            "bench",
+            "benches/case.rs",
+            CargoTargetSelection::Bench {
+                name: "case".to_owned(),
+            },
+        ),
+        (
+            "bin",
+            "src/bin/case.rs",
+            CargoTargetSelection::Bin {
+                name: "case".to_owned(),
+            },
+        ),
+    ] {
+        let fixture = Fixture::new(
+            "named-disabled",
+            TESTED_LIBRARY,
+            &[(
+                path,
+                "fn main() {}\n#[test] fn broken() { panic!(\"explicit test failure\"); }\n",
+            )],
+        );
+        let manifest = fixture.root.join("Cargo.toml");
+        fs::write(
+            &manifest,
+            format!(
+                "{}\n[[{kind}]]\nname=\"case\"\ntest=false\n",
+                fs::read_to_string(&manifest).unwrap()
+            ),
+        )
+        .unwrap();
+        let options = ValidationOptions {
+            packages: vec![PACKAGE.to_owned()],
+            cargo_target: Some(target),
+            ..Default::default()
+        };
+        let outcome = execute(
+            &fixture.verify(),
+            request(&fixture, VerifyAction::TestRun, options),
+        )
+        .await;
+        assert_eq!(outcome.status, "FAIL", "{outcome:#?}");
+        let run = outcome.test_run.unwrap();
+        assert_eq!(run.items.len(), 1);
+        assert_eq!(run.items[0].tests_executed, 1);
+        assert!(
+            run.items[0]
+                .command
+                .as_ref()
+                .unwrap()
+                .contains(&format!("--{kind} case"))
+        );
+        fixture.check.close().await;
+    }
+}
+
+#[tokio::test]
+async fn custom_example_harness_is_executed_but_opaque_success_is_not_test_evidence() {
+    let fixture = Fixture::new(
+        "custom-example",
+        TESTED_LIBRARY,
+        &[(
+            "examples/custom.rs",
+            "fn main() { println!(\"custom output\"); }\n",
+        )],
+    );
+    let manifest = fixture.root.join("Cargo.toml");
+    fs::write(
+        &manifest,
+        format!(
+            "{}\n[[example]]\nname=\"custom\"\ntest=true\nharness=false\n",
+            fs::read_to_string(&manifest).unwrap()
+        ),
+    )
+    .unwrap();
+    let service = fixture.verify();
+    let outcome = execute(
+        &service,
+        request(
+            &fixture,
+            VerifyAction::TestRun,
+            ValidationOptions::default(),
+        ),
+    )
+    .await;
+    assert_eq!(outcome.status, "INCONCLUSIVE", "{outcome:#?}");
+    let run = outcome.test_run.unwrap();
+    assert!(run.items.iter().any(|item| {
+        item.item.target_kind == "cargo-suite"
+            && item.status == "INCONCLUSIVE"
+            && item.tests_executed > 0
+            && item
+                .command
+                .as_deref()
+                .is_some_and(|command| command.contains("--workspace"))
+    }));
+    fs::write(
+        fixture.root.join("examples/custom.rs"),
+        "fn main() { panic!(\"custom harness failure\"); }\n",
+    )
+    .unwrap();
+    let outcome = execute(
+        &service,
+        request(
+            &fixture,
+            VerifyAction::TestRun,
+            ValidationOptions::default(),
+        ),
+    )
+    .await;
+    assert_eq!(outcome.status, "FAIL", "{outcome:#?}");
+    fixture.check.close().await;
+}
+
+#[tokio::test]
 async fn plan_orders_scopes_and_widens_on_global_inputs() {
     let fixture = Fixture::new(
         "plan",
@@ -318,9 +809,9 @@ async fn plan_orders_scopes_and_widens_on_global_inputs() {
         "{plan:#?}"
     );
     assert!(
-        plan.skipped
+        plan.items
             .iter()
-            .any(|skipped| skipped.reason.contains("example")),
+            .any(|item| item.target_kind == "example" && item.scope == "compile"),
         "{plan:#?}"
     );
 
@@ -353,6 +844,19 @@ async fn plan_orders_scopes_and_widens_on_global_inputs() {
             .iter()
             .any(|item| item.target_kind == "doctest" && item.runner == "cargo"),
         "{plan:#?}"
+    );
+    assert!(
+        plan.items
+            .iter()
+            .filter(|item| item.target_kind != "doctest" && item.scope != "compile")
+            .all(|item| item.runner == "nextest"),
+        "{plan:#?}"
+    );
+    assert!(
+        plan.items
+            .iter()
+            .filter(|item| item.scope == "compile")
+            .all(|item| item.runner == "cargo")
     );
 }
 
@@ -419,6 +923,371 @@ async fn run_records_exact_identity_and_never_passes_empty_evidence() {
 }
 
 #[tokio::test]
+async fn explicit_target_constrains_plan_and_run_without_claiming_full_coverage() {
+    let fixture = Fixture::new(
+        "selected",
+        "pub fn answer() -> i32 { 42 }\n",
+        &[
+            (
+                "tests/focused.rs",
+                "#[test] fn selected_test() { assert_eq!(verify_tests_fixture::answer(), 42); }\n",
+            ),
+            (
+                "tests/unrelated.rs",
+                "compile_error!(\"outside the selected target\");\n",
+            ),
+        ],
+    );
+    let service = fixture.verify();
+    let mut selected = request(
+        &fixture,
+        VerifyAction::TestPlan,
+        ValidationOptions {
+            packages: vec![PACKAGE.to_owned()],
+            cargo_target: Some(CargoTargetSelection::Test {
+                name: "focused".to_owned(),
+            }),
+            ..ValidationOptions::default()
+        },
+    );
+    // This normally widens to the whole workspace; the explicit selector wins.
+    selected.changed_paths = vec!["src/lib.rs".to_owned()];
+    let outcome = execute(&service, selected.clone()).await;
+    let plan = outcome.test_plan.expect("selected plan");
+    assert!(!plan.full);
+    assert_eq!(plan.items.len(), 1, "{plan:#?}");
+    assert_eq!(plan.items[0].target, "focused");
+    assert_eq!(plan.items[0].scope, "explicit");
+
+    selected.action = VerifyAction::TestRun;
+    let outcome = execute(&service, selected.clone()).await;
+    assert_eq!(outcome.status, "TESTED_SUBSET", "{outcome:#?}");
+    assert!(!outcome.complete && !outcome.all_pass);
+    let run = outcome.test_run.expect("selected run");
+    assert_eq!(run.items.len(), 1);
+    assert_eq!(run.items[0].tests_executed, 1);
+    let command = run.items[0].command.as_deref().expect("command");
+    assert!(command.contains("-p verify-tests-fixture"), "{command}");
+    assert!(command.contains("--test focused"), "{command}");
+    assert!(!command.contains("--all-targets"), "{command}");
+
+    let mut mapped = mapping("selected_test");
+    mapped.package = Some(PACKAGE.to_owned());
+    mapped.target = Some("focused".to_owned());
+    selected.test_mappings = vec![mapped];
+    let outcome = execute(&service, selected.clone()).await;
+    let run = outcome.test_run.expect("mapped selected run");
+    let mapped = run
+        .items
+        .iter()
+        .find(|item| item.item.exact_test.as_deref() == Some("selected_test"))
+        .unwrap_or_else(|| panic!("mapped item missing: {run:#?}"));
+    assert_eq!(mapped.status, "PASS", "{mapped:#?}");
+    assert!(mapped.exact_test_seen);
+    assert_eq!(mapped.tests_executed, 1);
+
+    selected.test_mappings[0].target = Some("unrelated".to_owned());
+    let outcome = execute(&service, selected).await;
+    assert_eq!(outcome.status, "INCONCLUSIVE", "{outcome:#?}");
+    assert_eq!(outcome.budget.executed, 0);
+    assert!(
+        outcome
+            .skipped
+            .iter()
+            .any(|item| item.reason.contains("conflicts"))
+    );
+}
+
+#[tokio::test]
+async fn full_inventory_executes_one_canonical_cargo_suite() {
+    let fixture = Fixture::new(
+        "inventory-binding",
+        "/// ```\n/// assert_eq!(verify_tests_fixture::answer(), 42);\n/// ```\npub fn answer() -> u8 { 42 }\n#[cfg(test)] mod tests { #[test] fn unit_only() {} }\n",
+        &[("tests/integration.rs", "#[test] fn integration_only() {}\n")],
+    );
+    let service = fixture.verify();
+    let outcome = execute(
+        &service,
+        request(
+            &fixture,
+            VerifyAction::TestRun,
+            ValidationOptions::default(),
+        ),
+    )
+    .await;
+    assert_eq!(outcome.status, "FULL_REQUESTED_SUITE", "{outcome:#?}");
+    let run = outcome.test_run.expect("inventory run");
+    assert_eq!(run.items.len(), 1);
+    let item = &run.items[0];
+    assert_eq!(item.tests_executed, 3, "{item:#?}");
+    assert!(
+        item.executed_names
+            .iter()
+            .any(|name| name.ends_with("unit_only"))
+    );
+    assert!(
+        item.executed_names
+            .iter()
+            .any(|name| name == "integration_only")
+    );
+    let command = item.command.as_deref().expect("Cargo command");
+    assert!(command.contains("--workspace"), "{command}");
+    assert!(!command.contains("--all-targets"), "{command}");
+    assert_eq!(item.item.target_kind, "cargo-suite");
+}
+
+#[tokio::test]
+async fn empty_target_cannot_borrow_another_targets_passing_test() {
+    let fixture = Fixture::new(
+        "empty-inventory-target",
+        "pub fn answer() -> u8 { 42 }\n",
+        &[("tests/integration.rs", "#[test] fn integration_only() {}\n")],
+    );
+    let outcome = execute(
+        &fixture.verify(),
+        request(
+            &fixture,
+            VerifyAction::TestRun,
+            ValidationOptions::default(),
+        ),
+    )
+    .await;
+    assert_eq!(outcome.status, "INCONCLUSIVE", "{outcome:#?}");
+    assert!(!outcome.complete && !outcome.all_pass);
+    let run = outcome.test_run.expect("inventory run");
+    assert_eq!(run.items.len(), 1);
+    assert_eq!(run.items[0].status, "INCONCLUSIVE");
+    assert_eq!(run.items[0].tests_executed, 1);
+    assert!(run.items[0].reason.contains("zero-test scopes"));
+}
+
+#[tokio::test]
+async fn mapped_target_cannot_borrow_a_same_named_test_from_the_library() {
+    let fixture = Fixture::new(
+        "mapped-inventory-target",
+        "#[cfg(test)] mod tests { #[test] fn wanted() {} }\n",
+        &[("tests/integration.rs", "#[test] fn unrelated() {}\n")],
+    );
+    let mut selected = request(
+        &fixture,
+        VerifyAction::TestRun,
+        ValidationOptions::default(),
+    );
+    let mut mapped = mapping("wanted");
+    mapped.package = Some(PACKAGE.to_owned());
+    mapped.target = Some("integration".to_owned());
+    selected.test_mappings = vec![mapped];
+    let outcome = execute(&fixture.verify(), selected).await;
+    let run = outcome.test_run.expect("mapped run");
+    let mapped = run
+        .items
+        .iter()
+        .find(|item| item.item.exact_test.as_deref() == Some("wanted"))
+        .expect("mapped item");
+    assert_eq!(mapped.status, "ZERO_MATCH", "{mapped:#?}");
+    assert!(!mapped.exact_test_seen);
+    assert_eq!(mapped.tests_executed, 0);
+}
+
+#[tokio::test]
+async fn invalid_mapping_never_falls_back_to_workspace_test_evidence() {
+    let fixture = Fixture::new(
+        "invalid-mapping",
+        "#[cfg(test)] mod tests { #[test] fn wanted() {} }\n",
+        &[],
+    );
+    let service = fixture.verify();
+    for (package, target, path) in [
+        (Some("missing".to_owned()), None, None),
+        (None, Some("missing".to_owned()), None),
+        (None, None, Some("../outside.rs".to_owned())),
+        (
+            None,
+            None,
+            Some(fixture.root.join("src/lib.rs").display().to_string()),
+        ),
+    ] {
+        let mut selected = request(
+            &fixture,
+            VerifyAction::TestRun,
+            ValidationOptions::default(),
+        );
+        selected.test_mappings = vec![TestMapping {
+            package,
+            target,
+            path,
+            test_name: Some("wanted".to_owned()),
+        }];
+        let outcome = execute(&service, selected).await;
+        assert_eq!(outcome.status, "INCONCLUSIVE", "{outcome:#?}");
+        assert_eq!(outcome.budget.executed, 0);
+        assert!(!outcome.skipped.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn workspace_mapping_named_like_the_display_placeholder_still_binds_its_target() {
+    let fixture = Fixture::new(
+        "mapped-placeholder-name",
+        "#[cfg(test)] mod tests { #[test] fn wanted() {} }\n",
+        &[("tests/mapped-test.rs", "#[test] fn wanted() {}\n")],
+    );
+    let mut selected = request(
+        &fixture,
+        VerifyAction::TestRun,
+        ValidationOptions::default(),
+    );
+    let mut mapped = mapping("wanted");
+    mapped.target = Some("mapped-test".to_owned());
+    selected.test_mappings = vec![mapped];
+    let outcome = execute(&fixture.verify(), selected).await;
+    let run = outcome.test_run.expect("mapped workspace target");
+    assert_eq!(run.items.len(), 1, "{run:#?}");
+    let item = &run.items[0];
+    assert_eq!(item.status, "PASS", "{item:#?}");
+    assert_eq!(item.tests_executed, 1);
+    assert!(
+        item.command
+            .as_ref()
+            .unwrap()
+            .contains("--test mapped-test")
+    );
+}
+
+#[tokio::test]
+async fn configuration_filters_and_all_features_are_preserved_per_target() {
+    let fixture = Fixture::new(
+        "inventory-configuration",
+        "/// ```\n/// assert_eq!(verify_tests_fixture::answer(), 42);\n/// ```\npub fn answer() -> u8 { 42 }\n#[cfg(test)] mod tests { #[test] fn unit_only() {} }\n",
+        &[
+            (
+                "Cargo.toml",
+                "[package]\nname=\"verify-tests-fixture\"\nversion=\"0.1.0\"\nedition=\"2024\"\n[workspace]\n[features]\nchosen=[]\n[[test]]\nname=\"integration\"\nrequired-features=[\"chosen\"]\n",
+            ),
+            (
+                "tests/integration.rs",
+                "#[test] fn integration_only() { assert!(cfg!(feature=\"chosen\")); }\n",
+            ),
+        ],
+    );
+    let service = fixture.verify();
+    let mut selected = request(
+        &fixture,
+        VerifyAction::TestRun,
+        ValidationOptions {
+            all_features: true,
+            ..ValidationOptions::default()
+        },
+    );
+    let outcome = execute(&service, selected.clone()).await;
+    assert_eq!(outcome.status, "FULL_REQUESTED_SUITE", "{outcome:#?}");
+    let run = outcome.test_run.expect("all-feature inventory");
+    assert!(
+        run.items
+            .iter()
+            .all(|item| item.command.as_ref().unwrap().contains("--all-features"))
+    );
+    assert_eq!(run.items.len(), 1);
+    assert_eq!(run.items[0].tests_executed, 3);
+
+    selected.test_configuration.test_filter = Some("integration_only".to_owned());
+    let outcome = execute(&service, selected.clone()).await;
+    assert_eq!(outcome.status, "TESTED_SUBSET", "{outcome:#?}");
+    assert!(!outcome.complete);
+    let run = outcome.test_run.expect("filtered inventory");
+    assert_eq!(run.items.len(), 2);
+    assert!(
+        run.items
+            .iter()
+            .all(|item| item.item.filter.as_deref() == Some("integration_only"))
+    );
+    assert_eq!(
+        run.items
+            .iter()
+            .map(|item| item.tests_executed)
+            .sum::<u64>(),
+        1
+    );
+    assert!(
+        outcome
+            .skipped
+            .iter()
+            .any(|item| item.reason.contains("doctest"))
+    );
+
+    selected.test_mappings = vec![mapping("unit_only")];
+    let outcome = execute(&service, selected).await;
+    assert_eq!(outcome.status, "INCONCLUSIVE", "{outcome:#?}");
+    assert_eq!(outcome.budget.executed, 0);
+}
+
+#[tokio::test]
+async fn inventory_changed_between_items_cannot_publish_full_success() {
+    let fixture = Fixture::new(
+        "inventory-changed",
+        "/// ```\n/// assert_eq!(verify_tests_fixture::answer(), 42);\n/// ```\npub fn answer() -> u8 { 42 }\n#[cfg(test)] mod tests { #[test] fn unit_only() {} }\n",
+        &[("tests/integration.rs", "#[test] fn integration_only() {}\n")],
+    );
+    let late_target = fixture.root.join("tests/late.rs");
+    let callback = Arc::new(move |event: agz_rust_mcp::gate::ProgressEvent| {
+        if event.message.starts_with("test scope 2/") {
+            fs::write(
+                &late_target,
+                "compile_error!(\"new target after planning\");\n",
+            )
+            .expect("add late target");
+        }
+    });
+    let mut selected = request(
+        &fixture,
+        VerifyAction::TestRun,
+        ValidationOptions::default(),
+    );
+    selected.test_mappings = vec![TestMapping {
+        path: Some("tests/integration.rs".to_owned()),
+        package: None,
+        target: None,
+        test_name: None,
+    }];
+    let outcome = fixture
+        .verify()
+        .execute(selected, Some(callback), Some(CancellationToken::new()))
+        .await;
+    assert!(fixture.root.join("tests/late.rs").exists());
+    assert_eq!(outcome.status, "STALE", "{outcome:#?}");
+    assert!(!outcome.complete && !outcome.all_pass);
+    let run = outcome.test_run.expect("per-item evidence retained");
+    assert_eq!(run.suite, "STALE");
+    assert!(run.items.iter().all(|item| item.status == "PASS"));
+}
+
+#[tokio::test]
+async fn warm_inventory_discovers_added_and_removed_test_targets() {
+    let fixture = Fixture::new(
+        "warm-target-layout",
+        "/// ```\n/// assert_eq!(verify_tests_fixture::answer(), 42);\n/// ```\npub fn answer() -> u8 { 42 }\n#[cfg(test)] mod tests { #[test] fn unit_only() {} }\n",
+        &[("tests/integration.rs", "#[test] fn integration_only() {}\n")],
+    );
+    let service = fixture.verify();
+    let selected = request(
+        &fixture,
+        VerifyAction::TestRun,
+        ValidationOptions::default(),
+    );
+    let first = execute(&service, selected.clone()).await;
+    assert_eq!(first.status, "FULL_REQUESTED_SUITE", "{first:#?}");
+    let late = fixture.root.join("tests/late.rs");
+    fs::write(&late, "compile_error!(\"new test target\");\n").expect("add target");
+    let added = execute(&service, selected.clone()).await;
+    assert_eq!(added.status, "FAIL", "{added:#?}");
+    assert_eq!(added.test_plan.unwrap().items.len(), 4);
+    fs::remove_file(late).expect("remove target");
+    let removed = execute(&service, selected).await;
+    assert_eq!(removed.status, "FULL_REQUESTED_SUITE", "{removed:#?}");
+    assert_eq!(removed.test_plan.unwrap().items.len(), 3);
+}
+
+#[tokio::test]
 async fn run_reports_full_suite_only_for_the_whole_inventory() {
     let fixture = Fixture::new(
         "full",
@@ -441,7 +1310,10 @@ async fn run_reports_full_suite_only_for_the_whole_inventory() {
     let run = outcome.test_run.expect("test run");
     assert!(run.full);
     assert_eq!(run.suite, "FULL_REQUESTED_SUITE");
-    assert!(run.doctest_gate.starts_with("REQUIRED"), "{run:#?}");
+    assert!(
+        run.doctest_gate.starts_with("INCLUDED IN CANONICAL"),
+        "{run:#?}"
+    );
     assert!(
         run.items
             .iter()

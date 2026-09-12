@@ -1060,6 +1060,7 @@ async fn expected_revision_zero_stages_through_the_json_input_shape() {
         migration: None,
         target: match input.target {
             CheckTarget::Check => GateTargetId::Check,
+            CheckTarget::Build => GateTargetId::Build,
             CheckTarget::Clippy => GateTargetId::Clippy,
             CheckTarget::Test => GateTargetId::Test,
             CheckTarget::Doc => GateTargetId::Doc,

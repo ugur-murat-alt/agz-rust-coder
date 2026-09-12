@@ -93,6 +93,7 @@ impl Default for GateDetail {
 #[serde(rename_all = "lowercase")]
 pub enum GateTargetId {
     Check,
+    Build,
     Clippy,
     Test,
     Doc,
@@ -104,6 +105,7 @@ impl GateTargetId {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Check => "check",
+            Self::Build => "build",
             Self::Clippy => "clippy",
             Self::Test => "test",
             Self::Doc => "doc",
@@ -145,6 +147,9 @@ impl Default for GateSource {
 #[derive(Debug, Clone)]
 pub struct GateRequest {
     pub options: super::ValidationOptions,
+    /// Preserve Cargo's default test inventory and workspace feature resolution.
+    /// Used by verify's configuration-wide Cargo suite, not ordinary check gates.
+    pub cargo_test_defaults: bool,
     pub directory: Option<PathBuf>,
     pub target: GateTargetId,
     /// Optional rustup toolchain selector. A direct toolchain cargo is
@@ -172,6 +177,7 @@ impl GateRequest {
             toolchain: None,
             timings: false,
             options: super::ValidationOptions::default(),
+            cargo_test_defaults: false,
             detail: GateDetail::Compact,
             client_roots: ClientRoots::unsupported(),
             root_epoch: 0,
@@ -190,6 +196,7 @@ impl GateRequest {
             toolchain: None,
             timings: false,
             options: super::ValidationOptions::default(),
+            cargo_test_defaults: false,
             detail: GateDetail::Compact,
             client_roots: ClientRoots::unsupported(),
             root_epoch: 0,
@@ -200,6 +207,18 @@ impl GateRequest {
     pub fn with_options(mut self, options: super::ValidationOptions) -> Self {
         self.options = options;
         self
+    }
+
+    pub fn with_cargo_test_defaults(mut self) -> Self {
+        self.cargo_test_defaults = true;
+        self
+    }
+
+    pub(crate) fn apply_options(&self, target: &mut GateTarget) {
+        self.options.apply(target);
+        if self.cargo_test_defaults && target.id == GateTargetId::Test {
+            target.args.retain(|arg| arg != "--all-targets");
+        }
     }
 
     pub fn with_timings(mut self, timings: bool) -> Self {
@@ -274,6 +293,7 @@ pub enum GateScopeStrategy {
     Workspace,
     Affected,
     Shadow,
+    Explicit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
