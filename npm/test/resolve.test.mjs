@@ -25,6 +25,8 @@ const noDownload = async () => {
   throw new Error('download must not run');
 };
 
+const hostBinaryName = `agz-rust-mcp${process.platform === 'win32' ? '.exe' : ''}`;
+
 test('AGZ_RUST_MCP_BIN wins over a PATH candidate', async (t) => {
   const dir = tempDir(t);
   const override = join(dir, 'custom-agz-rust-mcp');
@@ -43,9 +45,9 @@ test('AGZ_RUST_MCP_BIN wins over a PATH candidate', async (t) => {
   assert.equal(result.path, override);
 });
 
-test('blank AGZ_RUST_MCP_BIN behaves as unset and PATH wins', async (t) => {
+test('blank AGZ_RUST_MCP_BIN behaves as unset and a matching PATH binary wins', async (t) => {
   const dir = tempDir(t);
-  const candidate = join(dir, 'agz-rust-mcp');
+  const candidate = join(dir, hostBinaryName);
   writeFileSync(candidate, '');
   const result = await resolveBinary({
     env: { [BIN_ENV]: '   ', PATH: dir },
@@ -53,9 +55,43 @@ test('blank AGZ_RUST_MCP_BIN behaves as unset and PATH wins', async (t) => {
     version: '0.2.0',
     platform: 'linux-x86_64',
     ensure: noDownload,
+    verifyVersion: (path, version) => {
+      assert.equal(path, candidate);
+      assert.equal(version, '0.2.0');
+    },
   });
   assert.equal(result.source, 'path');
   assert.equal(result.path, candidate);
+});
+
+test('an older or unusable PATH binary cannot override the requested release', async (t) => {
+  const dir = tempDir(t);
+  const candidate = join(dir, hostBinaryName);
+  writeFileSync(candidate, '');
+  for (const failure of ['agz-rust-mcp 0.3.0', 'EACCES']) {
+    let verified = false;
+    let requested;
+    const result = await resolveBinary({
+      env: { PATH: dir },
+      argv1: '/nonexistent/self',
+      version: '0.4.0',
+      platform: 'linux-x86_64',
+      verifyVersion: (path, version) => {
+        assert.equal(path, candidate);
+        assert.equal(version, '0.4.0');
+        verified = true;
+        throw new Error(failure);
+      },
+      log: () => {},
+      ensure: async (options) => {
+        requested = options;
+        return '/cache/0.4.0/agz-rust-mcp';
+      },
+    });
+    assert.equal(verified, true);
+    assert.equal(requested.version, '0.4.0');
+    assert.deepEqual(result, { path: '/cache/0.4.0/agz-rust-mcp', source: 'download' });
+  }
 });
 
 test('a set-but-missing AGZ_RUST_MCP_BIN fails closed', async () => {
@@ -74,9 +110,22 @@ test('a set-but-missing AGZ_RUST_MCP_BIN fails closed', async () => {
   assert.equal(resolveEnvOverride({ [BIN_ENV]: '' }), null);
 });
 
+test('a failed download never falls back to the rejected PATH binary', async (t) => {
+  const dir = tempDir(t);
+  writeFileSync(join(dir, hostBinaryName), '');
+  await assert.rejects(resolveBinary({
+    env: { PATH: dir },
+    version: '0.4.0',
+    platform: 'linux-x86_64',
+    verifyVersion: () => { throw new Error('old version'); },
+    log: () => {},
+    ensure: async () => { throw new Error('release unavailable'); },
+  }), /release unavailable/);
+});
+
 test('findOnPath finds a candidate and skips this launcher itself', (t) => {
   const dir = tempDir(t);
-  const candidate = join(dir, 'agz-rust-mcp');
+  const candidate = join(dir, hostBinaryName);
   writeFileSync(candidate, '');
   assert.equal(findOnPath({ env: { PATH: dir } }), candidate);
   assert.equal(findOnPath({ env: { PATH: dir }, selfPath: candidate }), null);

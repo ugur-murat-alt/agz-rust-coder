@@ -3,7 +3,7 @@
 //
 // Zero-dependency Node launcher that resolves the agz-rust-mcp server binary:
 //   1. AGZ_RUST_MCP_BIN environment override (must exist).
-//   2. `agz-rust-mcp` already on PATH (this launcher's own path is skipped).
+//   2. A matching-version `agz-rust-mcp` on PATH (this launcher is skipped).
 //   3. Pinned GitHub release download: HTTPS-only, size-bounded, SHA-256
 //      verified before extraction, extracted with `tar` via an argv array,
 //      re-verified as a regular file, `--version` checked, then atomically
@@ -243,11 +243,20 @@ export async function resolveBinary({
   version,
   platform,
   ensure = ensureBinary,
+  verifyVersion = verifyBinaryVersion,
+  log = (message) => process.stderr.write(`${BINARY_NAME}: ${message}\n`),
 } = {}) {
   const override = resolveEnvOverride(env);
   if (override !== null) return { path: override, source: 'env' };
   const onPath = findOnPath({ env, selfPath: argv1 });
-  if (onPath !== null) return { path: onPath, source: 'path' };
+  if (onPath !== null) {
+    try {
+      verifyVersion(onPath, version);
+      return { path: onPath, source: 'path' };
+    } catch {
+      log(`PATH binary does not verify as ${version}; resolving the matching release`);
+    }
+  }
   const path = await ensure({ version, platform, env });
   return { path, source: 'download' };
 }

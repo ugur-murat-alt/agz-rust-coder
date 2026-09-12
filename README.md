@@ -15,7 +15,7 @@ Rust Analyzer navigation, and returns write-free rename/refactor packages.
 
 ```bash
 # npm wrapper (requires Node.js; resolves the matching release binary)
-npx -y @agz-yazilim/agz-rust-mcp --version
+npx -y @agz-yazilim/agz-rust-mcp@latest --version
 
 # installer script (Linux x86_64): download install.sh and SHA256SUMS from the
 # latest release, verify the script, then run it
@@ -44,36 +44,17 @@ is unnecessary. Filesystem-based clients can use `agz-rust-mcp skills export`.
 See [bundled skills](docs/install.md#bundled-skills-current-source).
 Bundled skills are available from `0.4.0`; `0.3.0` binaries do not include them.
 
-Minimal OpenCode2 configuration (`opencode.jsonc`):
+| Client | Configuration | Guide |
+| --- | --- | --- |
+| ZCode | `~/.zcode/cli/config.json` → `mcp.servers.rust` | [ZCode](docs/install.md#zcode-zcodecliconfigjson) |
+| OpenCode | `opencode.jsonc` → `mcp.rust` | [OpenCode](docs/install.md#opencode-opencodejsonc) |
+| OpenCode2 | `opencode.jsonc` → `mcp.servers.rust` | [OpenCode2](docs/install.md#opencode2-opencodejsonc) |
+| Codex | `~/.codex/config.toml` → `mcp_servers.rust` | [Codex](docs/install.md#codex-codexconfigtoml) |
 
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "servers": {
-      "rust": {
-        "type": "local",
-        "command": ["agz-rust-mcp"],
-        "cwd": ".",
-        "codemode": false,
-        "timeout": {
-          "startup": 30000,
-          "catalog": 30000,
-          "execution": 720000
-        }
-      }
-    }
-  }
-}
-```
-
-Minimal Codex configuration (`~/.codex/config.toml`):
-
-```toml
-[mcp_servers.rust]
-command = "agz-rust-mcp"
-args = []
-```
+Use the example for your client; OpenCode and OpenCode2 have different layouts.
+All can launch `npx -y @agz-yazilim/agz-rust-mcp@latest`. Run it with `--version`
+once before connecting to complete the initial download. Use `@0.4.0` to pin
+this release. An older binary on PATH no longer overrides automatic resolution.
 
 The canonical current directory is the default authorized root. Add explicit
 roots with repeated `--allow-root` arguments when the client starts elsewhere;

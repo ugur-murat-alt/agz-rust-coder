@@ -44,14 +44,14 @@ bağlı adaptörler yerel çalıştırılabilir önkoşullar olmaya devam eder.
 ## Gereksinimler
 
 - Linux, macOS veya Windows (x86_64) ya da macOS (arm64).
-- MCP destekli bir istemci (OpenCode2, Codex veya başka bir stdio istemcisi).
+- MCP destekli bir istemci (ZCode, OpenCode, OpenCode2, Codex veya başka bir stdio istemcisi).
 - Rust `1.88.0` veya üzeri yalnızca `cargo install` ve kaynak yöntemleri için.
 - Node.js yalnızca npm wrapper için.
 
 ## 1. npm Wrapper
 
 ```bash
-npx -y @agz-yazilim/agz-rust-mcp --version
+npx -y @agz-yazilim/agz-rust-mcp@latest --version
 ```
 
 Wrapper yönetilen seçenektir: platformunuza uyan sürüm artifact'ını bulur ve
@@ -184,6 +184,13 @@ yola yönlendirin. Tam geliştirme kapısı için
 
 ## MCP İstemci Ayarı
 
+İstemciyi bağlamadan önce `npx -y @agz-yazilim/agz-rust-mcp@latest --version`
+komutunu bir kez çalıştırıp sürümü indirin ve doğrulayın. `@latest`, npm sürüm
+çözümlemesini açıkça yeniler; bu sürümü sabitlemek için `@0.4.0` kullanın.
+Otomatik PATH seçimi wrapper sürümüyle eşleşme ister; eski bir kurulu binary
+sessizce öne geçemez. `AGZ_RUST_MCP_BIN` bilinçli yerel geçersiz kılmadır ve
+otomatik sürüm seçimini atlar; yayımlanmış sürümü doğrularken bu değişkeni kaldırın.
+
 ### Birden çok checkout, worktree ve paket alt dizini
 
 Sunucu tek bir Git dalına bağlı değildir. Her çağrıda depo kökü, paket/kaynak
@@ -210,6 +217,55 @@ yerde başlatılıyorsa tekrarlanan `--allow-root <yol>` argümanlarıyla açık
 kökler ekleyin. İstemcinin MCP kökleri yapılandırılmış erişimi daraltabilir,
 genişletemez.
 
+### ZCode (`~/.zcode/cli/config.json`)
+
+Bu sunucuyu mevcut `mcp.servers` nesnesine ekleyin. Yalnız bir proje için o
+projedeki `.zcode/config.json` dosyasını kullanın. Bunlar ZCode'un yerel ayar
+yollarıdır; kullanıcı dosyasının yolunda ek bir `cli/` dizini bulunur.
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "rust": {
+        "command": "npx",
+        "args": ["-y", "@agz-yazilim/agz-rust-mcp@latest"]
+      }
+    }
+  }
+}
+```
+
+Settings → MCP Servers ekranı da bu girdiyi kabul eder. Mevcut sunucuları
+koruyun. `.agents/mcp.json`, aynı kapsamda yerel ZCode sunucusu yoksa yüklenen
+yedek yoldur; mevcut bir sunucunun bu dosyayı gölgelemesini önlemek için yerel
+ayar dosyasını tercih edin. Bkz.
+[ZCode MCP belgesi](https://zcode.z.ai/en/docs/mcp-services).
+
+### OpenCode (`opencode.jsonc`)
+
+Güncel OpenCode, komut dizisi ve sayısal timeout ile `mcp.rust` kullanır:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "rust": {
+      "type": "local",
+      "command": ["npx", "-y", "@agz-yazilim/agz-rust-mcp@latest"],
+      "enabled": true,
+      "timeout": 120000
+    }
+  }
+}
+```
+
+Kullanıcı genelinde `~/.config/opencode/opencode.json`, proje içinde
+`opencode.jsonc` kullanın. Bkz.
+[OpenCode MCP belgesi](https://opencode.ai/docs/mcp-servers/).
+Aşağıdaki OpenCode2 örneği farklı, gruplu bir yapı kullanır; kurulu istemcinizin
+kabul ettiği biçimi seçin.
+
 ### OpenCode2 (`opencode.jsonc`)
 
 ```jsonc
@@ -223,7 +279,7 @@ genişletemez.
         "cwd": ".",
         "codemode": false,
         "timeout": {
-          "startup": 30000,
+          "startup": 120000,
           "catalog": 30000,
           "execution": 720000
         }
@@ -236,7 +292,7 @@ genişletemez.
 Wrapper ile yönetilen varyant:
 
 ```jsonc
-"command": ["npx", "-y", "@agz-yazilim/agz-rust-mcp"],
+"command": ["npx", "-y", "@agz-yazilim/agz-rust-mcp@latest"],
 ```
 
 ### Codex (`~/.codex/config.toml`)
@@ -252,7 +308,9 @@ Wrapper ile yönetilen varyant:
 ```toml
 [mcp_servers.rust]
 command = "npx"
-args = ["-y", "@agz-yazilim/agz-rust-mcp"]
+args = ["-y", "@agz-yazilim/agz-rust-mcp@latest"]
+startup_timeout_sec = 120
+tool_timeout_sec = 720
 ```
 
 Yönetilen wrapper notu: npm wrapper ile alttaki binary güncellendiğinde istemci

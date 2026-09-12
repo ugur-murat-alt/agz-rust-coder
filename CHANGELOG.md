@@ -20,6 +20,10 @@ Changelog structure.
 
 ### Fixed
 
+- Require the npm launcher's automatic PATH candidate to match its package version;
+  otherwise resolve the matching release instead of silently starting an older MCP.
+- Document separate ZCode, OpenCode and OpenCode2 client configurations, explicit
+  latest-version npm resolution and first-download startup allowances.
 - Resolve authorized main checkouts, linked worktrees, package/source directories
   and inherited/shared path dependencies consistently across compiler and source tools.
 - Refresh added/removed Cargo targets and reject stale combined verification;

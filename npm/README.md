@@ -17,17 +17,55 @@ checksum-verified release binary; it does not bundle or modify it.
 ## Quick start
 
 ```sh
-npx -y @agz-yazilim/agz-rust-mcp
+npx -y @agz-yazilim/agz-rust-mcp@latest
 ```
 
-The first run resolves the server binary, verifies it, and caches it under
+Use `@latest` to request the current npm release, or `@0.4.0` to pin it. Before
+connecting a client, run the command with `--version` once to complete the first
+download. The first run resolves the server binary, verifies it, and caches it under
 `~/.cache/agz-rust-mcp/npm/<version>-<platform>/`. Later runs reuse the cache.
 Print the wrapper version without downloading anything:
 
 ```sh
-npx -y @agz-yazilim/agz-rust-mcp --agz-npm-version
+npx -y @agz-yazilim/agz-rust-mcp@latest --agz-npm-version
 # or
-AGZ_RUST_MCP_NPM_VERSION=1 npx -y @agz-yazilim/agz-rust-mcp
+AGZ_RUST_MCP_NPM_VERSION=1 npx -y @agz-yazilim/agz-rust-mcp@latest
+```
+
+## ZCode
+
+Merge this into `~/.zcode/cli/config.json` (user scope) or
+`.zcode/config.json` (workspace scope), preserving existing servers:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "rust": {
+        "command": "npx",
+        "args": ["-y", "@agz-yazilim/agz-rust-mcp@latest"]
+      }
+    }
+  }
+}
+```
+
+## OpenCode
+
+Current OpenCode's `opencode.jsonc` format:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "rust": {
+      "type": "local",
+      "command": ["npx", "-y", "@agz-yazilim/agz-rust-mcp@latest"],
+      "enabled": true,
+      "timeout": 120000
+    }
+  }
+}
 ```
 
 ## OpenCode2
@@ -41,11 +79,11 @@ AGZ_RUST_MCP_NPM_VERSION=1 npx -y @agz-yazilim/agz-rust-mcp
     "servers": {
       "rust": {
         "type": "local",
-        "command": ["npx", "-y", "@agz-yazilim/agz-rust-mcp"],
+        "command": ["npx", "-y", "@agz-yazilim/agz-rust-mcp@latest"],
         "cwd": ".",
         "codemode": false,
         "timeout": {
-          "startup": 30000,
+          "startup": 120000,
           "catalog": 30000,
           "execution": 720000
         }
@@ -62,14 +100,16 @@ AGZ_RUST_MCP_NPM_VERSION=1 npx -y @agz-yazilim/agz-rust-mcp
 ```toml
 [mcp_servers.agz-rust-mcp]
 command = "npx"
-args = ["-y", "@agz-yazilim/agz-rust-mcp"]
+args = ["-y", "@agz-yazilim/agz-rust-mcp@latest"]
+startup_timeout_sec = 120
+tool_timeout_sec = 720
 ```
 
 To skip `npx` startup on every launch, install the wrapper once and call the
 installed command directly:
 
 ```sh
-npm install --global @agz-yazilim/agz-rust-mcp
+npm install --global @agz-yazilim/agz-rust-mcp@latest
 ```
 
 ```toml
@@ -77,13 +117,21 @@ npm install --global @agz-yazilim/agz-rust-mcp
 command = "agz-rust-mcp"
 ```
 
+Client configuration reference: [ZCode](https://zcode.z.ai/en/docs/mcp-services),
+[OpenCode](https://opencode.ai/docs/mcp-servers/), and the
+[full installation guide](https://github.com/ugur-murat-alt/agz-rust-mcp/blob/main/docs/install.md).
+OpenCode and OpenCode2 use different configuration layouts.
+
 ## Binary resolution and integrity
 
 Resolution order:
 
 1. `AGZ_RUST_MCP_BIN` — absolute or relative path to an existing server binary.
-   If set but missing, the launcher fails closed instead of downloading.
-2. `agz-rust-mcp` on `PATH` (this launcher's own path is skipped).
+   This explicit local override bypasses automatic version selection. If set but
+   missing, the launcher fails closed instead of downloading; unset it to verify
+   the published release.
+2. A matching-version `agz-rust-mcp` on `PATH` (this launcher's own path is
+   skipped). An older or unusable PATH binary is ignored.
 3. Pinned GitHub release download from `ugur-murat-alt/agz-rust-mcp`.
 
 Download safety: HTTPS only (non-HTTPS redirects are refused), each download is

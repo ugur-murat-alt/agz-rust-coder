@@ -52,6 +52,10 @@ jobs:
         shell: bash
         run: cargo +1.88.0 fmt --all --check
 
+      - name: Test npm launcher version selection and integrity
+        shell: bash
+        run: npm --prefix npm test
+
       - name: Run strict Clippy on every platform
         shell: bash
         run: cargo +1.88.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
