@@ -20,6 +20,8 @@ Changelog structure.
 
 ### Fixed
 
+- Include required cache metadata in MCP catalogs so strict modern clients such
+  as ZCode can discover the tools, prompts and resources.
 - Require the npm launcher's automatic PATH candidate to match its package version;
   otherwise resolve the matching release instead of silently starting an older MCP.
 - Document separate ZCode, OpenCode and OpenCode2 client configurations, explicit

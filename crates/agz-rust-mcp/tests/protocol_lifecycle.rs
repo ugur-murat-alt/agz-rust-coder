@@ -216,6 +216,26 @@ async fn discover_selects_the_requested_2026_version() -> Result<()> {
         ProtocolVersion::V_2026_07_28
     );
 
+    // Strict modern clients require cache metadata on every catalog response.
+    // Deserializing through rmcp alone would hide absent optional fields.
+    for catalog in [
+        serde_json::to_value(client.peer().list_tools(None).await?)?,
+        serde_json::to_value(client.peer().list_prompts(None).await?)?,
+        serde_json::to_value(client.peer().list_resources(None).await?)?,
+        serde_json::to_value(client.peer().list_resource_templates(None).await?)?,
+        serde_json::to_value(
+            client
+                .peer()
+                .read_resource(ReadResourceRequestParams::new(
+                    "agz-rust-mcp://skills/agz-rust-workflow",
+                ))
+                .await?,
+        )?,
+    ] {
+        assert_eq!(catalog["ttlMs"], 0, "catalog must be immediately stale");
+        assert_eq!(catalog["cacheScope"], "private", "catalog must be private");
+    }
+
     client.cancel().await?;
     server_task.await??;
     Ok(())

@@ -41,6 +41,25 @@ ayarlarını değiştirmez. Alt komut verilmezse binary normal stdio sunucusudur
 Skilller bağlı sunucunun keşfedilen araçlarını kullanır; Rust/Cargo ve isteğe
 bağlı adaptörler yerel çalıştırılabilir önkoşullar olmaya devam eder.
 
+
+### Skill dosyalarının istemcilere teslimi
+
+Çalıştırılabilir dosyanın kurulumu (npm dahil), istemci ayar dizinlerine otomatik
+skill dosyası yazmaz. MCP prompt/resource'ları hemen sunulur; yerel skill keşfi
+için dışa aktarılan dört klasörün yerleştirilmesi gerekir. Yeni bir geçici dizine
+bir kez dışa aktarın; seçtiğiniz klasörleri mevcut özel bir skillin üzerine
+yazmadan kopyalayın:
+
+| İstemci | Kullanıcı skill dizini |
+| --- | --- |
+| Codex | `~/.codex/skills/<skill-name>/SKILL.md` |
+| OpenCode / OpenCode2 | `~/.config/opencode/skills/<skill-name>/SKILL.md` |
+| ZCode | `~/.zcode/skills/<skill-name>/SKILL.md` |
+
+Kurulumdan sonra istemcinin skill listesini doğrulayın. Binary güncellemesi
+içindeki prompt/resource'ları günceller; dışa aktarılmış dosyalar ayrıca
+yenilenmelidir. Kurulum, kullanıcı skill talimatlarını arka planda ezmez.
+
 ## Gereksinimler
 
 - Linux, macOS veya Windows (x86_64) ya da macOS (arm64).

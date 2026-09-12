@@ -39,6 +39,25 @@ configuration or change client settings. With no subcommand the binary remains
 the normal stdio server. Skills use the connected server's discovered tools;
 Rust/Cargo and optional adapters remain local executable prerequisites.
 
+
+### Filesystem delivery to each client
+
+Installing the executable (including through npm) does not automatically write
+skill files into client configuration directories. MCP prompts/resources are
+available immediately; native skill discovery needs the four exported folders.
+Export once to a new temporary directory, then copy the selected folders without
+replacing an existing customized skill:
+
+| Client | User skill directory |
+| --- | --- |
+| Codex | `~/.codex/skills/<skill-name>/SKILL.md` |
+| OpenCode / OpenCode2 | `~/.config/opencode/skills/<skill-name>/SKILL.md` |
+| ZCode | `~/.zcode/skills/<skill-name>/SKILL.md` |
+
+Verify the client's skill inventory after installation. Updating the binary
+updates its embedded prompts/resources; exported files need an explicit refresh.
+The installer does not overwrite user skill instructions in the background.
+
 ## Requirements
 
 - Linux, macOS, or Windows on x86_64, or macOS on arm64.
