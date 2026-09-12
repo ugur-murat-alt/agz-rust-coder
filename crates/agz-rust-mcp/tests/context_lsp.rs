@@ -95,11 +95,14 @@ impl Drop for TestRoot {
 }
 
 fn workspace_root(path: &Path) -> WorkspaceRoot {
-    let guard = RootGuard::new([path.to_owned()], std::iter::empty()).expect("root guard");
+    // A global server permits the parent directory, but context source paths
+    // must remain relative to the explicitly selected child workspace.
+    let guard = RootGuard::new([path.parent().unwrap().to_owned()], std::iter::empty())
+        .expect("parent root guard");
     let snapshot = guard
         .snapshot(ClientRoots::unsupported())
         .expect("root snapshot");
-    snapshot.select(None).expect("select workspace root")
+    snapshot.select(Some(path)).expect("select child workspace")
 }
 
 fn manager() -> RustAnalyzerManager {

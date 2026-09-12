@@ -22,16 +22,16 @@
       "destructiveHint": true,
       "openWorldHint": true
     },
-    "inputSchemaHash": "fnv1a64:4b06b5d097c2c646",
-    "outputSchemaHash": "fnv1a64:7d93a0df82ea6895"
+    "inputSchemaHash": "fnv1a64:be569938ddffa481",
+    "outputSchemaHash": "fnv1a64:953885aae37f180d"
   },
   "check": {
     "annotations": {
       "destructiveHint": true,
       "openWorldHint": true
     },
-    "inputSchemaHash": "fnv1a64:31844fe83727cfe2",
-    "outputSchemaHash": "fnv1a64:c4521d513d0c3238"
+    "inputSchemaHash": "fnv1a64:94a187b78c3a0a79",
+    "outputSchemaHash": "fnv1a64:998c25ac48a1f709"
   },
   "context": {
     "annotations": {
@@ -73,7 +73,7 @@
       "destructiveHint": true,
       "openWorldHint": true
     },
-    "inputSchemaHash": "fnv1a64:0cbce897f1ac3141",
+    "inputSchemaHash": "fnv1a64:856a6289f05b2b96",
     "outputSchemaHash": "fnv1a64:4cddacf3126d96a0"
   },
   "hierarchy": {
@@ -99,8 +99,8 @@
       "destructiveHint": true,
       "openWorldHint": true
     },
-    "inputSchemaHash": "fnv1a64:e7a1c9734e09e87f",
-    "outputSchemaHash": "fnv1a64:e9ca504cdd22c898"
+    "inputSchemaHash": "fnv1a64:fcc9995e78ba9e5c",
+    "outputSchemaHash": "fnv1a64:8cdd2fd865dcdd17"
   },
   "refactor": {
     "annotations": {
@@ -129,6 +129,14 @@
     "inputSchemaHash": "fnv1a64:4fd265c45d85fd86",
     "outputSchemaHash": "fnv1a64:f6c8a3a7308d5a62"
   },
+  "repair": {
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": true
+    },
+    "inputSchemaHash": "fnv1a64:b2ae887ccb86bc50",
+    "outputSchemaHash": "fnv1a64:0b4c3ebe00896b99"
+  },
   "symbol": {
     "annotations": {
       "idempotentHint": true,
@@ -147,21 +155,13 @@
     "inputSchemaHash": "fnv1a64:707bec7ec26c5fc8",
     "outputSchemaHash": "fnv1a64:eeaf84b47f98d84f"
   },
-  "repair": {
-    "annotations": {
-      "destructiveHint": true,
-      "openWorldHint": true
-    },
-    "inputSchemaHash": "fnv1a64:b2ae887ccb86bc50",
-    "outputSchemaHash": "fnv1a64:78db55cacf302b20"
-  },
   "verify": {
     "annotations": {
       "destructiveHint": true,
       "openWorldHint": true
     },
-    "inputSchemaHash": "fnv1a64:cbc29dd7797ea9c9",
-    "outputSchemaHash": "fnv1a64:a5e5e2e48b01c614"
+    "inputSchemaHash": "fnv1a64:4c730f389dbe12b6",
+    "outputSchemaHash": "fnv1a64:d0b6011e939cb06b"
   },
   "work": {
     "annotations": {

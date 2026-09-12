@@ -12,6 +12,7 @@ pub mod lsp;
 pub mod process;
 pub mod repair;
 pub mod server;
+pub mod skills;
 pub mod telemetry;
 pub mod tools;
 pub mod work;

@@ -82,6 +82,10 @@ impl Default for IdentityLimits {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct InputIdentity {
     pub hash: String,
+    /// Workspace/dependency contents and layout, independent of the Cargo
+    /// command or execution profile. Used only for scheduling, never as a
+    /// substitute for the full validation identity.
+    pub source_hash: String,
     pub command_hash: String,
     pub environment_hash: String,
     pub head: String,
@@ -372,9 +376,7 @@ fn compute_input_identity_inner(
     let command_hash = hash_command(input.cargo, input.command, input.environment);
     let environment_hash = hash_environment(input.environment);
     let mut hasher = IdentityHasher::new();
-    hasher.write_label("agz-rust-mcp-input-identity");
-    hasher.write_str(&command_hash);
-    hasher.write_str(&environment_hash);
+    hasher.write_label("agz-rust-mcp-source-identity-v1");
 
     let head_args = git_args(["rev-parse", "--verify", "HEAD"]);
     let head_result = run_git(input, &head_args, &authorized);
@@ -511,8 +513,15 @@ fn compute_input_identity_inner(
     }
 
     input.git.checkpoint()?;
+    let source_hash = hasher.finish();
+    let mut validation = IdentityHasher::new();
+    validation.write_label("agz-rust-mcp-input-identity-v2");
+    validation.write_str(&source_hash);
+    validation.write_str(&command_hash);
+    validation.write_str(&environment_hash);
     Ok(InputIdentity {
-        hash: hasher.finish(),
+        hash: validation.finish(),
+        source_hash,
         command_hash,
         environment_hash,
         head,

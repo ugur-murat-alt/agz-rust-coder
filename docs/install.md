@@ -9,6 +9,36 @@ The next step is the [tool and configuration reference](tools.md).
 your MCP client, speaking the Model Context Protocol on stdin/stdout. Every
 method below installs the same `agz-rust-mcp` executable.
 
+## Bundled skills (current source)
+
+The unreleased source bundles four versioned `SKILL.md` files inside the same
+executable. They work offline and need no separate skill package or MCP server.
+`prompts/list` discovers `workflow`, `repair`, `refactor`, and `performance`;
+`prompts/get` accepts an optional `task` string (bounded to 4,000 sanitized
+characters). `resources/list` exposes the same content under
+`agz-rust-mcp://skills/<skill-name>`. The legacy workflow resource remains an alias.
+Clients decide whether to discover/invoke prompts or filesystem skills; MCP
+resource availability alone does not enable automatic skill selection.
+
+For clients that discover filesystem skills, use a source-built binary:
+
+```bash
+agz-rust-mcp skills list
+agz-rust-mcp skills show agz-rust-workflow
+# Existing trusted parent; destination must NOT exist:
+agz-rust-mcp skills export --dir /path/to/new-skills
+```
+
+The destination contains `agz-rust-workflow`, `agz-rust-repair`,
+`agz-rust-refactor`, and `agz-rust-performance`, each with one `SKILL.md`.
+Choose the client's supported skill directory as the new destination, or copy
+the selected skill folders into its existing directory after review. Export
+refuses existing destinations, never replaces custom skills, and reports any
+partial output on failure. These CLI commands do not start MCP/Cargo, read server
+configuration or change client settings. With no subcommand the binary remains
+the normal stdio server. Skills use the connected server's discovered tools;
+Rust/Cargo and optional adapters remain local executable prerequisites.
+
 ## Requirements
 
 - Linux, macOS, or Windows on x86_64, or macOS on arm64.
@@ -147,6 +177,27 @@ on `PATH`, or point the client at its absolute path. See
   does not support Windows. Add the extraction directory to `PATH`.
 
 ## MCP Client Setup
+
+### Multiple checkouts, worktrees and package subdirectories
+
+The server is not tied to one Git branch. Supply an absolute `dir` for the
+repository root, package/source subdirectory or linked worktree in each call.
+Configure their common project parent once using `--allow-root`, plus any other
+worktree location (for example a client's dedicated worktrees directory).
+Shared path dependencies outside the selected worktree need an explicit
+`--allow-dependency-root`. Example server arguments, with your own paths:
+
+```text
+--allow-root /projects --allow-root /client-worktrees --allow-dependency-root /projects
+```
+
+These are explicit local trust boundaries; MCP client roots may narrow them.
+The current source discovers inherited workspace dependencies from member/source
+directories and binds external dependency inputs to the selected worktree, not
+the broad configured parent. Different checkouts retain separate cache keys.
+In auto cache mode an unsafe/external project target falls back to an isolated
+target; project-only mode still requires a safe in-workspace target. A missing
+directory or inaccessible dependency produces a bounded reason, not a pass.
 
 `agz-rust-mcp` is a standalone stdio server; any MCP-capable client can run it.
 The canonical current directory is the default authorized root. Add explicit

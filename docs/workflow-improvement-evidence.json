@@ -1,0 +1,777 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-09-13",
+  "baseCommit": "10a4d8cb11c017efe30c87625c9d01c27410ef55",
+  "branch": "codex/rust-workflow-efficiency",
+  "releasePublished": false,
+  "platform": "Linux x86_64",
+  "rustToolchain": "1.88.0",
+  "binarySha256": "6df532c0c75bcffe84301511a59d26143aea66f82c2b0f6669cc7f90f5ce196a",
+  "tools": 20,
+  "bundledSkills": [
+    "agz-rust-workflow",
+    "agz-rust-repair",
+    "agz-rust-refactor",
+    "agz-rust-performance"
+  ],
+  "compactResponse": {
+    "baselineBinarySha256": "3252c8c6fcda1716613215772e332a2a52406882f18931cc96c92cfc5aba2d92",
+    "compilerEvidenceIdentical": true,
+    "baselineMedianBytes": 46827,
+    "candidateMedianBytes": 8517,
+    "reductionPercent": 81.81,
+    "candidateBinarySha256": "e10ce04b0d809ef15816b5b6d3975d81c580575e21f28da9d53482a37c27fd15"
+  },
+  "runtime": {
+    "binarySha256": "e10ce04b0d809ef15816b5b6d3975d81c580575e21f28da9d53482a37c27fd15",
+    "realGitWorktrees": true,
+    "sharedDependencyChangesDetected": true,
+    "brokenWorktreeDoesNotPoisonMain": true,
+    "results": [
+      {
+        "tool": "check",
+        "directory": "project",
+        "status": "FAST_PASS"
+      },
+      {
+        "tool": "check",
+        "directory": "managed-worktree",
+        "status": "FAST_PASS"
+      },
+      {
+        "tool": "check",
+        "directory": "managed-worktree",
+        "status": "FAST_PASS"
+      },
+      {
+        "tool": "check",
+        "directory": "project",
+        "status": "FAST_PASS"
+      },
+      {
+        "tool": "check",
+        "directory": "managed-worktree",
+        "status": "FAST_PASS"
+      },
+      {
+        "tool": "check",
+        "directory": "managed-worktree",
+        "status": "FAST_PASS"
+      },
+      {
+        "tool": "audit",
+        "directory": "managed-worktree",
+        "status": "CLEAN"
+      },
+      {
+        "tool": "context",
+        "directory": "managed-worktree",
+        "status": "OK"
+      },
+      {
+        "tool": "api",
+        "directory": "managed-worktree",
+        "status": "OK"
+      },
+      {
+        "tool": "symbol",
+        "directory": "managed-worktree",
+        "status": "OK",
+        "items": 1
+      },
+      {
+        "tool": "check",
+        "directory": "managed-worktree",
+        "status": "FAIL"
+      },
+      {
+        "tool": "check",
+        "directory": "project",
+        "status": "FAST_PASS"
+      },
+      {
+        "tool": "check",
+        "directory": "project",
+        "status": "FAIL"
+      }
+    ]
+  },
+  "validation": {
+    "format": "PASS",
+    "clippyWorkspaceAllTargetsAllFeaturesDenyWarnings": "PASS",
+    "testsWorkspaceAllTargetsAllFeatures": "PASS",
+    "optionalTestsIgnored": 7,
+    "msrvWorkspaceAllTargetsAllFeatures": "PASS",
+    "releaseBuild": "PASS",
+    "smokes": [
+      {
+        "name": "protocol-smoke",
+        "exitCode": 0,
+        "seconds": 14.71,
+        "log": ".state/final-delivery-20260913/evidence/final/agz-final-protocol-smoke.log"
+      },
+      {
+        "name": "opencode-smoke",
+        "exitCode": 0,
+        "seconds": 14.47,
+        "log": ".state/final-delivery-20260913/evidence/final/agz-final-opencode-smoke.log"
+      },
+      {
+        "name": "benchmark-smoke",
+        "exitCode": 0,
+        "seconds": 2.02,
+        "log": ".state/final-delivery-20260913/evidence/final/agz-final-benchmark-smoke.log"
+      }
+    ],
+    "cargoPackage": "PASS: archive includes four skills and packaged crate compiles",
+    "commandRuns": [
+      {
+        "name": "fmt",
+        "exitCode": 0,
+        "seconds": 1.16,
+        "log": ".state/final-delivery-20260913/evidence/final/agz-final-delivery-fmt.log"
+      },
+      {
+        "name": "clippy",
+        "exitCode": 0,
+        "seconds": 16.06,
+        "log": ".state/final-delivery-20260913/evidence/final/agz-final-delivery-clippy.log"
+      },
+      {
+        "name": "tests",
+        "exitCode": 0,
+        "seconds": 131.24,
+        "log": ".state/final-delivery-20260913/evidence/final/agz-final-delivery-tests.log"
+      },
+      {
+        "name": "msrv",
+        "exitCode": 0,
+        "seconds": 8.95,
+        "log": ".state/final-delivery-20260913/evidence/final/agz-final-delivery-msrv.log"
+      },
+      {
+        "name": "release",
+        "exitCode": 0,
+        "seconds": 95.69,
+        "log": ".state/final-delivery-20260913/evidence/final/agz-final-delivery-release.log"
+      }
+    ],
+    "testsPassed": 610
+  },
+  "limits": [
+    "Response bytes are not billed tokens or Cargo/runtime speed.",
+    "Local Linux evidence does not establish Windows/macOS or CI results.",
+    "Seven opt-in tests remain ignored in the standard suite.",
+    "Scope timing compares the same one selected test; it does not replace full-workspace validation. Warm total latency improved less than Cargo time.",
+    "Verify cold median changed by 1.28% in three samples; this does not establish a meaningful cold-start speedup.",
+    "Verify identity uses pre/post comparisons, not an atomic filesystem snapshot.",
+    "Historical compact-response and explicit-selection measurements retain their own binary SHA and were not remeasured on this candidate.",
+    "check.queueMs includes admission/preflight and scheduler waiting; the benchmark does not claim to isolate preflight from that aggregate. The zero-debounce diagnostic arm establishes the wait contribution.",
+    "Target-coverage candidate fixes correctness. Earlier transport/build/scheduler measurements retain their original candidate hashes and were not remeasured for this binary.",
+    "Final mapping correctness guard does not rerun historical timing benchmarks; each measurement retains its original binary SHA. Separate mapping/impact/nextest scopes cannot grant FULL_REQUESTED_SUITE."
+  ],
+  "localEvidenceDirectory": ".state/final-delivery-20260913/evidence/final",
+  "localInstallation": {
+    "developmentBuild": true,
+    "binarySha256": "6df532c0c75bcffe84301511a59d26143aea66f82c2b0f6669cc7f90f5ce196a",
+    "bundledSkillsInstalled": 4,
+    "changedSkills": [],
+    "configuredLauncherSmoke": {
+      "configuredLauncher": "PASS",
+      "launchDirectory": "empty legacy project directory",
+      "realLinkedWorktree": true,
+      "unicodeAndSpaces": true,
+      "tools": 20,
+      "prompts": 4,
+      "resources": 8,
+      "installedSkillMatchesPrompt": true,
+      "advisoryTargetInventory": true,
+      "oneCanonicalCargoSuite": true,
+      "ordinaryExampleNotCountedAsTest": true,
+      "explicitExampleBuild": true,
+      "brokenWorktreeDoesNotPoisonMain": true,
+      "results": [
+        {
+          "directory": "main-src",
+          "status": "FULL_REQUESTED_SUITE",
+          "testsExecuted": 3
+        },
+        {
+          "directory": "worktree-src",
+          "status": "FULL_REQUESTED_SUITE",
+          "testsExecuted": 3
+        },
+        {
+          "directory": "worktree-examples",
+          "target": "build",
+          "status": "FAST_PASS"
+        },
+        {
+          "directory": "worktree-src",
+          "status": "FAIL"
+        },
+        {
+          "directory": "main-src",
+          "status": "FULL_REQUESTED_SUITE"
+        }
+      ]
+    },
+    "backupManifest": ".state/final-delivery-20260913/evidence/final/installation.json",
+    "existingClientConnection": "reconnect or app restart required"
+  },
+  "scopeSelection": {
+    "comparison": {
+      "baselineBinarySha256": "928fa9a9949291071a79efed00066bbb185e33298da86d37962c7dd56c0e9fe5",
+      "scope": "same selected test; excluded workspace targets are not validated",
+      "cacheStates": {
+        "cold": {
+          "baseline": {
+            "medianWallMs": 1899.06,
+            "medianCargoMs": 1270
+          },
+          "candidate": {
+            "medianWallMs": 991.95,
+            "medianCargoMs": 352
+          },
+          "cargoReductionPercent": 72.28
+        },
+        "warm": {
+          "baseline": {
+            "medianWallMs": 649.15,
+            "medianCargoMs": 128
+          },
+          "candidate": {
+            "medianWallMs": 633.18,
+            "medianCargoMs": 103
+          },
+          "cargoReductionPercent": 19.53
+        }
+      }
+    },
+    "coldBuildUnits": {
+      "before": 40,
+      "after": 3
+    },
+    "samplesPerCacheStatePerBinary": 3,
+    "sameExecutedTestsPerRun": 1,
+    "fixturePackages": 8,
+    "correctness": "explicit scope is development subset; unrelated failures do not block the selected target; zero-test evidence and conflicting mappings cannot grant pass",
+    "selectors": {
+      "packages": [
+        "scope-0"
+      ],
+      "cargoTarget": {
+        "kind": "test",
+        "name": "focused"
+      }
+    },
+    "rawEvidenceDirectory": ".state/scope-selection-20260912",
+    "candidateBinarySha256": "e10ce04b0d809ef15816b5b6d3975d81c580575e21f28da9d53482a37c27fd15"
+  },
+  "verifyInventory": {
+    "candidateBinarySha256": "33c19fc14eca308e998cb054726c4bb5d76929eeb599de8f1d6631dfb08ed24a",
+    "comparison": {
+      "baselineBinarySha256": "e10ce04b0d809ef15816b5b6d3975d81c580575e21f28da9d53482a37c27fd15",
+      "sameFullInventory": true,
+      "before": {
+        "cold": {
+          "medianWallMs": 5138.7,
+          "medianExecutedCases": 20
+        },
+        "warm": {
+          "medianWallMs": 4797.64,
+          "medianExecutedCases": 20
+        }
+      },
+      "after": {
+        "cold": {
+          "medianWallMs": 5073.15,
+          "medianExecutedCases": 6
+        },
+        "warm": {
+          "medianWallMs": 4271.75,
+          "medianExecutedCases": 6
+        }
+      }
+    },
+    "samplesPerCacheStatePerBinary": 3,
+    "fixturePackages": 2,
+    "distinctTests": 6,
+    "warmLatencyReductionPercent": 10.96,
+    "correctness": [
+      "Each ordinary target and doctest executes with its own resolved package/target arguments.",
+      "An empty target cannot borrow executed-test evidence from another target.",
+      "Invalid or conflicting mapping ownership cannot silently broaden the command.",
+      "A changed workspace identity across inventory planning/execution returns STALE.",
+      "Added and removed Cargo auto-discovered targets invalidate cached metadata; ordinary Rust body edits retain cache hits.",
+      "Metadata inputs changing during discovery are rejected before cache publication."
+    ],
+    "runtime": {
+      "configuredLauncher": "PASS",
+      "launchDirectory": "empty legacy project directory",
+      "realLinkedWorktree": true,
+      "unicodeAndSpaces": true,
+      "tools": 20,
+      "prompts": 4,
+      "resources": 8,
+      "installedSkillMatchesPrompt": true,
+      "perTargetInventory": true,
+      "brokenWorktreeDoesNotPoisonMain": true,
+      "results": [
+        {
+          "directory": "main-src",
+          "status": "FULL_REQUESTED_SUITE",
+          "testsExecuted": 3
+        },
+        {
+          "directory": "worktree-src",
+          "status": "FULL_REQUESTED_SUITE",
+          "testsExecuted": 3
+        },
+        {
+          "directory": "worktree-src",
+          "status": "FAIL"
+        },
+        {
+          "directory": "main-src",
+          "status": "FULL_REQUESTED_SUITE"
+        }
+      ]
+    },
+    "rawEvidenceDirectory": ".state/verify-inventory-20260912",
+    "intermediateFindings": [
+      "The first install smoke found stale target inventory; the candidate was automatically rolled back and replaced only after the metadata correction passed.",
+      "One earlier concurrency test failed with a temporary fixture PathNotFound; the isolated rerun and final full suite passed. Root cause remains unproven; assertions were not weakened."
+    ]
+  },
+  "scheduler": {
+    "candidateBinarySha256": "094a0b69a018f95cc287fd00964defd55db28d2f214e6f72ba5e33c2f68c873d",
+    "requestLatency": {
+      "baselineBinarySha256": "33c19fc14eca308e998cb054726c4bb5d76929eeb599de8f1d6631dfb08ed24a",
+      "before": {
+        "500": {
+          "cold": {
+            "wallMs": 939.19,
+            "cargoMs": 287,
+            "queueMs": 642
+          },
+          "warm": {
+            "wallMs": 635.95,
+            "cargoMs": 118,
+            "queueMs": 512
+          }
+        },
+        "0": {
+          "cold": {
+            "wallMs": 429.3,
+            "cargoMs": 285,
+            "queueMs": 136
+          },
+          "warm": {
+            "wallMs": 135.54,
+            "cargoMs": 119,
+            "queueMs": 9
+          }
+        }
+      },
+      "after": {
+        "500": {
+          "cold": {
+            "wallMs": 935.46,
+            "cargoMs": 289,
+            "queueMs": 640
+          },
+          "warm": {
+            "wallMs": 137.94,
+            "cargoMs": 121,
+            "queueMs": 10
+          }
+        },
+        "0": {
+          "cold": {
+            "wallMs": 428.6,
+            "cargoMs": 285,
+            "queueMs": 136
+          },
+          "warm": {
+            "wallMs": 136.84,
+            "cargoMs": 121,
+            "queueMs": 10
+          }
+        }
+      }
+    },
+    "fullVerifyLatency": {
+      "baselineBinarySha256": "33c19fc14eca308e998cb054726c4bb5d76929eeb599de8f1d6631dfb08ed24a",
+      "sameFullInventory": true,
+      "before": {
+        "cold": {
+          "medianWallMs": 5073.15,
+          "medianExecutedCases": 6
+        },
+        "warm": {
+          "medianWallMs": 4271.75,
+          "medianExecutedCases": 6
+        }
+      },
+      "after": {
+        "cold": {
+          "medianWallMs": 2544.59,
+          "medianExecutedCases": 6
+        },
+        "warm": {
+          "medianWallMs": 1233.07,
+          "medianExecutedCases": 6
+        }
+      }
+    },
+    "warmRequestLatencyReductionPercent": 78.31,
+    "warmVerifyLatencyReductionPercent": 71.13,
+    "samplesPerCacheStatePerBinaryPerSetting": 3,
+    "correctness": [
+      "Concurrent check/test commands on unchanged source both finish with separate commands and evidence; the baseline superseded one of them.",
+      "The command/environment-bound validation hash remains separate from the workspace source scheduling hash.",
+      "One quiet-input window is shared across unchanged source in one MCP process; changed source or explicit dirty notification rearms it.",
+      "The history retains at most 256 roots and conservatively rearms an evicted root.",
+      "No completed Cargo evidence is reused; cold/warm requests have distinct job IDs and actual executed-test evidence.",
+      "Cancellation, supersede on changed input, source freshness, worktree/root-epoch isolation and deadlines pass focused and full validation."
+    ],
+    "runtime": {
+      "configuredLauncher": "PASS",
+      "launchDirectory": "empty legacy project directory",
+      "realLinkedWorktree": true,
+      "unicodeAndSpaces": true,
+      "tools": 20,
+      "prompts": 4,
+      "resources": 8,
+      "installedSkillMatchesPrompt": true,
+      "perTargetInventory": true,
+      "brokenWorktreeDoesNotPoisonMain": true,
+      "results": [
+        {
+          "directory": "main-src",
+          "status": "FULL_REQUESTED_SUITE",
+          "testsExecuted": 3
+        },
+        {
+          "directory": "worktree-src",
+          "status": "FULL_REQUESTED_SUITE",
+          "testsExecuted": 3
+        },
+        {
+          "directory": "worktree-src",
+          "status": "FAIL"
+        },
+        {
+          "directory": "main-src",
+          "status": "FULL_REQUESTED_SUITE"
+        }
+      ]
+    },
+    "concurrentMcpRuntime": [
+      {
+        "label": "before",
+        "binarySha256": "33c19fc14eca308e998cb054726c4bb5d76929eeb599de8f1d6631dfb08ed24a",
+        "results": [
+          {
+            "target": "test",
+            "status": "SUPERSEDED",
+            "jobId": "gate-preflight",
+            "commandHash": "pending",
+            "commands": [],
+            "executedCases": 0
+          },
+          {
+            "target": "check",
+            "status": "FAST_PASS",
+            "jobId": "gate-1335716-1",
+            "commandHash": "b90b017d3157e68bce4435e3d0475917810d28b9c9df5133ff4667d3377f6b61",
+            "commands": [
+              "<cargo-wrapper> check --manifest-path <fixture-path> --locked --message-format=json --workspace"
+            ],
+            "executedCases": 0
+          }
+        ]
+      },
+      {
+        "label": "after",
+        "binarySha256": "094a0b69a018f95cc287fd00964defd55db28d2f214e6f72ba5e33c2f68c873d",
+        "results": [
+          {
+            "target": "test",
+            "status": "FAST_PASS",
+            "jobId": "gate-1335927-1",
+            "commandHash": "47ed1215414990eaa35979f5ee18e64cd6812b50c30b2085912fb6232057da38",
+            "commands": [
+              "<cargo-wrapper> test --manifest-path <fixture-path> --locked --all-targets --message-format=json --workspace"
+            ],
+            "executedCases": 1
+          },
+          {
+            "target": "check",
+            "status": "FAST_PASS",
+            "jobId": "gate-1335927-0",
+            "commandHash": "6924c972733f3443c5843470aea9a39cf208c1750789b32e80a506f2dc4c36c1",
+            "commands": [
+              "<cargo-wrapper> check --manifest-path <fixture-path> --locked --message-format=json --workspace"
+            ],
+            "executedCases": 0
+          }
+        ]
+      }
+    ],
+    "rawEvidenceDirectory": ".state/scheduler-latency-20260912"
+  },
+  "targetCoverage": {
+    "candidateBinarySha256": "cc3c758e7c605d5b943de1dca18d447203d8349fa61950f26ebc3db142bd2c1d",
+    "baselineBinarySha256": "094a0b69a018f95cc287fd00964defd55db28d2f214e6f72ba5e33c2f68c873d",
+    "cases": [
+      {
+        "case": "enabled-example",
+        "cargoOracleExit": 101,
+        "before": "FULL_REQUESTED_SUITE",
+        "after": "FAIL"
+      },
+      {
+        "case": "compile-example",
+        "cargoOracleExit": 101,
+        "before": "FULL_REQUESTED_SUITE",
+        "after": "FAIL"
+      },
+      {
+        "case": "enabled-bench",
+        "cargoOracleExit": 101,
+        "before": "FULL_REQUESTED_SUITE",
+        "after": "FAIL"
+      },
+      {
+        "case": "proc-doctest",
+        "cargoOracleExit": 101,
+        "before": "FULL_REQUESTED_SUITE",
+        "after": "FAIL"
+      },
+      {
+        "case": "cdylib-test",
+        "cargoOracleExit": 101,
+        "before": "INCONCLUSIVE",
+        "after": "FAIL"
+      }
+    ],
+    "fixtureProvenance": "Fixture hashes captured after the baseline run, before the candidate run. The controlled fixture files were retained unchanged. Original Cargo oracle runs were reused; no new oracle timing is claimed.",
+    "toolSurface": "20 tools unchanged; build added to existing check/profile/verify/change schemas",
+    "compilationEvidence": "COMPILED with zero executed tests; opaque custom harness success remains incomplete evidence",
+    "package": {
+      "path": "<host-path>",
+      "sha256": "b63e5cd83eb7de834ec3f69cde512966c4dd932a72fb8823f505dfe44bf8626f",
+      "skills": 4,
+      "sourceMatches": true
+    },
+    "runtime": {
+      "configuredLauncher": "PASS",
+      "launchDirectory": "empty legacy project directory",
+      "realLinkedWorktree": true,
+      "unicodeAndSpaces": true,
+      "tools": 20,
+      "prompts": 4,
+      "resources": 8,
+      "installedSkillMatchesPrompt": true,
+      "perTargetInventory": true,
+      "ordinaryExampleCompiledWithoutTests": true,
+      "explicitExampleBuild": true,
+      "brokenWorktreeDoesNotPoisonMain": true,
+      "results": [
+        {
+          "directory": "main-src",
+          "status": "FULL_REQUESTED_SUITE",
+          "testsExecuted": 3
+        },
+        {
+          "directory": "worktree-src",
+          "status": "FULL_REQUESTED_SUITE",
+          "testsExecuted": 3
+        },
+        {
+          "directory": "worktree-examples",
+          "target": "build",
+          "status": "FAST_PASS"
+        },
+        {
+          "directory": "worktree-src",
+          "status": "FAIL"
+        },
+        {
+          "directory": "main-src",
+          "status": "FULL_REQUESTED_SUITE"
+        }
+      ]
+    },
+    "rawEvidenceDirectory": ".state/target-coverage-20260912",
+    "references": [
+      "https://doc.rust-lang.org/cargo/commands/cargo-test.html#target-selection",
+      "https://doc.rust-lang.org/cargo/reference/cargo-targets.html"
+    ]
+  },
+  "featureSemantics": {
+    "candidateBinarySha256": "f030f54eedb1e475992206260e8c4a776abbfb983e8a14da405c671278eae154",
+    "baselineBinarySha256": "cc3c758e7c605d5b943de1dca18d447203d8349fa61950f26ebc3db142bd2c1d",
+    "cases": [
+      {
+        "case": "gated",
+        "cargoOracleExit": 0,
+        "before": "FAIL",
+        "after": "FULL_REQUESTED_SUITE"
+      },
+      {
+        "case": "workspace-unqualified",
+        "cargoOracleExit": 0,
+        "before": "FAIL",
+        "after": "FULL_REQUESTED_SUITE"
+      },
+      {
+        "case": "workspace-qualified",
+        "cargoOracleExit": 0,
+        "before": "FAIL",
+        "after": "FULL_REQUESTED_SUITE"
+      },
+      {
+        "case": "unification",
+        "cargoOracleExit": 101,
+        "before": "FULL_REQUESTED_SUITE",
+        "after": "FAIL"
+      }
+    ],
+    "fixtureHashesCapturedBeforeBaseline": true,
+    "execution": "One Cargo invocation retains full requested configuration; target inventory remains advisory, groups carry execution evidence.",
+    "transport": "20 tools and unchanged input schemas/annotations; additive executionGroups and test summary counters.",
+    "latencyComparison": {
+      "baselineBinarySha256": "cc3c758e7c605d5b943de1dca18d447203d8349fa61950f26ebc3db142bd2c1d",
+      "sameFullInventory": true,
+      "before": {
+        "cold": {
+          "medianWallMs": 2531.7,
+          "medianExecutedCases": 6
+        },
+        "warm": {
+          "medianWallMs": 1225.62,
+          "medianExecutedCases": 6
+        }
+      },
+      "after": {
+        "cold": {
+          "medianWallMs": 1550.92,
+          "medianExecutedCases": 6
+        },
+        "warm": {
+          "medianWallMs": 709.32,
+          "medianExecutedCases": 6
+        }
+      }
+    },
+    "samplesPerBinaryPerCacheState": 3,
+    "cargoInvocationsBefore": 6,
+    "cargoInvocationsAfter": 1,
+    "sameExecutedTests": 6,
+    "warmLatencyReductionPercent": 42.13,
+    "coldLatencyReductionPercent": 38.74,
+    "runtime": {
+      "configuredLauncher": "PASS",
+      "launchDirectory": "empty legacy project directory",
+      "realLinkedWorktree": true,
+      "unicodeAndSpaces": true,
+      "tools": 20,
+      "prompts": 4,
+      "resources": 8,
+      "installedSkillMatchesPrompt": true,
+      "advisoryTargetInventory": true,
+      "oneCanonicalCargoSuite": true,
+      "ordinaryExampleNotCountedAsTest": true,
+      "explicitExampleBuild": true,
+      "brokenWorktreeDoesNotPoisonMain": true,
+      "results": [
+        {
+          "directory": "main-src",
+          "status": "FULL_REQUESTED_SUITE",
+          "testsExecuted": 3
+        },
+        {
+          "directory": "worktree-src",
+          "status": "FULL_REQUESTED_SUITE",
+          "testsExecuted": 3
+        },
+        {
+          "directory": "worktree-examples",
+          "target": "build",
+          "status": "FAST_PASS"
+        },
+        {
+          "directory": "worktree-src",
+          "status": "FAIL"
+        },
+        {
+          "directory": "main-src",
+          "status": "FULL_REQUESTED_SUITE"
+        }
+      ]
+    },
+    "rawEvidenceDirectory": ".state/feature-semantics-20260913",
+    "limits": [
+      "Canonical grouping currently applies to Cargo configurations without mappings or substring filters; impact/mapping paths and nextest retain their separate scopes.",
+      "The benchmark is a controlled two-package six-test fixture, not a general build-speed or agent-quality claim."
+    ],
+    "references": [
+      "https://doc.rust-lang.org/cargo/reference/features.html",
+      "https://doc.rust-lang.org/cargo/commands/cargo-test.html#target-selection"
+    ]
+  },
+  "finalCorrectnessGuard": {
+    "binarySha256": "6df532c0c75bcffe84301511a59d26143aea66f82c2b0f6669cc7f90f5ce196a",
+    "baselineBinarySha256": "f030f54eedb1e475992206260e8c4a776abbfb983e8a14da405c671278eae154",
+    "beforeMappedStatus": "FULL_REQUESTED_SUITE",
+    "cargoOracleExit": 101,
+    "fixtureSha256": {
+      "Cargo.lock": "831c82e9a9c9d066bb3fcc79bd0c473c101a8b78ff911a2c888f7e85c503cbba",
+      "Cargo.toml": "925db87556251f41fc5a196440b2a1de1a6f2ab8dab6d622d654addd10fd7dbb",
+      "a/Cargo.toml": "05155df50f8c719b9344613dafdbe63731c5733d2a0aba9dc9afdcdb192ac5d6",
+      "b/Cargo.toml": "7c060029bd40266c3ce7d3227fdfbd6ac4d93d87cf8cf581a89542aa087e7fdb",
+      "a/src/lib.rs": "0123f91ff092ef4767a7bab4e66f3f922fa7682d98ea3f7565b632c958422271",
+      "b/src/lib.rs": "6fee57b107753788d51a6f1441a6bbc14620271a1d06ea6711971e0b8f254b7c"
+    },
+    "schemaCatalogUnchanged": true,
+    "tools": 20,
+    "cases": [
+      {
+        "case": "mapped",
+        "status": "TESTED_SUBSET",
+        "complete": false,
+        "reason": "4 of 4 test scope(s) passed; 0 missing; separate target runs do not prove workspace feature unification; run the canonical Cargo suite without mappings or filters for a full gate",
+        "items": 4
+      },
+      {
+        "case": "canonical",
+        "status": "FAIL",
+        "complete": false,
+        "reason": "at least one executed test scope failed; 0 scope(s) passed and 1 did not",
+        "items": 1
+      }
+    ],
+    "rawEvidenceDirectory": ".state/final-delivery-20260913/evidence/final",
+    "policy": "Full inventory coverage without a canonical Cargo configuration group is at most TESTED_SUBSET."
+  },
+  "closure": {
+    "date": "2026-09-13",
+    "reason": "User requested finalization and comprehensive delivery instead of further open-ended improvement.",
+    "status": "completed-local-delivery",
+    "report": "docs/DELIVERY-2026-09-13.md",
+    "deliveryDirectory": ".state/final-delivery-20260913",
+    "requiredWorkRemaining": [],
+    "sourceCommitCreated": false,
+    "remotePush": false,
+    "releasePublished": false,
+    "performanceRemeasuredForFinalGuard": false
+  },
+  "publicExport": {
+    "localPathsRedacted": true,
+    "originalLocalArchivePreserved": true,
+    "commandHashes": "Hashes refer to original recorded commands before local-path redaction."
+  }
+}

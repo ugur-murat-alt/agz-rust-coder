@@ -1286,6 +1286,7 @@ fn read_source(
     let relative = resolve_asset_path(root.path(), file)
         .ok_or_else(|| "source path is outside the authorized workspace".to_owned())?;
     let bytes = root
+        .requested_authority()
         .read_file(&relative, MAX_FILE_BYTES)
         .map_err(|error| read_failure_label(&error))?;
     let content = String::from_utf8(bytes).map_err(|_| "source file is not UTF-8".to_owned())?;

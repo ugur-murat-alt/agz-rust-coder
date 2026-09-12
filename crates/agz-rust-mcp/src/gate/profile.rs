@@ -15,6 +15,14 @@ pub enum TestRunner {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ValidationOptions {
+    /// Exact workspace member names. Full/fmt validation cannot be narrowed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 64))]
+    pub packages: Vec<String>,
+    /// One exact target in each selected package; requires packages and a
+    /// check/clippy/test stage. This is separate from the platform targetTriple.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cargo_target: Option<super::CargoTargetSelection>,
     #[serde(default)]
     #[schemars(length(max = 64))]
     pub features: Vec<String>,
@@ -39,6 +47,7 @@ pub struct ValidationOptions {
 
 impl ValidationOptions {
     pub fn validate(&self, target: GateTargetId) -> Result<(), String> {
+        super::selection::validate(self, target)?;
         if self.features.len() > 64
             || self.features.iter().any(|feature| {
                 feature.is_empty()
@@ -90,7 +99,9 @@ impl ValidationOptions {
     }
 
     pub fn has_build_selection(&self) -> bool {
-        self.all_features
+        !self.packages.is_empty()
+            || self.cargo_target.is_some()
+            || self.all_features
             || self.no_default_features
             || !self.features.is_empty()
             || self.target_triple.is_some()
@@ -99,6 +110,9 @@ impl ValidationOptions {
     pub fn apply(&self, target: &mut GateTarget) {
         if target.id == GateTargetId::Fmt {
             return;
+        }
+        if let Some(selected) = &self.cargo_target {
+            selected.apply(target);
         }
         let mut flags = Vec::<OsString>::new();
         if self.all_features {
@@ -162,6 +176,55 @@ mod tests {
         };
         assert!(p.validate(GateTargetId::All).is_err());
         assert!(p.validate(GateTargetId::Test).is_ok());
+        for package in ["--workspace", "*", "../other", "one@1.0.0", "one two", ""] {
+            let p = ValidationOptions {
+                packages: vec![package.into()],
+                ..Default::default()
+            };
+            assert!(p.validate(GateTargetId::Check).is_err());
+        }
+        let p = ValidationOptions {
+            cargo_target: Some(super::super::CargoTargetSelection::Lib {}),
+            ..Default::default()
+        };
+        assert!(p.validate(GateTargetId::Check).is_err());
+        assert!(
+            serde_json::from_value::<ValidationOptions>(serde_json::json!({
+                "packages": ["app"], "cargoTarget": {"kind": "lib", "name": "unused"}
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn selected_target_replaces_all_targets_before_clippy_arguments() {
+        use super::super::CargoTargetSelection;
+        let options = ValidationOptions {
+            packages: vec!["app".into()],
+            cargo_target: Some(CargoTargetSelection::Test {
+                name: "focused".into(),
+            }),
+            features: vec!["extra".into()],
+            ..Default::default()
+        };
+        assert!(options.validate(GateTargetId::Clippy).is_ok());
+        let mut target = target_for(
+            GateTargetId::Clippy,
+            Path::new("/tmp/Cargo.toml"),
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        options.apply(&mut target);
+        let split = target.args.iter().position(|arg| arg == "--").unwrap();
+        assert!(!target.args.iter().any(|arg| arg == "--all-targets"));
+        assert!(
+            target.args[..split]
+                .windows(2)
+                .any(|args| args == ["--test", "focused"])
+        );
+        assert_eq!(&target.args[split + 1..], ["-D", "warnings"]);
     }
     #[test]
     fn cargo_options_precede_clippy_separator_and_nextest_preserves_doc() {

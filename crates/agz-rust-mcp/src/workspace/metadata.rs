@@ -23,6 +23,7 @@ const DEFAULT_MEMBER_DEPTH: usize = 32;
 const MAX_METADATA_INPUT_FILES: usize = 256;
 const MAX_METADATA_INPUT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_METADATA_CONFIG_DEPTH: usize = 32;
+const MAX_TARGET_LAYOUT_ENTRIES: usize = 4096;
 const FLIGHT_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -43,9 +44,11 @@ pub enum MetadataError {
     PathDependencyMissing(PathBuf),
     UnexpectedExternalPath(PathBuf),
     WorkspaceRootOutside(PathBuf),
+    WorkspaceSearchLimit(PathBuf),
     LockedRequired,
     Cancelled,
     TimedOut,
+    InputsChanged,
     Runner(String),
     RootBinding(String),
     RootEpochChanged { expected: u64, actual: u64 },
@@ -88,9 +91,17 @@ impl fmt::Display for MetadataError {
                 "metadata workspace root is outside the authorized root: {}",
                 path.display()
             ),
+            Self::WorkspaceSearchLimit(path) => write!(
+                formatter,
+                "workspace manifest search exceeded {MAX_METADATA_CONFIG_DEPTH} parents from {}",
+                path.display()
+            ),
             Self::LockedRequired => formatter.write_str("metadata execution must use --locked"),
             Self::Cancelled => formatter.write_str("cargo metadata was cancelled"),
             Self::TimedOut => formatter.write_str("cargo metadata deadline elapsed"),
+            Self::InputsChanged => formatter.write_str(
+                "Cargo metadata inputs changed during discovery; the snapshot was not cached",
+            ),
             Self::Runner(message) => write!(formatter, "cargo metadata failed: {message}"),
             Self::RootBinding(message) => {
                 write!(formatter, "cargo metadata root binding failed: {message}")
@@ -466,7 +477,12 @@ impl<R: MetadataRunner> MetadataService<R> {
         // The package was opened while selecting the workspace. Do not reopen
         // its lexical path through the configured parent after that boundary.
         let package_root = selection.package_authority().path().to_owned();
-        queue.push_back(package_root);
+        queue.push_back(package_root.clone());
+        if let Some(workspace) = self.owning_workspace_dir(selection, control)?
+            && workspace != package_root
+        {
+            queue.push_back(workspace);
+        }
         let mut visited = BTreeSet::new();
 
         while let Some(manifest_dir) = queue.pop_front() {
@@ -527,7 +543,7 @@ impl<R: MetadataRunner> MetadataService<R> {
             Err(error) => return Err(error),
         };
         let dependency_path = dependency_dir.path().to_owned();
-        if !selection.authority().contains(&dependency_path)
+        if !selection.worktree_authority().contains(&dependency_path)
             && !closure.external_roots.contains(&dependency_path)
         {
             closure.external_roots.push(dependency_path.clone());
@@ -638,6 +654,18 @@ impl<R: MetadataRunner> MetadataService<R> {
                 result = Err(error);
             }
         }
+        if result.is_ok() {
+            // Do not publish a snapshot under a key captured before a target
+            // or manifest changed while Cargo metadata was running.
+            match self
+                .preflight_inner(selection, control)
+                .and_then(|closure| self.cache_fingerprint_inner(selection, &closure, control))
+            {
+                Ok(Some(fingerprint)) if fingerprint == key.graph_fingerprint => {}
+                Ok(_) => result = Err(MetadataError::InputsChanged),
+                Err(error) => result = Err(error),
+            }
+        }
         let mut state = self.state.lock().map_err(|_| MetadataError::Poisoned)?;
         state.active.remove(&key);
         // Remove the completed flight before wake-up. Otherwise a healthy
@@ -741,7 +769,7 @@ impl<R: MetadataRunner> MetadataService<R> {
         let external_paths = external_path_dependencies(
             &metadata,
             &run.metadata.workspace_members,
-            selection.authority(),
+            selection.worktree_authority(),
         );
         checkpoint(control)?;
         let snapshot = WorkspaceSnapshot {
@@ -860,7 +888,18 @@ impl<R: MetadataRunner> MetadataService<R> {
         }
 
         let mut hasher = Sha256::new();
-        hasher.update(b"agz-rust-mcp-metadata-graph-v1");
+        hasher.update(b"agz-rust-mcp-metadata-graph-v2");
+        let mut layout_entries = 0;
+        for package in &closure.package_roots {
+            checkpoint(control)?;
+            let root = match self.authorize_manifest_dir(selection, package) {
+                Ok(root) => root,
+                Err(_) => return Ok(None),
+            };
+            if !hash_target_layout(&root, &mut hasher, &mut layout_entries, control)? {
+                return Ok(None);
+            }
+        }
         let mut total_bytes = 0u64;
         for (path, bytes) in inputs {
             checkpoint(control)?;
@@ -925,6 +964,57 @@ impl<R: MetadataRunner> MetadataService<R> {
             .map_err(MetadataError::from)
     }
 
+    /// Cargo inherits dependencies and patches from its workspace manifest even
+    /// when invoked on a member or a source subdirectory. Discover that manifest
+    /// before metadata execution, without crossing the selected Git worktree.
+    fn owning_workspace_dir(
+        &self,
+        selection: &WorkspaceSelection,
+        control: Option<&MetadataControl>,
+    ) -> Result<Option<PathBuf>, MetadataError> {
+        let mut current = selection.package_root().to_owned();
+        for _ in 0..=MAX_METADATA_CONFIG_DEPTH {
+            checkpoint(control)?;
+            let manifest = match self.open_manifest(selection, &current) {
+                Ok(bytes) => Some(parse_manifest(&current.join("Cargo.toml"), &bytes)?),
+                Err(MetadataError::Root(RootError::PathNotFound(_))) => None,
+                Err(error) => return Err(error),
+            };
+            if let Some(manifest) = manifest {
+                if manifest.get("workspace").is_some() {
+                    return Ok(Some(current));
+                }
+                if current == selection.package_root()
+                    && let Some(explicit) = manifest
+                        .get("package")
+                        .and_then(|package| package.get("workspace"))
+                        .and_then(toml::Value::as_str)
+                {
+                    let candidate = resolve_manifest_path(&current, explicit).ok_or_else(|| {
+                        MetadataError::WorkspaceRootOutside(current.join(explicit))
+                    })?;
+                    if !selection.worktree_authority().contains(&candidate) {
+                        return Err(MetadataError::WorkspaceRootOutside(candidate));
+                    }
+                    return Ok(Some(candidate));
+                }
+            }
+            if current == selection.canonical_worktree() {
+                return Ok(None);
+            }
+            let Some(parent) = current.parent() else {
+                return Ok(None);
+            };
+            if !selection.worktree_authority().contains(parent) {
+                return Ok(None);
+            }
+            current = parent.to_owned();
+        }
+        Err(MetadataError::WorkspaceSearchLimit(
+            selection.package_root().to_owned(),
+        ))
+    }
+
     fn authorize_manifest_dir(
         &self,
         selection: &WorkspaceSelection,
@@ -981,6 +1071,99 @@ fn wait_for_flight(
         result = next;
     }
     result.clone().ok_or(MetadataError::Poisoned)
+}
+
+/// Cargo discovers targets without manifest edits. Hash their bounded path
+/// layout, not Rust contents, so ordinary source edits still reuse metadata.
+fn hash_target_layout(
+    root: &AuthorizedRoot,
+    hasher: &mut Sha256,
+    inspected: &mut usize,
+    control: Option<&MetadataControl>,
+) -> Result<bool, MetadataError> {
+    for path in ["build.rs", "src/lib.rs", "src/main.rs"] {
+        checkpoint(control)?;
+        if !hash_target_file(root, Path::new(path), hasher) {
+            return Ok(false);
+        }
+    }
+    for path in ["src/bin", "tests", "examples", "benches"] {
+        checkpoint(control)?;
+        let relative = Path::new(path);
+        hasher.update(b"target-directory");
+        hash_metadata_path(hasher, &root.path().join(relative));
+        let directory = match root.authorize_dir(relative) {
+            Ok(directory) => directory,
+            Err(RootError::PathNotFound(_)) => {
+                hasher.update(b"missing");
+                continue;
+            }
+            Err(_) => return Ok(false),
+        };
+        let Ok(entries) = directory.dir().entries() else {
+            return Ok(false);
+        };
+        let mut targets = Vec::new();
+        for entry in entries {
+            checkpoint(control)?;
+            *inspected += 1;
+            if *inspected > MAX_TARGET_LAYOUT_ENTRIES {
+                return Ok(false);
+            }
+            let Ok(entry) = entry else { return Ok(false) };
+            let Ok(kind) = entry.file_type() else {
+                return Ok(false);
+            };
+            if kind.is_symlink() {
+                return Ok(false);
+            }
+            let name = entry.file_name();
+            if kind.is_dir() {
+                targets.push((name, true));
+            } else if kind.is_file() && Path::new(&name).extension() == Some(OsStr::new("rs")) {
+                targets.push((name, false));
+            }
+        }
+        targets.sort();
+        hasher.update(b"present");
+        for (name, is_directory) in targets {
+            let path = relative.join(name);
+            if is_directory {
+                if !hash_target_file(root, &path.join("main.rs"), hasher) {
+                    return Ok(false);
+                }
+            } else {
+                hasher.update(b"target-file");
+                hash_metadata_path(hasher, &root.path().join(path));
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn hash_target_file(root: &AuthorizedRoot, path: &Path, hasher: &mut Sha256) -> bool {
+    hasher.update(b"target-file-state");
+    hash_metadata_path(hasher, &root.path().join(path));
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let directory = match root.authorize_dir(parent) {
+        Ok(directory) => directory,
+        Err(RootError::PathNotFound(_)) => {
+            hasher.update(b"missing");
+            return true;
+        }
+        Err(_) => return false,
+    };
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    match directory.dir().symlink_metadata(name) {
+        Ok(metadata) if metadata.is_file() => hasher.update(b"present"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => hasher.update(b"missing"),
+        _ => return false,
+    }
+    true
 }
 
 fn parse_manifest(path: &Path, bytes: &[u8]) -> Result<toml::Value, MetadataError> {
@@ -1304,9 +1487,9 @@ fn validate_metadata(
                 .parent()
                 .unwrap_or(package.manifest_path.as_std_path()),
         );
-        let canonical = if selection.authority().contains(&root) {
+        let canonical = if selection.worktree_authority().contains(&root) {
             selection
-                .authority()
+                .worktree_authority()
                 .authorize_dir(&root)?
                 .path()
                 .to_owned()
@@ -1316,7 +1499,7 @@ fn validate_metadata(
                 .map_err(|_| MetadataError::UnexpectedExternalPath(root.clone()))?;
             resolved.canonical
         };
-        if selection.authority().contains(&canonical) {
+        if selection.worktree_authority().contains(&canonical) {
             continue;
         }
         if !expected_external.remove(&canonical) {

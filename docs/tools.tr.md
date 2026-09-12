@@ -1,5 +1,15 @@
 # Araç ve Yapılandırma Referansı
 
+Güncel kaynakta compact check çıktısı yapılandırılmış tanıları, atlanan tanı
+sayılarını ve önerileri korur; insan tarafından okunabilir stdout kuyruğu 4.000
+bayt, stderr kuyruğu 2.000 karakterle sınırlıdır. Cargo JSON kayıtları compact
+stdout'a girmez ve tekrar eden karma `tail` alanı boştur. `reason` aşama çıkışlarını
+özetler; tanılar ve loglar `steps` içindedir. Standard/full ayrıntı ham sınırlı
+kuyrukları korur. Her ayrıntı düzeyi toplam çıktı sınırına uyar ve kesilmeyi bildirir.
+Bu sunum sınırları derleyici otoritesini veya yürütülen test sayaçlarını değiştirmez.
+Aynı binary dört [paketli iş akışı skillini](install.tr.md#paketli-skilller-güncel-kaynak)
+prompt/resource ve bağımsız `skills` CLI üzerinden sunar; 20 araçlık katalog değişmez.
+
 **AGZ Yazılım ürünüdür.** Bu belge
 [belge okuma yolunun](README.tr.md) 2. adımıdır: önce sunucuyu kurun
 ([kurulum ve istemci ayarı](install.tr.md)), sonra yapılandırma ve kullanım
@@ -42,12 +52,37 @@ işaretini korur.
 | `repair` | Sunucuya ait scratch + aday doğrulaması ve sınırlı küçültme için Cargo/rustc | Workspace'e asla yazmaz; yalnız geçici aday kopyaları oluşturup derler | Gerekçeli kök-neden hipotezleri ve kaynak alıntılı ownership kanıtıyla gruplanmış tanılar, aday başına ölçülmüş derleme/test sonucu, davranış/performans koruyucuları, kalan risklerle ölçülmüş seçim ve sabitlenmiş yapılandırmayla dışa aktarımı doğrulanmış küçültülmüş üretici. |
 | `work` | change/validate üzerinde sunucuya ait work kaydı | Workspace'e yazmaz; yalnız bağlı aday kopyasını derler | Açık kapılar ve bütçelerle tipli intent yürütme: dürüst `READY` istenen-kapı kanıtı, tek kullanımlık revizyona bağlı token'lı sınırlı `NEEDS_MODEL` handoff veya tipli `BLOCKED`/`FAILED`/`CANCELLED` durma nedeni. |
 
-`check` hedefleri `check`, `clippy`, `test`, `doc`, `fmt` ve `all` değerleridir.
+`check` hedefleri `check`, `build`, `clippy`, `test`, `doc`, `fmt` ve `all` değerleridir.
 Biçimlendirme yalnız kontrol kipinde çalışır. Tamamlanmış açık bir doğrulama daha
 sonraki istek için yetki kanıtı olarak yeniden kullanılmaz; yalnız aynı anda
 çalışan özdeş işe katılım mümkündür.
 
-`profile` yalnızca `check`, `clippy`, `test` veya `doc` hedeflerinden birini
+Güncel kaynak `check` içinde açık paket ve Cargo hedefi seçimini destekler:
+
+```json
+{"dir":"/workspace","target":"test","options":{"packages":["app"],"cargoTarget":{"kind":"test","name":"integration"},"testFilter":"one_case"}}
+```
+
+`packages`, workspace üyelerinin tam adlarından oluşur. `cargoTarget`, seçilen
+her paketteki bir `lib`, `bin`, `test`, `example` veya `bench` hedefini seçer;
+`lib` dışındakiler `name` ister. Açık paketler ve check/build/clippy/test aşaması
+gereklidir. Adlar derlemeden önce Cargo metadata ile doğrulanır; bilinmeyen ad,
+yol veya glob geniş kapsamlı derlemeye dönüşmez. Yalnız paket seçimi `doc` için
+de kullanılabilir. Tam (`all`) ve `fmt` doğrulaması daraltılamaz. Feature seçimi
+açık paketlere bağlı kalır. Yanıt `scope.strategy="explicit"`, paket kimlikleri,
+tam komut ve yapılandırmayı içerir; geçiş tüm workspace'in doğrulandığı anlamına
+gelmez. Seçilmiş/filtrelenmiş Cargo testinde en az bir testin çalıştığına dair
+kanıt gerekir; sıfır eşleşme veya tanınmayan özel harness `INCONCLUSIVE` üretir.
+Bağlama aşamasını da doğrulayan derleme için `target="build"` kullanılır;
+check/clippy başarılı bağlamayı kanıtlamaz. Gerekli bağımlılıkları Cargo yine derler.
+
+Güncel kaynakta `audit` dosya yolları ve dizin taraması, sunucu üst dizine izin
+verse bile açıkça verilen `dir` dizinine göredir. Okunamayan, desteklenmeyen veya
+sınır nedeniyle atlanan girdiler, kısmi bulgularla `INCONCLUSIVE` üretir; yalnız
+eksiksiz sınırlı tarama `CLEAN` dönebilir. Açıkça üretilmiş/yok sayılan yollar
+kasıtlı istisnadır. Context ve API kaynak kanıtı da seçilen dizinin sınırını kullanır.
+
+`profile` yalnızca `check`, `build`, `clippy`, `test` veya `doc` hedeflerinden birini
 çalıştırır. Protokol admission, scheduler kuyruğu, metadata/identity preflight,
 Cargo süreci ve finalizasyon sürelerini ayırır; paralel unit sürelerinin toplamı
 duvar saati olarak sunulmaz. Stable Cargo `--timings` HTML raporu sınırlı ve
@@ -389,6 +424,18 @@ platformun path-list ayırıcısını kullanır.
 
 ## Yapılandırma Referansı
 
+Zamanlayıcı `gate.debounce_ms` süresini her doğrulama komutunda yeniden başlatmak
+yerine workspace'in yeni gözlenen kaynak durumu için bir kez uygular. Değişmeyen
+kaynak kalan bekleme süresini paylaşır; kaynak değişikliği veya açık dirty
+bildirimi yeni süre başlatır. Bu geçmiş tek MCP sürecine aittir ve son kullanılan
+256 kökle sınırlıdır; çıkarılan bir kök yeniden tam süreyi bekler. Aynı kaynaktaki
+farklı Cargo komutları birbirini iptal etmeden ayrı işler olarak sıraya girer.
+Özdeş etkin istekler aynı işi paylaşabilir; daha sonraki açık istekler her zaman
+Cargo'yu yeniden çalıştırır. Worktree/host kilitleri, iptal, zaman aşımı ve işlem
+sonrası girdi kimliği kontrolleri korunur. `check.queueMs` kabul, metadata/kaynak
+ön kontrolü ve zamanlayıcı beklemesini içerir; ön kontrol süresiyle bağımsız
+ölçümlermiş gibi toplanmamalıdır.
+
 | Key | Default | Notlar |
 | --- | --- | --- |
 | `server.allow_roots` | canonical CWD | Birincil yetkili workspace kökleri. |
@@ -410,7 +457,7 @@ platformun path-list ayırıcısını kullanır.
 | `tools.work` | `true` | `work` kaydı. |
 | `cargo.path` | PATH `cargo` | İsteğe bağlı Cargo binary değişimi. |
 | `gate.hard_timeout_ms` | `600000` | Tek Cargo işlemi son süresi. |
-| `gate.debounce_ms` | `500` | Kararlı girdi bekleme süresi. |
+| `gate.debounce_ms` | `500` | Gözlenen workspace kaynak durumu başına kararlı girdi bekleme süresi. |
 | `gate.host_concurrency` | `1` | Host genelindeki Cargo izinleri. |
 | `gate.scope` | `shadow` | `workspace`, `shadow` veya `affected`. |
 | `gate.cache` | `auto` | `auto`, `project` veya `isolated`. |
@@ -508,7 +555,7 @@ Bu doğrulanamazsa semantik araçlar süreci başlatmadan erişilememe döndür�
 `verify`, feature, hedef, toolchain ve geliştirme aşamaları üzerinde sınırlı bir
 matrisi planlar (`action=matrix_plan`) veya çalıştırır (`action=matrix_run`).
 Her hücre paket kapsamını, feature/default-feature seçimini, hedef üçlüsünü,
-toolchain/MSRV değerini, profili, aşamayı (`check`, `clippy`, `test`, `doc`) ve
+toolchain/MSRV değerini, profili, aşamayı (`check`, `build`, `clippy`, `test`, `doc`) ve
 runner'ı kaydeder.
 
 Planlama adayları `cargo metadata` ile `[workspace.metadata.agz-verify]` (veya
@@ -551,6 +598,60 @@ yeniden kullanılmaz.
 
 ### Test planlama, çalıştırma ve aday doğrulama
 
+`configuration.packages` ve `configuration.cargoTarget`, test planını ve
+çalıştırmayı birlikte sınırlar. Çelişen açık eşlemeler desteklenmeyen yapılandırma
+olarak bildirilir. Değişen girdiler planı genişletse bile açık seçim alt kapsamdır.
+
+Eşleme ve alt dize filtresi olmayan tam Cargo yapılandırmalarında
+`testPlan.executionGroups` tek bir Cargo test çağrısını kaydeder. `items`, koşullu
+hedefleri de içeren yardımcı hedef envanteri olarak kalır; `testRun.items` ayrı
+paket çalıştırmaları iddia etmek yerine gerçek çalıştırma grubunu kaydeder.
+Workspace çağrısı `cargo test --workspace` kullanarak Cargo'nun bağımlılık feature
+birleşimini korur. Açık paket/hedef seçimlerinde kullanıcının bayrakları birlikte
+kalır. `required-features`, istenmeyen bir feature'ı açmaz; koşullu hedeflerin
+katılımını Cargo belirler. `extra` ve `package/extra` biçimleri komutta korunur.
+
+Manifestte `test=true` örnek ve benchmark testlerini dahil eder; açık adlı hedef
+seçimi `test=false` değerini geçersiz kılar. Native kütüphane testleri ve procedural
+macro doctest'leri kapsanır. Varsayılan Cargo suite'i normal örnekleri test olarak
+saymadan derler, doctest'leri aynı çağrıda çalıştırır. Ayrı planlanan derleme
+kapsamları `cargo build --example` kullanır ve sıfır testle `COMPILED` raporlar.
+Bu davranış [Cargo hedef seçimini](https://doc.rust-lang.org/cargo/commands/cargo-test.html#target-selection)
+ve [feature seçimini](https://doc.rust-lang.org/cargo/reference/features.html) izler.
+Tam sonuç pozitif test kanıtı, boş test özetlerinin bulunmaması ve Cargo'nun
+bildirdiği test binary'leri ile tanımlı doctest kapsamları için yeterli özet
+ister. Desteklenmeyen veya bütçe yüzünden atlanan istenen kapsamlar tam sonucu engeller.
+
+Unit, entegrasyon, binary ve doctest sonuçları başka kapsamda geçen testlerden
+başarı kanıtı alamaz. Başka hedef geçse bile hiç test çalıştırmayan test hedefi açık bir
+eksik olarak kalır. Eşlemenin paket/yol ipuçları aynı workspace sahibine çözülür;
+bilinmeyen veya belirsiz hedefler çalıştırmadan önce reddedilir. Paketsiz eşleme,
+birden fazla paketteki aynı adlı hedefi seçebilir; gerçek paket bayrakları komutta
+kaydedilir.
+
+`configuration.runner` normal envanter testlerine uygulanır; doctest ve yalnız
+derlenen örnekler Cargo ile kalır. Tanınan test özeti vermeyen özel harness'in
+başarılı çıkışı `INCONCLUSIVE` kalır; başarısız çıkışı yine hatadır.
+`allFeatures`, çelişen açık required-feature bayrakları eklemez.
+`configuration.testFilter`, normal testlerde alt dize filtresiyle alt kapsam
+çalıştırır; atlanan filtresiz doctest kapsamı eksik olarak listelenir. Bu filtre
+ile tam ad kullanan `testMappings.testName` birlikte verilmez; tek filtre kaynağı
+seçilir.
+
+`test_run`, planlama öncesi ve çalıştırma sonrası sınırlı workspace girdi kimliğini
+de karşılaştırır; sabit preflight komutu ek bir derleme aşaması çalıştırmaz.
+Girdiler değişirse `STALE` döner; son kimlik eksikse tam başarı verilemez.
+Öğe sonuçları görünür kalır ancak ortak bir kaynak durumunu kanıtlamaz.
+Bu kontrol, öncesi/sonrası kimlik karşılaştırmasıdır; atomik dosya sistemi
+snapshot'ı değildir.
+
+Metadata önbelleği, workspace ve tanımlı path bağımlılıklarının sınırlı otomatik
+hedef düzenini de kapsar: `src/lib.rs`, `src/main.rs`, `src/bin`, `tests`,
+`examples`, `benches` ve `build.rs`. Hedef ekleme/silme önbelleği geçersiz kılar;
+yalnız hedef gövdesini düzenlemek metadata'yı yeniden yükletmez. Doğrulanamayan
+düzende önbellek kullanılmaz. Metadata keşfi sırasında değişen girdiler, snapshot
+önbelleğe alınmadan reddedilir; sonraki istek güncel metadata alır.
+
 **0.2.0 sürümünden itibaren** `verify` ayrıca `action=test_plan`, `test_run` ve
 `test_candidate` destekler. Bu eylemler aynı sınırlı `CheckService` yürütücüsünü
 kullanır; keyfi kabuk komutu, otomatik bağımlılık kurulumu veya workspace
@@ -565,15 +666,19 @@ kaynağına yazma eklenmez.
   dosyası, `.cargo` yapılandırması, proc-macro paketi veya kütüphane kökü
   değişikliği dar plana kör güvenmek yerine konservatif workspace genişlemesini
   zorunlu kılar; her dahil etme ve atlama gerekçesi `testPlan` içinde görünür.
-- `test_run` planlanan kapsamları sırayla çalıştırır; tam paket, hedef/binary,
+- `test_run` yapılandırma gruplarını; grup yoksa tekil eşleme/etki kapsamlarını
+  çalıştırır; tam paket, hedef/binary,
   filtre, feature seçimi, runner, komut/girdi/ortam hash'leri ve çalışan test
   adlarını kaydeder. Sıfır eşleşme, ignored-only, custom harness ve eksik sonuç
   asla `PASS` değildir; tam istenen test adını çalıştırmayan alt dizge filtresi
-  `INCONCLUSIVE` olur. Doctest, integration ve feature'a bağlı hedefler ayrı
-  kapsamlardır ve `nextest` runner'ı ayrı doctest kapısını ortadan kaldırmaz.
-  `FULL_REQUESTED_SUITE` yalnız plan tüm workspace envanterini kapsıyor ve her
-  kapsam geçtiyse döner; aksi halde `TESTED_SUBSET` döner ve bu geliştirme geri
-  bildirimidir, final kapı değildir.
+  `INCONCLUSIVE` olur. Envanter gerçek çalıştırma iddiasından ayrıdır; `nextest`
+  runner'ı ayrı Cargo doctest kapısını ortadan kaldırmaz.
+  `FULL_REQUESTED_SUITE` yalnız plan tüm workspace envanterini kapsıyor ve tek
+  kanonik Cargo yapılandırma grubu geçtiyse döner. Ayrı eşleme/etki/nextest
+  çalıştırmaları workspace feature birleşimini kanıtlayamaz;
+  `testPlan.full`/`testRun.full` yalnız envanter kapsamını belirtir.
+  Başarılı alt kapsam varsa `TESTED_SUBSET`, yeterli kanıt
+  yoksa eksik sonuç döner. Alt kapsam geliştirme geri bildirimidir, final kapı değildir.
 - `test_candidate`; `changeId` (aşamalanmış düzeltme), `testPatch` (regresyon
   testi yaması) ve `behaviorContract` (`testName` ve `expectedFailure`) alır.
   `ChangeService` üzerinden sunucuya ait bir deneme kopyası oluşturur, test

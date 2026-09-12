@@ -487,6 +487,11 @@ impl Config {
         T: Into<std::ffi::OsString> + Clone,
     {
         let cli = CliOptions::try_parse_from(args)?;
+        Self::load_cli(&cli)
+    }
+
+    /// Load configuration after the caller has handled standalone CLI commands.
+    pub fn load_cli(cli: &CliOptions) -> Result<Self, ConfigError> {
         let toml_text = cli
             .config
             .as_ref()
@@ -498,7 +503,7 @@ impl Config {
             })
             .transpose()?;
         let cwd = env::current_dir().unwrap_or_else(|_| env::temp_dir());
-        Self::from_sources(cwd, toml_text.as_deref(), process_environment()?, &cli)
+        Self::from_sources(cwd, toml_text.as_deref(), process_environment()?, cli)
     }
 
     /// # Errors
@@ -814,9 +819,33 @@ impl Config {
     }
 }
 
+#[derive(Debug, Clone, clap::Subcommand)]
+pub enum CliCommand {
+    /// List, read, or export the offline skills bundled with this executable.
+    Skills {
+        #[command(subcommand)]
+        action: SkillCommand,
+    },
+}
+
+#[derive(Debug, Clone, clap::Subcommand)]
+pub enum SkillCommand {
+    /// Print the bundled skill names and purposes without starting MCP or Cargo.
+    List,
+    /// Print one bundled SKILL.md.
+    Show { name: String },
+    /// Export into a NEW directory under an existing, trusted parent.
+    Export {
+        #[arg(long, value_name = "NEW_DIRECTORY")]
+        dir: PathBuf,
+    },
+}
+
 #[derive(Debug, Clone, Parser, Default)]
 #[command(name = "agz-rust-mcp", version, disable_help_subcommand = true)]
 pub struct CliOptions {
+    #[command(subcommand)]
+    pub command: Option<CliCommand>,
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
     #[arg(long = "allow-root", action = ArgAction::Append, value_name = "PATH")]

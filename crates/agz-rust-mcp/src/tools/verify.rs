@@ -30,9 +30,9 @@ use crate::{
     },
     config::{GateCache, VerifyConfig},
     gate::{
-        GateDetail, GateEvidence, GateRequest, GateSource, GateStatus, GateTargetId,
-        ProgressCallback, ProgressEvent, ProgressStage, TestRunner, ValidationOptions,
-        validate_toolchain_name,
+        CargoTargetSelection, GateDetail, GateEvidence, GateRequest, GateSource, GateStatus,
+        GateTargetId, ProgressCallback, ProgressEvent, ProgressStage, TestRunner,
+        ValidationOptions, validate_toolchain_name,
     },
     workspace::{
         AuthorizedRoot, ClientRoots, DirectoryEntryKind, RootGuard, WorkspaceRoot,
@@ -89,6 +89,7 @@ impl VerifyAction {
 #[serde(rename_all = "lowercase")]
 pub enum VerifyStage {
     Check,
+    Build,
     Clippy,
     Test,
     Doc,
@@ -98,6 +99,7 @@ impl VerifyStage {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Check => "check",
+            Self::Build => "build",
             Self::Clippy => "clippy",
             Self::Test => "test",
             Self::Doc => "doc",
@@ -107,6 +109,7 @@ impl VerifyStage {
     pub const fn target(self) -> GateTargetId {
         match self {
             Self::Check => GateTargetId::Check,
+            Self::Build => GateTargetId::Build,
             Self::Clippy => GateTargetId::Clippy,
             Self::Test => GateTargetId::Test,
             Self::Doc => GateTargetId::Doc,
@@ -117,6 +120,7 @@ impl VerifyStage {
 fn parse_stage(value: &str) -> Option<VerifyStage> {
     match value.trim().to_ascii_lowercase().as_str() {
         "check" => Some(VerifyStage::Check),
+        "build" => Some(VerifyStage::Build),
         "clippy" => Some(VerifyStage::Clippy),
         "test" => Some(VerifyStage::Test),
         "doc" => Some(VerifyStage::Doc),
@@ -435,7 +439,7 @@ pub struct TestPlanItemData {
     pub id: String,
     /// Lower runs first: cheapest, most directly relevant scopes.
     pub rank: u64,
-    /// `unit`, `integration`, `doctest`, `mapping`, or `workspace`.
+    /// `unit`, `integration`, `doctest`, `compile`, `mapping`, or `workspace`.
     pub scope: String,
     pub package: String,
     pub package_id: String,
@@ -450,8 +454,8 @@ pub struct TestPlanItemData {
     pub no_default_features: bool,
     /// True when the item is planned as its own feature-gated scope.
     pub feature_gated: bool,
-    /// Runner recorded for this scope (`cargo` or `nextest`). Doctest scopes
-    /// always record `cargo`.
+    /// Runner recorded for this scope (`cargo` or `nextest`). Doctest and
+    /// compilation scopes always record `cargo`.
     pub runner: String,
     pub reason: String,
 }
@@ -461,6 +465,10 @@ pub struct TestPlanItemData {
 #[serde(rename_all = "camelCase")]
 pub struct TestPlanData {
     pub items: Vec<TestPlanItemData>,
+    /// Configuration-wide execution groups. When present, items remain the
+    /// advisory target inventory; groups preserve Cargo's feature unification.
+    #[serde(default)]
+    pub execution_groups: Vec<TestPlanItemData>,
     pub skipped: Vec<SkippedCellData>,
     pub sources: Vec<String>,
     /// Conservative widening reasons; a narrow plan is never silently trusted.
@@ -1988,9 +1996,10 @@ fn plan_targets(
         skipped.push(SkippedCell {
             id: "target-non-check-stages".to_owned(),
             status: CellStatus::UnsupportedConfiguration,
-            reason: "non-host targets are compile-only in the MVP; test/clippy/doc stages on a \
-                     foreign target cannot claim platform execution"
-                .to_owned(),
+            reason:
+                "non-host matrix cells are compile-only and currently support check; requested \
+                     build/test/clippy/doc stages are not executed on the foreign target"
+                    .to_owned(),
         });
     }
 }
@@ -2149,11 +2158,19 @@ struct TestPlanItem {
     feature_gated: bool,
     runner: VerifyRunner,
     reason: String,
+    // Compilation-only examples are never counted as executed tests.
+    compile_only: bool,
+    // Some(count) means one canonical Cargo suite, including this many doctest scopes.
+    cargo_suite_doctests: Option<u64>,
+    // Resolved execution scope, separate from display labels and mapping hints.
+    packages: Vec<String>,
+    cargo_target: Option<CargoTargetSelection>,
 }
 
 #[derive(Debug, Clone, Default)]
 struct TestPlanBuild {
     items: Vec<TestPlanItem>,
+    cargo_suite: Option<TestPlanItem>,
     skipped: Vec<SkippedCell>,
     sources: Vec<String>,
     widened_because: Vec<String>,
@@ -2163,9 +2180,16 @@ struct TestPlanBuild {
 }
 
 impl TestPlanBuild {
+    fn execution_items(&self) -> &[TestPlanItem] {
+        self.cargo_suite
+            .as_ref()
+            .map_or(self.items.as_slice(), std::slice::from_ref)
+    }
+
     fn plan_data(&self) -> TestPlanData {
         TestPlanData {
             items: self.items.iter().map(test_plan_item_data).collect(),
+            execution_groups: self.cargo_suite.iter().map(test_plan_item_data).collect(),
             skipped: self
                 .skipped
                 .iter()
@@ -2353,7 +2377,11 @@ fn lib_root_target(package: &cargo_metadata::Package, absolute: &Path) -> bool {
         target.kind.iter().any(|kind| {
             matches!(
                 kind,
-                cargo_metadata::TargetKind::Lib | cargo_metadata::TargetKind::RLib
+                cargo_metadata::TargetKind::Lib
+                    | cargo_metadata::TargetKind::RLib
+                    | cargo_metadata::TargetKind::DyLib
+                    | cargo_metadata::TargetKind::CDyLib
+                    | cargo_metadata::TargetKind::StaticLib
             )
         }) && target.src_path.as_std_path() == absolute
     })
@@ -2367,6 +2395,11 @@ fn is_test_bearing_kind(kind: &cargo_metadata::TargetKind) -> bool {
             | cargo_metadata::TargetKind::Bin
             | cargo_metadata::TargetKind::Test
             | cargo_metadata::TargetKind::ProcMacro
+            | cargo_metadata::TargetKind::DyLib
+            | cargo_metadata::TargetKind::CDyLib
+            | cargo_metadata::TargetKind::StaticLib
+            | cargo_metadata::TargetKind::Example
+            | cargo_metadata::TargetKind::Bench
     )
 }
 
@@ -2375,6 +2408,9 @@ fn target_kind_name(target: &cargo_metadata::Target) -> &'static str {
         match kind {
             cargo_metadata::TargetKind::Lib => return "lib",
             cargo_metadata::TargetKind::RLib => return "rlib",
+            cargo_metadata::TargetKind::DyLib => return "dylib",
+            cargo_metadata::TargetKind::CDyLib => return "cdylib",
+            cargo_metadata::TargetKind::StaticLib => return "staticlib",
             cargo_metadata::TargetKind::Bin => return "bin",
             cargo_metadata::TargetKind::Test => return "test",
             cargo_metadata::TargetKind::ProcMacro => return "proc-macro",
@@ -2386,16 +2422,11 @@ fn target_kind_name(target: &cargo_metadata::Target) -> &'static str {
     "unknown"
 }
 
-fn merged_features(base: &[String], required: &[String]) -> Vec<String> {
-    let mut merged = base.to_vec();
-    merged.extend(required.iter().cloned());
-    merged.sort();
-    merged.dedup();
-    merged
-}
-
 struct PackagePlanContext<'a> {
     base_features: &'a [String],
+    explicit_target: Option<&'a CargoTargetSelection>,
+    all_features: bool,
+    test_filter: Option<&'a str>,
     no_default_features: bool,
     runner: VerifyRunner,
     package_scope: &'a str,
@@ -2411,86 +2442,119 @@ fn package_test_items(
     let mut items = Vec::new();
     for target in &package.targets {
         let kind = target_kind_name(target);
-        if matches!(kind, "bench" | "example") {
-            skipped.push(SkippedCell {
-                id: format!(
-                    "{}--{kind}--{}",
-                    sanitize_id(&package.name),
-                    sanitize_id(&target.name)
-                ),
-                status: CellStatus::UnsupportedConfiguration,
-                reason: format!(
-                    "`{kind}` target {} is not executed by the default test suite and is not \
-                     selected by this plan",
-                    target.name
-                ),
-            });
-            continue;
-        }
         if !is_test_bearing_kind_target(target) {
+            if (target.test || target.doctest)
+                && !target
+                    .kind
+                    .contains(&cargo_metadata::TargetKind::CustomBuild)
+            {
+                skipped.push(SkippedCell {
+                    id: format!(
+                        "{}--unsupported--{}",
+                        sanitize_id(&package.name),
+                        sanitize_id(&target.name)
+                    ),
+                    status: CellStatus::UnsupportedConfiguration,
+                    reason: format!("target {} has an unsupported test target kind", target.name),
+                });
+            }
             continue;
         }
-        let feature_gated = !target.required_features.is_empty();
-        let gate_note = if feature_gated {
-            format!(
-                " and is planned as its own feature-gated scope ({})",
-                target.required_features.join(", ")
-            )
-        } else {
-            String::new()
-        };
-        if target.test {
-            items.push(TestPlanItem {
-                id: String::new(),
-                rank: context.rank_base,
-                scope: context.package_scope.to_owned(),
-                package: package.name.to_string(),
-                package_id: package.id.repr.clone(),
-                target: target.name.clone(),
-                target_kind: kind.to_owned(),
-                filter: None,
-                exact_test: None,
-                features: merged_features(context.base_features, &target.required_features),
-                no_default_features: context.no_default_features,
-                feature_gated,
-                runner: context.runner,
-                reason: format!(
-                    "{}: {kind} target `{}` executes unit/integration tests{gate_note}",
-                    context.reason_prefix, target.name
-                ),
-            });
+        // Cargo honors test=true for every target kind. An explicit named
+        // selector overrides test=false; ordinary examples are built without
+        // the test cfg/harness, so a --test compilation is not equivalent.
+        let tested = target.test
+            || context
+                .explicit_target
+                .is_some_and(|selected| selected.matches(target));
+        let compile_only = kind == "example"
+            && !tested
+            && context.test_filter.is_none()
+            && context.explicit_target.is_none();
+        let mut item = package_target_item(package, target, context, compile_only);
+        if tested || compile_only {
+            items.push(item.clone());
         }
-        let doctestable = target.doctest
-            && target.kind.iter().any(|kind| {
-                matches!(
-                    kind,
-                    cargo_metadata::TargetKind::Lib | cargo_metadata::TargetKind::RLib
-                )
-            });
-        if doctestable {
-            items.push(TestPlanItem {
-                id: String::new(),
-                rank: context.rank_base + 2,
-                scope: "doctest".to_owned(),
-                package: package.name.to_string(),
-                package_id: package.id.repr.clone(),
-                target: target.name.clone(),
-                target_kind: "doctest".to_owned(),
-                filter: None,
-                exact_test: None,
-                features: merged_features(context.base_features, &target.required_features),
-                no_default_features: context.no_default_features,
-                feature_gated,
-                runner: VerifyRunner::Cargo,
-                reason: format!(
-                    "{}: doctests for `{}` are a separate scope; a nextest run never replaces \
-                     the doctest gate{gate_note}",
-                    context.reason_prefix, target.name
-                ),
-            });
+        if !crate::gate::targets::target_supports_doctests(target) {
+            continue;
         }
+        if context.test_filter.is_some() {
+            skipped.push(SkippedCell {
+                id: format!("{}--doctest--{}", sanitize_id(&package.name), sanitize_id(&target.name)),
+                status: CellStatus::UnsupportedConfiguration,
+                reason: "testFilter selects ordinary tests; the separate unfiltered doctest scope is not part of this subset".to_owned(),
+            });
+            continue;
+        }
+        item.rank += 2;
+        item.scope = "doctest".to_owned();
+        item.target_kind = "doctest".to_owned();
+        item.cargo_target = None;
+        item.filter = None;
+        item.compile_only = false;
+        item.runner = VerifyRunner::Cargo;
+        item.reason = format!(
+            "{}: doctests for `{}` are a separate Cargo scope; nextest never replaces this gate",
+            context.reason_prefix, target.name
+        );
+        items.push(item);
     }
     items
+}
+
+fn package_target_item(
+    package: &cargo_metadata::Package,
+    target: &cargo_metadata::Target,
+    context: &PackagePlanContext<'_>,
+    compile_only: bool,
+) -> TestPlanItem {
+    let kind = target_kind_name(target);
+    let features = if context.all_features {
+        Vec::new()
+    } else {
+        context.base_features.to_vec()
+    };
+    let purpose = if compile_only {
+        "compiles the ordinary example without executing tests"
+    } else {
+        "executes this target's tests"
+    };
+    TestPlanItem {
+        id: String::new(),
+        rank: context.rank_base,
+        scope: if compile_only {
+            "compile"
+        } else {
+            context.package_scope
+        }
+        .to_owned(),
+        package: package.name.to_string(),
+        package_id: package.id.repr.clone(),
+        target: target.name.clone(),
+        target_kind: kind.to_owned(),
+        filter: if compile_only {
+            None
+        } else {
+            context.test_filter.map(str::to_owned)
+        },
+        exact_test: None,
+        features,
+        packages: vec![package.name.to_string()],
+        cargo_target: cargo_test_target(kind, &target.name),
+        compile_only,
+        cargo_suite_doctests: None,
+        no_default_features: context.no_default_features,
+        feature_gated: !target.required_features.is_empty(),
+        runner: if compile_only {
+            VerifyRunner::Cargo
+        } else {
+            context.runner
+        },
+        reason: format!(
+            "{}: {kind} target `{}` {purpose}; required features: {:?}",
+            context.reason_prefix, target.name, target.required_features
+        ),
+    }
 }
 
 fn is_test_bearing_kind_target(target: &cargo_metadata::Target) -> bool {
@@ -2591,45 +2655,22 @@ fn build_test_plan(
     }
 
     let mut mapping_packages = BTreeSet::new();
-    for mapping in &request.test_mappings {
-        match mapping.package.as_deref() {
-            Some(name) => {
-                match snapshot
-                    .metadata
-                    .packages
-                    .iter()
-                    .find(|package| {
-                        snapshot.metadata.workspace_members.contains(&package.id)
-                            && package.name.as_str() == name
-                    }) {
-                    Some(package) => {
-                        mapping_packages.insert(package.id.repr.clone());
-                    }
-                    None => build.skipped.push(SkippedCell {
-                        id: format!("mapping-{}", sanitize_id(name)),
-                        status: CellStatus::UnsupportedConfiguration,
-                        reason: format!(
-                            "explicit mapping names package `{name}` which is not a workspace member"
-                        ),
-                    }),
+    let mut mapping_owners = Vec::new();
+    for (index, mapping) in request.test_mappings.iter().enumerate() {
+        match resolve_mapping_package(snapshot, mapping) {
+            Ok(owner) => {
+                if let Some(package) = owner {
+                    mapping_packages.insert(package.id.repr.clone());
                 }
+                mapping_owners.push(owner);
             }
-            None => {
-                if let Some(path) = mapping.path.as_deref() {
-                    let absolute = snapshot.canonical_worktree.join(path);
-                    match owner_node(snapshot, &absolute) {
-                        Some(node) => {
-                            mapping_packages.insert(node.package_id.clone());
-                        }
-                        None => build.skipped.push(SkippedCell {
-                            id: format!("mapping-{}", sanitize_id(path)),
-                            status: CellStatus::UnsupportedConfiguration,
-                            reason: format!(
-                                "explicit mapping path `{path}` has no owning workspace package"
-                            ),
-                        }),
-                    }
-                }
+            Err(reason) => {
+                build.skipped.push(SkippedCell {
+                    id: format!("mapping-{}", index + 1),
+                    status: CellStatus::UnsupportedConfiguration,
+                    reason,
+                });
+                return build;
             }
         }
     }
@@ -2665,6 +2706,20 @@ fn build_test_plan(
     included.extend(changed_packages.iter().cloned());
     included.extend(dependents.iter().cloned());
     included.extend(mapping_packages.iter().cloned());
+    included.extend(
+        snapshot
+            .metadata
+            .packages
+            .iter()
+            .filter(|package| {
+                request
+                    .test_configuration
+                    .packages
+                    .iter()
+                    .any(|name| name == package.name.as_str())
+            })
+            .map(|package| package.id.repr.clone()),
+    );
     if widened {
         included.extend(
             snapshot
@@ -2676,6 +2731,10 @@ fn build_test_plan(
         );
     }
 
+    let runner = match request.test_configuration.runner {
+        TestRunner::Cargo => VerifyRunner::Cargo,
+        TestRunner::Nextest => VerifyRunner::Nextest,
+    };
     let mut items: Vec<TestPlanItem> = Vec::new();
     let mut used_ids = BTreeSet::new();
     for package in &snapshot.metadata.packages {
@@ -2724,8 +2783,11 @@ fn build_test_plan(
         };
         let context = PackagePlanContext {
             base_features: &request.test_configuration.features,
+            explicit_target: request.test_configuration.cargo_target.as_ref(),
+            all_features: request.test_configuration.all_features,
+            test_filter: request.test_configuration.test_filter.as_deref(),
             no_default_features: request.test_configuration.no_default_features,
-            runner: VerifyRunner::Cargo,
+            runner,
             package_scope: scope,
             rank_base,
             reason_prefix: &reason_prefix,
@@ -2745,25 +2807,17 @@ fn build_test_plan(
         }
     }
 
-    let runner = match request.test_configuration.runner {
-        TestRunner::Cargo => VerifyRunner::Cargo,
-        TestRunner::Nextest => VerifyRunner::Nextest,
-    };
-    for (index, mapping) in request.test_mappings.iter().enumerate() {
+    for (index, (mapping, owner)) in request
+        .test_mappings
+        .iter()
+        .zip(mapping_owners.iter())
+        .enumerate()
+    {
         let Some(test_name) = mapping.test_name.as_deref() else {
             continue;
         };
-        if !valid_test_name(test_name) {
-            build.skipped.push(SkippedCell {
-                id: format!("mapping-{}", index + 1),
-                status: CellStatus::UnsupportedConfiguration,
-                reason: "explicit mapping testName is not a bounded test name".to_owned(),
-            });
-            continue;
-        }
-        let package = mapping
-            .package
-            .clone()
+        let package = owner
+            .map(|package| package.name.to_string())
             .unwrap_or_else(|| "workspace".to_owned());
         let target = mapping
             .target
@@ -2775,7 +2829,15 @@ fn build_test_plan(
             rank: 0,
             scope: "mapping".to_owned(),
             package: package.clone(),
-            package_id: String::new(),
+            package_id: owner
+                .map(|package| package.id.repr.clone())
+                .unwrap_or_default(),
+            packages: owner
+                .map(|package| vec![package.name.to_string()])
+                .unwrap_or_default(),
+            cargo_target: None,
+            compile_only: false,
+            cargo_suite_doctests: None,
             target: target.clone(),
             target_kind: if doctest { "doctest" } else { "test" }.to_owned(),
             filter: if doctest {
@@ -2800,12 +2862,30 @@ fn build_test_plan(
         items.push(item);
     }
 
+    let explicit_selection =
+        match bind_test_selection(&mut items, request, snapshot, &mapping_owners) {
+            Ok(explicit) => explicit,
+            Err(reason) => {
+                build.skipped.push(SkippedCell {
+                    id: "explicit-selection".to_owned(),
+                    status: CellStatus::UnsupportedConfiguration,
+                    reason,
+                });
+                return build;
+            }
+        };
+    if explicit_selection {
+        build.sources.push(
+            "explicit package/target/filter selection; development subset, not a full gate"
+                .to_owned(),
+        );
+    }
     items.sort_by(|left, right| {
         left.rank
             .cmp(&right.rank)
             .then_with(|| left.id.cmp(&right.id))
     });
-    let full_requested = widened;
+    let full_requested = widened && !explicit_selection;
     if items.len() as u64 > max_tests {
         let excess = items.split_off(usize::try_from(max_tests).unwrap_or(usize::MAX));
         for item in excess {
@@ -2817,13 +2897,271 @@ fn build_test_plan(
         }
     }
     build.changed_packages = changed_packages.into_iter().collect();
-    build.full = full_requested
-        && build
-            .skipped
-            .iter()
-            .all(|skipped| skipped.status != CellStatus::SkippedBudget);
+    build.full = full_requested && build.skipped.is_empty();
     build.items = items;
+    if (build.full || !request.test_configuration.packages.is_empty())
+        && build.skipped.is_empty()
+        && request.test_configuration.runner == TestRunner::Cargo
+        && request.test_mappings.is_empty()
+        && request.test_configuration.test_filter.is_none()
+    {
+        build.cargo_suite = Some(TestPlanItem {
+            id: "configuration--cargo-suite".to_owned(),
+            rank: 0,
+            scope: if build.full { "workspace" } else { "explicit" }.to_owned(),
+            package: if request.test_configuration.packages.is_empty() {
+                "workspace".to_owned()
+            } else {
+                request.test_configuration.packages.join(", ")
+            },
+            package_id: String::new(),
+            target: "Cargo requested test inventory".to_owned(),
+            target_kind: "cargo-suite".to_owned(),
+            filter: None,
+            exact_test: None,
+            features: request.test_configuration.features.clone(),
+            no_default_features: request.test_configuration.no_default_features,
+            feature_gated: false,
+            runner: VerifyRunner::Cargo,
+            reason: "one Cargo test command preserves requested packages, targets, features and dependency feature unification; inventory entries are not independent execution claims".to_owned(),
+            compile_only: false,
+            cargo_suite_doctests: Some(build.items.iter().filter(|item| item.target_kind == "doctest").count() as u64),
+            packages: request.test_configuration.packages.clone(),
+            cargo_target: request.test_configuration.cargo_target.clone(),
+        });
+        build
+            .sources
+            .push("canonical Cargo workspace suite preserves feature resolution".to_owned());
+    }
     build
+}
+
+fn cargo_test_target(kind: &str, name: &str) -> Option<CargoTargetSelection> {
+    Some(match kind {
+        "lib" | "rlib" | "proc-macro" | "dylib" | "cdylib" | "staticlib" => {
+            CargoTargetSelection::Lib {}
+        }
+        "bin" => CargoTargetSelection::Bin {
+            name: name.to_owned(),
+        },
+        "test" => CargoTargetSelection::Test {
+            name: name.to_owned(),
+        },
+        "example" => CargoTargetSelection::Example {
+            name: name.to_owned(),
+        },
+        "bench" => CargoTargetSelection::Bench {
+            name: name.to_owned(),
+        },
+        _ => return None,
+    })
+}
+
+/// Mapping labels are not execution authority. Resolve package/path hints once
+/// and reject unknown or conflicting owners before planning any Cargo work.
+fn resolve_mapping_package<'a>(
+    snapshot: &'a WorkspaceSnapshot,
+    mapping: &TestMapping,
+) -> Result<Option<&'a cargo_metadata::Package>, String> {
+    if mapping
+        .test_name
+        .as_deref()
+        .is_some_and(|name| !valid_test_name(name))
+    {
+        return Err("explicit mapping testName is not a bounded test name".to_owned());
+    }
+    let named = mapping
+        .package
+        .as_ref()
+        .map(|name| {
+            snapshot
+                .metadata
+                .packages
+                .iter()
+                .find(|package| {
+                    package.name.as_str() == name
+                        && snapshot.metadata.workspace_members.contains(&package.id)
+                })
+                .ok_or_else(|| format!("mapped package `{name}` is not a workspace member"))
+        })
+        .transpose()?;
+    let by_path = mapping
+        .path
+        .as_deref()
+        .map(|path| {
+            let relative = Path::new(path);
+            if relative.is_absolute()
+                || relative
+                    .components()
+                    .any(|part| part == std::path::Component::ParentDir)
+            {
+                return Err(
+                    "mapping path must be workspace-relative without parent traversal".to_owned(),
+                );
+            }
+            let node = owner_node(snapshot, &snapshot.canonical_worktree.join(relative))
+                .ok_or_else(|| "mapping path has no owning workspace package".to_owned())?;
+            snapshot
+                .metadata
+                .packages
+                .iter()
+                .find(|package| package.id.repr == node.package_id)
+                .ok_or_else(|| "mapping path owner is absent from Cargo metadata".to_owned())
+        })
+        .transpose()?;
+    if named
+        .zip(by_path)
+        .is_some_and(|(left, right)| left.id != right.id)
+    {
+        return Err("mapping package and path have conflicting owners".to_owned());
+    }
+    Ok(named.or(by_path))
+}
+
+/// Bind both default inventory and explicit mappings. A result for one target
+/// must never borrow passing tests from a different Cargo target or package.
+fn bind_test_selection(
+    items: &mut Vec<TestPlanItem>,
+    request: &VerifyRequest,
+    snapshot: &WorkspaceSnapshot,
+    mapping_owners: &[Option<&cargo_metadata::Package>],
+) -> Result<bool, String> {
+    let options = &request.test_configuration;
+    options.validate(GateTargetId::Test)?;
+    let explicit = !options.packages.is_empty() || options.cargo_target.is_some();
+    let mut selected_options = options.clone();
+    if selected_options.packages.is_empty() {
+        selected_options.packages = snapshot
+            .metadata
+            .packages
+            .iter()
+            .filter(|package| snapshot.metadata.workspace_members.contains(&package.id))
+            .map(|package| package.name.to_string())
+            .collect();
+    }
+    let Some((selection, _)) = crate::gate::selection::resolve(snapshot, &selected_options)? else {
+        return Ok(explicit);
+    };
+    if mapping_owners
+        .iter()
+        .flatten()
+        .any(|package| !selection.package_ids.contains(&package.id.repr))
+    {
+        return Err("a test mapping conflicts with configuration.packages".to_owned());
+    }
+    for (item, mapping) in items
+        .iter_mut()
+        .filter(|item| item.exact_test.is_some())
+        .zip(
+            request
+                .test_mappings
+                .iter()
+                .filter(|mapping| mapping.test_name.is_some()),
+        )
+    {
+        if options.test_filter.is_some() {
+            return Err(
+                "testFilter and exact test mappings cannot be combined; choose one filter source"
+                    .to_owned(),
+            );
+        }
+        if item.packages.is_empty() && explicit {
+            item.packages = selection.packages.clone();
+        }
+        if mapping.target.is_none() {
+            item.cargo_target = options.cargo_target.clone();
+            continue;
+        }
+        if item.target_kind == "doctest" {
+            if options.cargo_target.is_some() {
+                return Err("a mapped doctest conflicts with configuration.cargoTarget".to_owned());
+            }
+            continue;
+        }
+        let mut targets = snapshot
+            .metadata
+            .packages
+            .iter()
+            .filter(|package| {
+                selection.package_ids.contains(&package.id.repr)
+                    && (item.package_id.is_empty() || item.package_id == package.id.repr)
+            })
+            .flat_map(|package| {
+                package
+                    .targets
+                    .iter()
+                    .filter(|target| {
+                        target.name == item.target
+                            || (item.target == "lib"
+                                && matches!(
+                                    target_kind_name(target),
+                                    "lib"
+                                        | "rlib"
+                                        | "proc-macro"
+                                        | "dylib"
+                                        | "cdylib"
+                                        | "staticlib"
+                                ))
+                    })
+                    .map(move |target| (package, target))
+            })
+            .collect::<Vec<_>>();
+        if let Some(selected) = &options.cargo_target {
+            targets.retain(|(_, target)| selected.matches(target));
+            if targets.is_empty() {
+                return Err(
+                    "a mapped test target conflicts with configuration.cargoTarget".to_owned(),
+                );
+            }
+        }
+        let kinds = targets
+            .iter()
+            .map(|(_, target)| target_kind_name(target))
+            .collect::<BTreeSet<_>>();
+        if kinds.len() != 1 {
+            return Err(
+                "a mapped target is unknown or ambiguous inside the selected packages".to_owned(),
+            );
+        }
+        item.target_kind = kinds.into_iter().next().unwrap_or_default().to_owned();
+        item.cargo_target = cargo_test_target(&item.target_kind, &item.target);
+        if item.cargo_target.is_none() {
+            return Err("mapped target is not a supported Cargo test target".to_owned());
+        }
+        if options
+            .cargo_target
+            .as_ref()
+            .is_some_and(|selected| item.cargo_target.as_ref() != Some(selected))
+        {
+            return Err("a mapped test target conflicts with configuration.cargoTarget".to_owned());
+        }
+        item.packages = targets
+            .iter()
+            .map(|(package, _)| package.name.to_string())
+            .collect();
+        item.packages.sort();
+        item.packages.dedup();
+        let mut bound = options.clone();
+        bound.packages = item.packages.clone();
+        bound.cargo_target = item.cargo_target.clone();
+        bound.validate(GateTargetId::Test)?;
+    }
+    items.retain(|item| {
+        (item.package_id.is_empty() || selection.package_ids.contains(&item.package_id))
+            && options
+                .cargo_target
+                .as_ref()
+                .is_none_or(|selected| item.cargo_target.as_ref() == Some(selected))
+    });
+    if explicit {
+        for item in items {
+            if item.exact_test.is_none() {
+                item.scope = "explicit".to_owned();
+            }
+            item.reason = format!("explicit package/target subset: {}", item.reason);
+        }
+    }
+    Ok(explicit || options.test_filter.is_some())
 }
 
 fn display_relative(path: &Path, snapshot: &WorkspaceSnapshot) -> String {
@@ -2854,6 +3192,31 @@ impl VerifyService {
         committed: CancellationToken,
     ) -> VerifyOutcome {
         let action = request.action;
+        // Capture before metadata planning so a newly added target cannot be
+        // excluded by an old inventory yet included in the initial identity.
+        let initial_identity = if action == VerifyAction::TestRun {
+            match self
+                .check
+                .verification_identity(
+                    request.directory.clone(),
+                    request.client_roots.clone(),
+                    committed.clone(),
+                )
+                .await
+            {
+                Ok(identity) => identity,
+                Err((status, reason)) => {
+                    return VerifyOutcome::failure(
+                        action,
+                        status.as_str(),
+                        request.change_id.clone(),
+                        reason,
+                    );
+                }
+            }
+        } else {
+            String::new()
+        };
         let plan_snapshot = match self
             .check
             .plan_snapshot(
@@ -2876,8 +3239,14 @@ impl VerifyService {
         match action {
             VerifyAction::TestPlan => self.test_plan(&request, &plan_snapshot, &committed),
             VerifyAction::TestRun => {
-                self.test_run(&request, &plan_snapshot, progress, &committed)
-                    .await
+                self.test_run(
+                    &request,
+                    &plan_snapshot,
+                    &initial_identity,
+                    progress,
+                    &committed,
+                )
+                .await
             }
             VerifyAction::TestCandidate => {
                 self.test_candidate(&request, &plan_snapshot, progress, &committed)
@@ -2908,7 +3277,7 @@ impl VerifyService {
         let mut outcome = test_outcome_header(&self.config, request, "PLANNED", String::new());
         outcome.skipped = plan.skipped.clone();
         outcome.missing_cell_ids = plan.skipped.iter().map(|row| row.id.clone()).collect();
-        outcome.budget.planned = plan.items.len() as u64;
+        outcome.budget.planned = build.execution_items().len() as u64;
         outcome.complete = plan.full;
         outcome.reason = format!(
             "planned {} test scope(s), {} candidate(s) skipped; coverage: {}; sources: {}",
@@ -2929,6 +3298,7 @@ impl VerifyService {
         &self,
         request: &VerifyRequest,
         plan_snapshot: &super::check::PlanSnapshot,
+        initial_identity: &str,
         progress: Option<ProgressCallback>,
         committed: &CancellationToken,
     ) -> VerifyOutcome {
@@ -2945,13 +3315,13 @@ impl VerifyService {
         let mut outcome = test_outcome_header(&self.config, request, "INCONCLUSIVE", String::new());
         outcome.skipped = plan.skipped.clone();
         outcome.missing_cell_ids = plan.skipped.iter().map(|row| row.id.clone()).collect();
-        outcome.budget.planned = plan.items.len() as u64;
+        outcome.budget.planned = build.execution_items().len() as u64;
         outcome.test_plan = Some(plan.clone());
 
         let started = Instant::now();
         let wall_deadline = started + Duration::from_millis(outcome.budget.max_wall_ms);
         let root = plan_snapshot.snapshot.workspace_root.clone();
-        let total = build.items.len();
+        let total = build.execution_items().len();
         let mut runs = Vec::with_capacity(total);
         let mut completed = 0_u64;
         let mut passed = 0_u64;
@@ -2961,7 +3331,7 @@ impl VerifyService {
             .iter()
             .map(|row| row.id.clone())
             .collect::<Vec<_>>();
-        for (index, item) in build.items.iter().enumerate() {
+        for (index, item) in build.execution_items().iter().enumerate() {
             let planned = test_plan_item_data(item);
             if committed.is_cancelled() {
                 runs.push(stopped_test_run(
@@ -2995,7 +3365,7 @@ impl VerifyService {
                 "FAIL" | "COMPILE_FAIL" => failed = true,
                 _ => {}
             }
-            if run.status != "PASS" {
+            if !matches!(run.status.as_str(), "PASS" | "COMPILED") {
                 missing.push(item.id.clone());
             }
             completed = completed.saturating_add(1);
@@ -3003,11 +3373,45 @@ impl VerifyService {
         }
         outcome.budget.executed = completed;
 
+        let final_identity = self
+            .check
+            .verification_identity(
+                request.directory.clone(),
+                request.client_roots.clone(),
+                committed.clone(),
+            )
+            .await;
+        let identity_error = match final_identity {
+            Ok(identity) if identity == initial_identity => None,
+            Ok(_) => Some((
+                "STALE",
+                "workspace inputs changed after test planning; \
+                per-item results do not establish a common source state"
+                    .to_owned(),
+            )),
+            Err((status, reason)) => Some((
+                status.as_str(),
+                format!("final verify identity could not be established: {reason}"),
+            )),
+        };
+        if let Some((_, reason)) = &identity_error {
+            missing.push("workspace-identity".to_owned());
+            outcome.warnings.push(reason.clone());
+        }
+
         let doctest_items = runs
             .iter()
             .filter(|run| run.item.target_kind == "doctest")
             .collect::<Vec<_>>();
-        let doctest_gate = if doctest_items.is_empty() {
+        let doctest_gate = if build
+            .cargo_suite
+            .as_ref()
+            .is_some_and(|suite| suite.cargo_suite_doctests == Some(0))
+        {
+            "NOT_REQUIRED".to_owned()
+        } else if build.cargo_suite.is_some() {
+            "INCLUDED IN CANONICAL CARGO SUITE; no separate execution claim".to_owned()
+        } else if doctest_items.is_empty() {
             "NOT_REQUIRED".to_owned()
         } else {
             let statuses = doctest_items
@@ -3023,12 +3427,23 @@ impl VerifyService {
             format!("REQUIRED: {statuses}{nextest_note}")
         };
 
-        let all_pass = !runs.is_empty() && runs.iter().all(|run| run.status == "PASS");
-        let status = if runs.is_empty() {
+        let compiled = runs.iter().filter(|run| run.status == "COMPILED").count();
+        let all_pass = !runs.is_empty()
+            && runs
+                .iter()
+                .all(|run| matches!(run.status.as_str(), "PASS" | "COMPILED"));
+        let status = if let Some((status, _)) = &identity_error {
+            *status
+        } else if runs.is_empty() {
             "INCONCLUSIVE"
         } else if failed {
             "FAIL"
-        } else if all_pass && plan.full {
+        } else if all_pass
+            && plan.full
+            && build.cargo_suite.is_some()
+            && missing.is_empty()
+            && passed > 0
+        {
             "FULL_REQUESTED_SUITE"
         } else if passed > 0 {
             "TESTED_SUBSET"
@@ -3040,7 +3455,13 @@ impl VerifyService {
         outcome.all_pass = outcome.complete;
         outcome.reason = match status {
             "FULL_REQUESTED_SUITE" => format!(
-                "every requested workspace test scope completed with a pass ({passed} scope(s))"
+                "every requested workspace scope completed: {passed} test scope(s) passed and {compiled} example build scope(s) compiled"
+            ),
+            "TESTED_SUBSET" if plan.full && build.cargo_suite.is_none() => format!(
+                "{passed} of {total} test scope(s) passed; {} missing; separate target runs \
+                 do not prove workspace feature unification; run the canonical Cargo suite \
+                 without mappings or filters for a full gate",
+                missing.len()
             ),
             "TESTED_SUBSET" => format!(
                 "{passed} of {total} test scope(s) passed; {} missing; a subset run is \
@@ -3055,6 +3476,9 @@ impl VerifyService {
                   results, custom harnesses, and missing summaries are never a pass"
                 .to_owned(),
         };
+        if let Some((_, reason)) = identity_error {
+            outcome.reason = reason;
+        }
         if let Some(callback) = progress.as_ref() {
             emit(
                 callback,
@@ -3063,6 +3487,7 @@ impl VerifyService {
                 started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
             );
         }
+        outcome.missing_cell_ids = missing.clone();
         outcome.test_run = Some(TestRunData {
             full: plan.full,
             requested: total as u64,
@@ -3084,34 +3509,53 @@ impl VerifyService {
     ) -> TestRunItemData {
         let doctest = item.target_kind == "doctest";
         let mut options = request.test_configuration.clone();
+        options.packages = item.packages.clone();
+        options.cargo_target = item.cargo_target.clone();
         options.features = item.features.clone();
         options.no_default_features = item.no_default_features;
-        options.runner = if doctest {
+        options.runner = if doctest || item.compile_only {
             TestRunner::Cargo
         } else {
             item.runner.gate_runner()
         };
-        options.test_filter = if doctest { None } else { item.filter.clone() };
-        let target = if doctest {
+        options.test_filter = if doctest || item.compile_only {
+            None
+        } else {
+            item.filter.clone()
+        };
+        let target = if item.compile_only {
+            GateTargetId::Build
+        } else if doctest {
             GateTargetId::Doc
         } else {
             GateTargetId::Test
         };
-        let gate = GateRequest::new(root.to_path_buf(), target)
+        let mut gate = GateRequest::new(root.to_path_buf(), target)
             .with_options(options)
             .with_detail(GateDetail::Compact)
             .with_client_roots(request.client_roots.clone())
             .with_root_epoch(request.root_epoch);
+        if item.cargo_suite_doctests.is_some() {
+            gate = gate.with_cargo_test_defaults();
+        }
         let evidence = self.check.run(gate, None, Some(committed.clone())).await;
-        let observation = observe_test_output(&evidence_text(&evidence));
+        let observation = if item.compile_only {
+            TestObservation::default()
+        } else {
+            observe_test_output(&evidence_text(&evidence))
+        };
         let (status, reason, exact_test_seen) =
             classify_test_evidence(item, &evidence, &observation);
-        let tests_executed = evidence
-            .steps
-            .iter()
-            .filter_map(|step| step.evidence.tests_executed)
-            .max()
-            .unwrap_or(0);
+        let tests_executed = if item.compile_only {
+            0
+        } else {
+            evidence
+                .steps
+                .iter()
+                .filter_map(|step| step.evidence.tests_executed)
+                .max()
+                .unwrap_or(0)
+        };
         TestRunItemData {
             item: test_plan_item_data(item),
             status,
@@ -3722,6 +4166,41 @@ fn classify_test_evidence(
             (status.to_owned(), reason, exact_seen)
         }
         GateStatus::FastPass | GateStatus::FullPass => {
+            if let Some(doctests) = item.cargo_suite_doctests {
+                let complete = !evidence.steps.is_empty()
+                    && evidence.steps.iter().all(|step| {
+                        let stats = &step.evidence;
+                        step.target == GateTargetId::Test
+                            && stats.build_finished
+                            && stats.build_success == Some(true)
+                            && stats.tests_executed.unwrap_or(0) > 0
+                            && stats.empty_test_summaries == 0
+                            && stats.test_summaries >= stats.test_binaries.saturating_add(doctests)
+                    });
+                if !complete {
+                    return (
+                        "INCONCLUSIVE".to_owned(),
+                        "Cargo suite lacks complete nonempty test summaries for its test executables and doctest scopes; custom harnesses and zero-test scopes cannot borrow another scope's pass".to_owned(),
+                        false,
+                    );
+                }
+            }
+            if item.compile_only {
+                return if !evidence.steps.is_empty()
+                    && evidence.steps.iter().all(|step| {
+                        step.target == GateTargetId::Build
+                            && step.evidence.build_finished
+                            && step.evidence.build_success == Some(true)
+                    }) {
+                    ("COMPILED".to_owned(), "ordinary example compiled successfully; no tests were executed by this scope".to_owned(), false)
+                } else {
+                    (
+                        "INCONCLUSIVE".to_owned(),
+                        "example compilation produced no complete Cargo build evidence".to_owned(),
+                        false,
+                    )
+                };
+            }
             if exact_ignored {
                 return (
                     "IGNORED_ONLY".to_owned(),
@@ -4649,6 +5128,10 @@ mod tests {
 
     fn mapping_item(exact: Option<&str>) -> TestPlanItem {
         TestPlanItem {
+            packages: Vec::new(),
+            cargo_target: None,
+            compile_only: false,
+            cargo_suite_doctests: None,
             id: "item".to_owned(),
             rank: 0,
             scope: "unit".to_owned(),

@@ -17,6 +17,15 @@ pub struct EvidenceStats {
     pub build_success: Option<bool>,
     /// Executed libtest cases when its standard summary is observed.
     pub tests_executed: Option<u64>,
+    /// Complete libtest summaries observed independently of bounded human output.
+    #[serde(default)]
+    pub test_summaries: u64,
+    /// Summaries with no executed cases, including ignored-only suites.
+    #[serde(default)]
+    pub empty_test_summaries: u64,
+    /// Test executables reported by Cargo compiler-artifact records.
+    #[serde(default)]
+    pub test_binaries: u64,
 }
 
 #[derive(Debug)]
@@ -31,6 +40,7 @@ pub struct CargoStream {
     keys: BTreeSet<String>,
     build: CargoBuildTelemetry,
     stats: EvidenceStats,
+    human_output: String,
 }
 
 impl Default for CargoStream {
@@ -61,6 +71,7 @@ impl CargoStream {
                 packages_truncated: false,
             },
             stats: EvidenceStats::default(),
+            human_output: String::new(),
         }
     }
 
@@ -101,7 +112,14 @@ impl CargoStream {
         })
     }
 
-    pub fn finish(mut self) -> (CargoOutput, EvidenceStats) {
+    pub fn finish(self) -> (CargoOutput, EvidenceStats) {
+        let (output, stats, _) = self.finish_with_human_output();
+        (output, stats)
+    }
+
+    /// Preserve a bounded human stdout tail independently of Cargo JSON. This
+    /// keeps panic/test output readable even when a raw tail begins mid-record.
+    pub fn finish_with_human_output(mut self) -> (CargoOutput, EvidenceStats, String) {
         self.consume_line();
         let truncated = self.stats.omitted_records > 0
             || self.stats.malformed_lines > 0
@@ -114,6 +132,7 @@ impl CargoStream {
                 truncated,
             },
             self.stats,
+            self.human_output,
         )
     }
 
@@ -140,6 +159,11 @@ impl CargoStream {
                 .and_then(|s| s.trim().strip_suffix(" failed"))
                 .and_then(|s| s.parse::<u64>().ok());
             if let (Some(passed), Some(failed)) = (passed, failed) {
+                self.stats.test_summaries = self.stats.test_summaries.saturating_add(1);
+                if passed == 0 && failed == 0 {
+                    self.stats.empty_test_summaries =
+                        self.stats.empty_test_summaries.saturating_add(1);
+                }
                 self.stats.tests_executed = Some(
                     self.stats
                         .tests_executed
@@ -149,9 +173,25 @@ impl CargoStream {
                 );
             }
         }
+        let mut cargo_record = false;
         if line.trim_start().starts_with('{') {
             match serde_json::from_str::<serde_json::Value>(line) {
                 Ok(message) => {
+                    if message["reason"] == "compiler-artifact"
+                        && message["profile"]["test"] == true
+                        && message["executable"].is_string()
+                    {
+                        self.stats.test_binaries = self.stats.test_binaries.saturating_add(1);
+                    }
+                    cargo_record = matches!(
+                        message["reason"].as_str(),
+                        Some(
+                            "compiler-message"
+                                | "compiler-artifact"
+                                | "build-script-executed"
+                                | "build-finished"
+                        )
+                    );
                     if message["reason"] == "build-finished" {
                         self.stats.build_finished = message["success"].is_boolean();
                         self.stats.build_success = message["success"].as_bool();
@@ -166,6 +206,9 @@ impl CargoStream {
                     return;
                 }
             }
+        }
+        if !cargo_record {
+            self.retain_human_output(line);
         }
         let parsed = parse_cargo_output(line);
         if let Some(build) = parsed.build {
@@ -207,6 +250,21 @@ impl CargoStream {
         for diagnostic in parsed.diagnostics {
             self.retain(diagnostic);
         }
+    }
+
+    fn retain_human_output(&mut self, line: &str) {
+        const MAX_BYTES: usize = 4_000;
+        let clean = super::parser::sanitize_text(line);
+        if clean.trim().is_empty() {
+            return;
+        }
+        self.human_output.push_str(&clean);
+        self.human_output.push('\n');
+        let mut start = self.human_output.len().saturating_sub(MAX_BYTES);
+        while !self.human_output.is_char_boundary(start) {
+            start += 1;
+        }
+        self.human_output.drain(..start);
     }
 
     fn key(diagnostic: &Diagnostic) -> String {

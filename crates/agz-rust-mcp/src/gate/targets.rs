@@ -5,6 +5,7 @@ use crate::workspace::WorkspaceSnapshot;
 use super::types::{GateTarget, GateTargetId};
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(180);
+const BUILD_TIMEOUT: Duration = Duration::from_secs(300);
 const CLIPPY_TIMEOUT: Duration = Duration::from_secs(240);
 const TEST_TIMEOUT: Duration = Duration::from_secs(300);
 const DOC_TIMEOUT: Duration = Duration::from_secs(300);
@@ -33,6 +34,13 @@ pub fn target_for(
     let mut args = match id {
         GateTargetId::Check => vec![
             OsString::from("check"),
+            OsString::from("--manifest-path"),
+            manifest.clone(),
+            OsString::from("--locked"),
+            OsString::from("--message-format=json"),
+        ],
+        GateTargetId::Build => vec![
+            OsString::from("build"),
             OsString::from("--manifest-path"),
             manifest.clone(),
             OsString::from("--locked"),
@@ -83,7 +91,7 @@ pub fn target_for(
     if full_workspace
         && matches!(
             id,
-            GateTargetId::Clippy | GateTargetId::Test | GateTargetId::Doc
+            GateTargetId::Build | GateTargetId::Clippy | GateTargetId::Test | GateTargetId::Doc
         )
     {
         let separator = args
@@ -111,6 +119,7 @@ pub fn target_for(
 
     let (label, timeout) = match id {
         GateTargetId::Check => ("cargo check", CHECK_TIMEOUT),
+        GateTargetId::Build => ("cargo build", BUILD_TIMEOUT),
         GateTargetId::Clippy => ("cargo clippy (warnings as errors)", CLIPPY_TIMEOUT),
         GateTargetId::Test => ("cargo test --all-targets", TEST_TIMEOUT),
         GateTargetId::Doc => ("cargo test --doc", DOC_TIMEOUT),
@@ -159,18 +168,18 @@ pub fn has_doctestable_target(snapshot: &WorkspaceSnapshot) -> bool {
         .packages
         .iter()
         .filter(|package| snapshot.metadata.workspace_members.contains(&package.id))
-        .any(|package| {
-            package.targets.iter().any(|target| {
-                target.doctest
-                    && target.kind.iter().any(|kind| {
-                        matches!(
-                            kind,
-                            cargo_metadata::TargetKind::Lib
-                                | cargo_metadata::TargetKind::RLib
-                                | cargo_metadata::TargetKind::ProcMacro
-                        )
-                    })
-            })
+        .any(|package| package.targets.iter().any(target_supports_doctests))
+}
+
+pub(crate) fn target_supports_doctests(target: &cargo_metadata::Target) -> bool {
+    target.doctest
+        && target.kind.iter().any(|kind| {
+            matches!(
+                kind,
+                cargo_metadata::TargetKind::Lib
+                    | cargo_metadata::TargetKind::RLib
+                    | cargo_metadata::TargetKind::ProcMacro
+            )
         })
 }
 

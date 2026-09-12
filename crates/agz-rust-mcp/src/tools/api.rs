@@ -955,6 +955,7 @@ struct SourceRead {
 
 fn read_source(root: &WorkspaceRoot, relative: &Path, line: u32) -> Result<SourceRead, String> {
     let bytes = root
+        .requested_authority()
         .read_file(relative, MAX_SOURCE_BYTES)
         .map_err(|error| bounded_root_error(&error))?;
     let content = String::from_utf8(bytes).map_err(|_| "source file is not UTF-8".to_owned())?;
@@ -1553,6 +1554,7 @@ fn build_probe_plan(
     // creates one.
     let lock = match env
         .root
+        .requested_authority()
         .read_file(Path::new("Cargo.lock"), MAX_SOURCE_BYTES)
     {
         Ok(bytes) => bytes,
@@ -1564,6 +1566,7 @@ fn build_probe_plan(
     };
     let manifest = match env
         .root
+        .requested_authority()
         .read_file(Path::new("Cargo.toml"), MAX_SOURCE_BYTES)
     {
         Ok(bytes) => bytes,
@@ -1816,7 +1819,9 @@ fn declared_module(root: &WorkspaceRoot, target_src: &Path, anchor: &Path) -> bo
             let Ok(relative) = candidate.strip_prefix(root.path()) else {
                 continue;
             };
-            if let Ok(bytes) = root.read_file(relative, MAX_SOURCE_BYTES)
+            if let Ok(bytes) = root
+                .requested_authority()
+                .read_file(relative, MAX_SOURCE_BYTES)
                 && let Ok(content) = String::from_utf8(bytes)
                 && declares_module(&content, &name)
             {
@@ -1986,7 +1991,7 @@ fn strip_comments_and_strings(content: &str) -> String {
 
 fn toolchain_label(root: &WorkspaceRoot) -> Option<String> {
     for name in ["rust-toolchain.toml", "rust-toolchain"] {
-        if let Ok(bytes) = root.read_file(Path::new(name), 4_096)
+        if let Ok(bytes) = root.requested_authority().read_file(Path::new(name), 4_096)
             && let Ok(text) = String::from_utf8(bytes)
         {
             let trimmed = text.trim();
@@ -2011,6 +2016,7 @@ fn verify_original_unchanged(
     for expected in &plan.original_hashes {
         let current = env
             .root
+            .requested_authority()
             .read_file(Path::new(&expected.file), MAX_SOURCE_BYTES)
             .ok();
         let matches = current

@@ -11,6 +11,36 @@ dosya, MCP istemciniz tarafından başlatılır ve stdin/stdout üzerinde Model
 Context Protocol konuşur. Aşağıdaki yöntemlerin tümü aynı `agz-rust-mcp`
 çalıştırılabilir dosyasını kurar.
 
+## Paketli skilller (güncel kaynak)
+
+Henüz yayımlanmamış kaynak dört sürümlenmiş `SKILL.md` dosyasını aynı
+çalıştırılabilir dosyada taşır. Çevrimdışı çalışırlar; ayrı skill paketi veya MCP
+sunucusu gerekmez. `prompts/list`, `workflow`, `repair`, `refactor` ve `performance`
+akışlarını listeler. `prompts/get` isteğe bağlı `task` metni kabul eder (temizlenmiş
+en fazla 4.000 karakter). `resources/list` aynı içeriği
+`agz-rust-mcp://skills/<skill-name>` altında sunar. Eski workflow kaynağı aynı
+içeriğe yönlendirir. Prompt ya da dosya skilllerini keşfetme/çağırma davranışını
+istemci belirler; MCP kaynağının bulunması otomatik skill seçimini tek başına açmaz.
+
+Dosya tabanlı skill keşfi kullanan istemciler için kaynaktan derlenmiş binary ile:
+
+```bash
+agz-rust-mcp skills list
+agz-rust-mcp skills show agz-rust-workflow
+# Üst dizin mevcut ve güvenilir olmalı; hedef dizin mevcut OLMAMALI:
+agz-rust-mcp skills export --dir /path/to/new-skills
+```
+
+Hedefte `agz-rust-workflow`, `agz-rust-repair`, `agz-rust-refactor` ve
+`agz-rust-performance` klasörlerinin her biri bir `SKILL.md` içerir. İstemcinin
+desteklediği skill dizinini yeni hedef olarak seçin veya seçtiğiniz klasörleri
+inceledikten sonra mevcut skill dizinine kopyalayın. Dışa aktarma mevcut hedefi
+reddeder, özel skilllerin üzerine yazmaz ve hata durumunda kısmi çıktıyı bildirir.
+Bu CLI komutları MCP/Cargo başlatmaz, sunucu yapılandırmasını okumaz ve istemci
+ayarlarını değiştirmez. Alt komut verilmezse binary normal stdio sunucusudur.
+Skilller bağlı sunucunun keşfedilen araçlarını kullanır; Rust/Cargo ve isteğe
+bağlı adaptörler yerel çalıştırılabilir önkoşullar olmaya devam eder.
+
 ## Gereksinimler
 
 - Linux, macOS veya Windows (x86_64) ya da macOS (arm64).
@@ -153,6 +183,26 @@ yola yönlendirin. Tam geliştirme kapısı için
   `install.sh` Windows'u desteklemez. Çıkarma dizinini `PATH`'e ekleyin.
 
 ## MCP İstemci Ayarı
+
+### Birden çok checkout, worktree ve paket alt dizini
+
+Sunucu tek bir Git dalına bağlı değildir. Her çağrıda depo kökü, paket/kaynak
+alt dizini veya bağlı worktree için mutlak `dir` verin. Ortak proje üst dizinini
+bir kez `--allow-root` ile, istemcinin ayrı worktree dizini gibi diğer konumları
+da ek kök olarak tanımlayın. Seçilen worktree dışındaki ortak path bağımlılıkları
+açık `--allow-dependency-root` gerektirir. Kendi yollarınızla örnek sunucu argümanları:
+
+```text
+--allow-root /projects --allow-root /client-worktrees --allow-dependency-root /projects
+```
+
+Bunlar açık yerel güven sınırlarıdır; MCP istemci kökleri bunları daraltabilir.
+Güncel kaynak paket/kaynak alt dizinlerinden miras alınan workspace bağımlılıklarını
+bulur ve dış bağımlılık girdilerini geniş üst köke değil seçilen worktree'ye göre
+izler. Farklı checkout'lar ayrı cache anahtarlarını korur. Auto cache modunda
+güvensiz/harici proje target'ı izole target'a yönlenir; project-only modu güvenli
+workspace içi target gerektirir. Eksik dizin veya erişilemeyen bağımlılık sınırlı
+bir neden döndürür; başarılı kontrol sayılmaz.
 
 `agz-rust-mcp` bağımsız bir stdio sunucusudur; MCP destekli her istemci
 çalıştırabilir. Kanonik çalışma dizini varsayılan yetkili köktür. İstemci başka

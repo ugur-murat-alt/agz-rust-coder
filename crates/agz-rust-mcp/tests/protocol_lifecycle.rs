@@ -125,7 +125,36 @@ async fn initialize_lists_the_static_surface_and_guidance() -> Result<()> {
     assert!(tools.tools.iter().all(|tool| tool.output_schema.is_some()));
 
     let prompts = client.peer().list_prompts(None).await?;
-    assert_eq!(prompts.prompts.len(), 1);
+    assert_eq!(prompts.prompts.len(), 4);
+    for (prompt, skill) in prompts
+        .prompts
+        .iter()
+        .zip(agz_rust_mcp::skills::BUNDLED_SKILLS)
+    {
+        assert_eq!(prompt.name, skill.prompt);
+        let result = client
+            .peer()
+            .get_prompt_once(GetPromptRequestParams::new(skill.prompt))
+            .await?;
+        let GetPromptResponse::Complete(result) = result else {
+            anyhow::bail!("bundled skill did not complete");
+        };
+        assert_eq!(
+            serde_json::to_value(result)?["messages"][0]["content"]["text"],
+            skill.markdown
+        );
+        let resource = client
+            .peer()
+            .read_resource_once(ReadResourceRequestParams::new(skill.uri))
+            .await?;
+        let ReadResourceResponse::Complete(resource) = resource else {
+            anyhow::bail!("bundled skill resource did not complete");
+        };
+        assert_eq!(
+            serde_json::to_value(resource)?["contents"][0]["text"],
+            skill.markdown
+        );
+    }
     let prompt = client
         .peer()
         .get_prompt_once(GetPromptRequestParams::new("workflow"))
@@ -133,7 +162,7 @@ async fn initialize_lists_the_static_surface_and_guidance() -> Result<()> {
     assert!(matches!(prompt, GetPromptResponse::Complete(_)));
 
     let resources = client.peer().list_resources(None).await?;
-    assert_eq!(resources.resources.len(), 4);
+    assert_eq!(resources.resources.len(), 8);
     let resource = client
         .peer()
         .read_resource_once(ReadResourceRequestParams::new("agz-rust-mcp://workflow"))
@@ -187,6 +216,42 @@ async fn discover_selects_the_requested_2026_version() -> Result<()> {
         ProtocolVersion::V_2026_07_28
     );
 
+    client.cancel().await?;
+    server_task.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_uses_requested_dir_and_never_labels_unreadable_input_clean() -> Result<()> {
+    let (mut config, _state) = fixture_config();
+    let requested = config.server.allow_roots[0].clone();
+    config.server.allow_roots = vec![requested.parent().unwrap().to_owned()];
+    let (transport, server_task) = spawn_server(config);
+    let client = client_info(ClientCapabilities::default())
+        .serve(transport)
+        .await?;
+    for (path, status, files) in [
+        ("src/lib.rs", "CLEAN", 1),
+        ("missing.rs", "INCONCLUSIVE", 0),
+    ] {
+        let args = serde_json::json!({"dir": requested, "path": path});
+        let result = client
+            .call_tool_once(
+                CallToolRequestParams::new("audit")
+                    .with_arguments(args.as_object().unwrap().clone()),
+            )
+            .await?;
+        let CallToolResponse::Complete(result) = result else {
+            anyhow::bail!("unexpected audit task")
+        };
+        let data = result.structured_content.context("audit content")?;
+        assert_eq!(data["status"], status, "{data:#}");
+        assert_eq!(data["data"]["scannedFiles"], files);
+        assert_eq!(
+            data["workspace"]["workspaceRoot"],
+            requested.to_str().unwrap()
+        );
+    }
     client.cancel().await?;
     server_task.await??;
     Ok(())

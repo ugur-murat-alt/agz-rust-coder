@@ -37,6 +37,13 @@ troubleshooting: [docs/install.md](docs/install.md) ·
 
 ## MCP Client Setup
 
+The current source also bundles four offline skills: `agz-rust-workflow`,
+`agz-rust-repair`, `agz-rust-refactor`, and `agz-rust-performance`. One executable
+serves the tools and their workflows through MCP prompts/resources; a second MCP
+is unnecessary. Filesystem-based clients can use `agz-rust-mcp skills export`.
+See [bundled skills](docs/install.md#bundled-skills-current-source).
+This addition is unreleased; published `0.3.0` binaries do not include it.
+
 Minimal OpenCode2 configuration (`opencode.jsonc`):
 
 ```jsonc

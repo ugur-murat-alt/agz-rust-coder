@@ -258,7 +258,9 @@ impl CheckService {
             request.root_epoch,
             request.options
         );
-        let identity_key = prepared.identity.hash.clone();
+        // Different validation commands may share source without invalidating
+        // one another. The full identity remains in the singleflight key.
+        let identity_key = prepared.identity.source_hash.clone();
         let root = prepared.snapshot.workspace_root.clone();
         let supervisor = self.supervisor.clone();
         let config = self.config.clone();
@@ -310,6 +312,54 @@ impl CheckService {
         if self.owns_supervisor {
             let _ = self.supervisor.close().await;
         }
+    }
+
+    /// Capture a comparable whole-workspace identity without compiling. Verify
+    /// uses the same fixed check command before planning and after all items;
+    /// per-item command hashes cannot themselves prove a common source state.
+    pub(crate) async fn verification_identity(
+        &self,
+        directory: Option<PathBuf>,
+        client_roots: ClientRoots,
+        cancellation: CancellationToken,
+    ) -> Result<String, (GateStatus, String)> {
+        let mut request = GateRequest::without_directory(GateTargetId::Check);
+        request.directory = directory;
+        request.client_roots = client_roots;
+        let deadline = Instant::now() + Duration::from_millis(self.config.gate.hard_timeout_ms);
+        let control = crate::workspace::metadata::MetadataControl::new(
+            deadline,
+            cancellation.clone(),
+            self.supervisor.clone(),
+            tokio::runtime::Handle::current(),
+        );
+        let git = ControlledGitProbe::fixed(
+            deadline,
+            cancellation,
+            self.supervisor.clone(),
+            tokio::runtime::Handle::current(),
+        );
+        let service = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let prepared = service.prepare(&request, &control, &git, &service.cargo, None, None)?;
+            if !prepared.identity.complete {
+                return Err((
+                    GateStatus::Inconclusive,
+                    format!(
+                        "verify identity is incomplete: {:?}",
+                        prepared.identity.incomplete_reason
+                    ),
+                ));
+            }
+            Ok(prepared.identity.hash)
+        })
+        .await
+        .map_err(|error| {
+            (
+                GateStatus::Unavailable,
+                format!("verify identity task failed: {error}"),
+            )
+        })?
     }
 
     /// Resolve workspace metadata without starting any Cargo build stage.
@@ -500,7 +550,6 @@ impl CheckService {
                     format!("workspace selection failed: {error}"),
                 )
             })?;
-        let workspace_root = selection.requested_root();
         let load = self
             .metadata
             .acquire_controlled(&selection, cargo.to_path_buf(), control)
@@ -522,6 +571,15 @@ impl CheckService {
                 })?
         };
         let git_authority = selection.worktree_authority().clone();
+        // A request may originate in src/ or a member package. Input discovery
+        // must still cover the entire resolved Cargo workspace, including when
+        // Git is absent and the identity uses the bounded filesystem walk.
+        let workspace_root = WorkspaceRoot::from_parts(
+            selection.authority().clone(),
+            workspace_authority.clone(),
+            snapshot.workspace_root.clone(),
+            selection.epoch(),
+        );
         let mut cache =
             select_gate_cache(&snapshot, &self.config.gate, request.mode()).map_err(|error| {
                 (
@@ -532,9 +590,18 @@ impl CheckService {
         if let Some(binding) = toolchain_binding {
             apply_toolchain_environment(&mut cache.environment, binding);
         }
-        let initial_scope_args = if matches!(
+        let explicit_scope = crate::gate::selection::resolve(&snapshot, &request.options)
+            .map_err(|reason| (GateStatus::Inconclusive, reason))?
+            .map(|(evidence, args)| CheckScope { evidence, args });
+        let initial_scope_args = if let Some(scope) = &explicit_scope {
+            scope.args.clone()
+        } else if matches!(
             request.target,
-            GateTargetId::Check | GateTargetId::Clippy | GateTargetId::Test | GateTargetId::Doc
+            GateTargetId::Check
+                | GateTargetId::Build
+                | GateTargetId::Clippy
+                | GateTargetId::Test
+                | GateTargetId::Doc
         ) {
             vec![OsString::from("--workspace")]
         } else {
@@ -554,7 +621,7 @@ impl CheckService {
             ));
         }
         for target in &mut targets {
-            request.options.apply(target);
+            request.apply_options(target);
         }
         apply_toolchain(&mut targets, toolchain_selector);
         let mut command = targets
@@ -581,13 +648,19 @@ impl CheckService {
         )
         .map_err(preflight_identity_error)?;
         control.checkpoint().map_err(preflight_control_error)?;
-        let mut scope = check_scope(
-            &snapshot,
-            request.target,
-            self.config.gate.scope,
-            identity.changed_paths.clone(),
-        );
-        if request.options.has_build_selection() && !initial_scope_args.is_empty() {
+        let mut scope = explicit_scope.unwrap_or_else(|| {
+            check_scope(
+                &snapshot,
+                request.target,
+                self.config.gate.scope,
+                identity.changed_paths.clone(),
+            )
+        });
+        scope.evidence.changed_paths = identity.changed_paths.clone();
+        if request.options.packages.is_empty()
+            && request.options.has_build_selection()
+            && !initial_scope_args.is_empty()
+        {
             scope = CheckScope {
                 evidence: GateScope::workspace(
                     identity.changed_paths.clone(),
@@ -605,7 +678,7 @@ impl CheckService {
                 &scope.args,
             );
             for target in &mut targets {
-                request.options.apply(target);
+                request.apply_options(target);
             }
             apply_toolchain(&mut targets, toolchain_selector);
             command = targets
@@ -1066,12 +1139,12 @@ async fn execute_prepared(
                 other => SchedulerError::Internal(other.to_string()),
             })?;
         warnings.extend(result.warnings.iter().cloned());
-        let (mut parsed, evidence_stats) = std::mem::take(
+        let (mut parsed, evidence_stats, human_stdout) = std::mem::take(
             &mut *stream
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         )
-        .finish();
+        .finish_with_human_output();
         // Prioritize actionable errors over warnings in compact responses.
         parsed.diagnostics.sort_by_key(|diagnostic| {
             diagnostic.level != crate::diagnostics::DiagnosticLevel::Error
@@ -1137,9 +1210,27 @@ async fn execute_prepared(
                 .map(convert_diagnostic)
                 .collect(),
             suggestion_package,
-            tail: bounded_tail(&result.output, 8_000),
-            stdout: bounded_tail(&result.stdout, 16_000),
-            stderr: bounded_tail(&result.stderr, 16_000),
+            // Compact output already has structured compiler diagnostics. Keep
+            // human stdout/stderr once, without repeating Cargo JSON or a mixed
+            // tail that can start in the middle of a large compiler record.
+            tail: if request.detail == crate::gate::GateDetail::Compact {
+                String::new()
+            } else {
+                bounded_tail(&result.output, 8_000)
+            },
+            stdout: if request.detail == crate::gate::GateDetail::Compact {
+                human_stdout
+            } else {
+                bounded_tail(&result.stdout, 16_000)
+            },
+            stderr: bounded_tail(
+                &result.stderr,
+                if request.detail == crate::gate::GateDetail::Compact {
+                    2_000
+                } else {
+                    16_000
+                },
+            ),
             output_truncated: result.output_truncated,
             drain_complete: result.drain_complete,
             cleanup_complete: result.cleanup_complete,
@@ -1171,11 +1262,11 @@ async fn execute_prepared(
         if status == GateStatus::FastPass
             && target.id == GateTargetId::Test
             && request.options.runner == crate::gate::TestRunner::Cargo
-            && request.options.test_filter.is_some()
+            && (request.options.test_filter.is_some() || !request.options.packages.is_empty())
             && step.evidence.tests_executed.unwrap_or(0) == 0
         {
             status = GateStatus::Inconclusive;
-            warnings.push("filtered Cargo test produced no evidence of executed tests; zero matches, ignored tests or a custom harness cannot grant a pass".into());
+            warnings.push("selected or filtered Cargo test produced no evidence of executed tests; zero matches, ignored tests or a custom harness cannot grant a pass".into());
         }
         steps.push(step);
         if !matches!(status, GateStatus::FastPass) {

@@ -18,13 +18,21 @@ agz-rust-mcp --version
 
 The server exposes `check`, `profile`, `audit`, `crate_lookup`, `docs`,
 `context`, `api`, `explain`, `verify`, `symbol`, `references`, `definition`,
-`symbols`, `implementations`, `hierarchy`, `rename`, `refactor`, and `change`.
+`symbols`, `implementations`, `hierarchy`, `rename`, `refactor`, `change`,
+`repair`, and `work`.
 Edit tools return bounded packages and never modify source. The `context` tool
 builds revision-bound capsules with per-item reasons, bounded pagination, and
 stale/delta tracking. The `api` tool resolves signatures from bounded analyzer
 evidence and type-checks candidate snippets only in a discarded candidate copy.
 The `change` tool keeps a revision-bound candidate copy with validation evidence
 and never writes workspace source.
+
+The current source also bundles `agz-rust-workflow`, `agz-rust-repair`,
+`agz-rust-refactor`, and `agz-rust-performance` as offline MCP prompts/resources.
+Use `agz-rust-mcp skills list`, `skills show <name>`, or
+`skills export --dir <new-directory>` for filesystem-based skill discovery.
+Export never replaces an existing directory. This addition is unreleased and
+is not present in published `0.3.0` binaries.
 
 See the [project repository](https://github.com/ugur-murat-alt/agz-rust-mcp)
 for client configuration, security boundaries, and release artifacts.

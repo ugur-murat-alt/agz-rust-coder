@@ -2,8 +2,8 @@
 
 use std::{error::Error, time::Duration};
 
-use agz_rust_mcp::{Config, ConfigError, RustMcpServer};
-use clap::error::ErrorKind;
+use agz_rust_mcp::{CliOptions, Config, RustMcpServer, config::CliCommand};
+use clap::{Parser, error::ErrorKind};
 use rmcp::{ServiceExt, transport::stdio};
 use tracing_subscriber::EnvFilter;
 
@@ -22,9 +22,9 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .try_init()
         .ok();
 
-    let config = match Config::load_from(std::env::args_os()) {
-        Ok(config) => config,
-        Err(ConfigError::Cli(error))
+    let cli = match CliOptions::try_parse_from(std::env::args_os()) {
+        Ok(cli) => cli,
+        Err(error)
             if matches!(
                 error.kind(),
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
@@ -35,6 +35,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
         Err(error) => return Err(error.into()),
     };
+    if let Some(CliCommand::Skills { action }) = &cli.command {
+        agz_rust_mcp::skills::run(action)?;
+        return Ok(());
+    }
+    let config = Config::load_cli(&cli)?;
     let server = RustMcpServer::new(config)?;
     let state = server.state().clone();
     let service = Box::pin(server.serve(stdio())).await?;

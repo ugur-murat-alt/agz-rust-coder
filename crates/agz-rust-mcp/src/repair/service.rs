@@ -1539,6 +1539,7 @@ fn is_rust_file(file: &str) -> bool {
 fn parse_gate_target(target: &str) -> GateTargetId {
     match target {
         "check" => GateTargetId::Check,
+        "build" => GateTargetId::Build,
         "clippy" => GateTargetId::Clippy,
         "test" => GateTargetId::Test,
         "doc" => GateTargetId::Doc,

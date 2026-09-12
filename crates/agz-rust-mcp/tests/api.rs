@@ -34,6 +34,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(label: &str) -> Self {
+        Self::with_parent_root(label, false)
+    }
+
+    fn with_parent_root(label: &str, allow_parent: bool) -> Self {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
@@ -89,8 +93,8 @@ impl Fixture {
         config.telemetry.path = state.join("activity.jsonl");
         config.api.compile_timeout_ms = 120_000;
         let dependencies = config.server.allow_dependency_roots.clone();
-        let guard =
-            Arc::new(RootGuard::new([root.clone()], dependencies).expect("create root guard"));
+        let allowed = if allow_parent { base } else { root.clone() };
+        let guard = Arc::new(RootGuard::new([allowed], dependencies).expect("create root guard"));
         let service = Arc::new(
             ChangeService::new(
                 config.clone(),
@@ -492,6 +496,30 @@ async fn diverging_snippet_is_not_reported_as_complete() {
             .any(|item| item == "todo!"),
         "{probe:#?}"
     );
+}
+
+#[tokio::test]
+async fn parent_root_api_probe_reads_the_selected_workspace_and_declared_module() {
+    let fixture = Fixture::with_parent_root("parent-root", true);
+    fixture.write("src/lib.rs", "mod nested;\npub fn value() -> u8 { 1 }\n");
+    fixture.write("src/nested.rs", "pub fn inner() -> u8 { 2 }\n");
+    let resolved = fixture.resolve("value").await;
+    assert_eq!(resolved.status, "OK", "{resolved:#?}");
+    let data = fixture
+        .probe(
+            vec!["let _: u8 = super::inner();".to_owned()],
+            None,
+            Vec::new(),
+            "src/nested.rs",
+            CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(
+        probe_status(&data),
+        "COMPILES_IN_CONFIGURATION",
+        "{data:#?}"
+    );
+    assert!(data.probe.expect("probe payload").original_unchanged);
 }
 
 #[tokio::test]

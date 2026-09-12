@@ -38,6 +38,13 @@ sorun giderme: [docs/install.tr.md](docs/install.tr.md) ·
 
 ## MCP İstemci Ayarı
 
+Güncel kaynak dört çevrimdışı skill de içerir: `agz-rust-workflow`,
+`agz-rust-repair`, `agz-rust-refactor` ve `agz-rust-performance`. Tek çalıştırılabilir
+dosya, araçlarla iş akışlarını MCP prompt/resource üzerinden sunar; ikinci bir
+MCP gerekmez. Dosya tabanlı istemciler `agz-rust-mcp skills export` kullanabilir.
+[Paketli skilller](docs/install.tr.md#paketli-skilller-güncel-kaynak) bölümüne bakın.
+Bu ek henüz yayımlanmadı; yayımlanmış `0.3.0` binary'lerinde bulunmaz.
+
 Minimal OpenCode2 yapılandırması (`opencode.jsonc`):
 
 ```jsonc
