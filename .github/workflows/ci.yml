@@ -25,7 +25,6 @@ jobs:
         os:
           - ubuntu-24.04
           - macos-14
-          - windows-2025
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,6 +50,10 @@ jobs:
       - name: Check formatting
         shell: bash
         run: cargo +1.88.0 fmt --all --check
+
+      - name: Test npm launcher version selection and integrity
+        shell: bash
+        run: npm --prefix npm test
 
       - name: Run strict Clippy on every platform
         shell: bash

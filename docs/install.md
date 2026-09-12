@@ -39,17 +39,36 @@ configuration or change client settings. With no subcommand the binary remains
 the normal stdio server. Skills use the connected server's discovered tools;
 Rust/Cargo and optional adapters remain local executable prerequisites.
 
+
+### Filesystem delivery to each client
+
+Installing the executable (including through npm) does not automatically write
+skill files into client configuration directories. MCP prompts/resources are
+available immediately; native skill discovery needs the four exported folders.
+Export once to a new temporary directory, then copy the selected folders without
+replacing an existing customized skill:
+
+| Client | User skill directory |
+| --- | --- |
+| Codex | `~/.codex/skills/<skill-name>/SKILL.md` |
+| OpenCode / OpenCode2 | `~/.config/opencode/skills/<skill-name>/SKILL.md` |
+| ZCode | `~/.zcode/skills/<skill-name>/SKILL.md` |
+
+Verify the client's skill inventory after installation. Updating the binary
+updates its embedded prompts/resources; exported files need an explicit refresh.
+The installer does not overwrite user skill instructions in the background.
+
 ## Requirements
 
 - Linux, macOS, or Windows on x86_64, or macOS on arm64.
-- An MCP-capable client (OpenCode2, Codex, or another stdio client).
+- An MCP-capable client (ZCode, OpenCode, OpenCode2, Codex, or another stdio client).
 - Rust `1.88.0` or newer only for the `cargo install` and source methods.
 - Node.js only for the npm wrapper.
 
 ## 1. npm Wrapper
 
 ```bash
-npx -y @agz-yazilim/agz-rust-mcp --version
+npx -y @agz-yazilim/agz-rust-mcp@latest --version
 ```
 
 The wrapper is the managed option: it resolves and caches the release artifact
@@ -178,6 +197,13 @@ on `PATH`, or point the client at its absolute path. See
 
 ## MCP Client Setup
 
+Before connecting the client, run `npx -y @agz-yazilim/agz-rust-mcp@latest --version`
+once to download and verify the release. `@latest` explicitly refreshes npm
+resolution; use `@0.4.0` instead to pin this release. Automatic PATH selection
+requires the wrapper's version, so an older installed binary cannot silently
+win. `AGZ_RUST_MCP_BIN` is an explicit local override and intentionally bypasses
+automatic version selection; unset it when verifying the published release.
+
 ### Multiple checkouts, worktrees and package subdirectories
 
 The server is not tied to one Git branch. Supply an absolute `dir` for the
@@ -205,6 +231,54 @@ roots with repeated `--allow-root <path>` arguments when the client starts
 elsewhere. Client-provided MCP roots may narrow configured access but never
 widen it.
 
+### ZCode (`~/.zcode/cli/config.json`)
+
+Add this server to the existing `mcp.servers` object. For one project, use
+`.zcode/config.json` in that project instead. These are ZCode's native paths;
+its user file has an extra `cli/` directory.
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "rust": {
+        "command": "npx",
+        "args": ["-y", "@agz-yazilim/agz-rust-mcp@latest"]
+      }
+    }
+  }
+}
+```
+
+The Settings → MCP Servers page also accepts this entry. Preserve existing
+servers. `.agents/mcp.json` is only a fallback when the same scope has no native
+ZCode servers; prefer the native file to avoid an existing server hiding it.
+See [ZCode's MCP documentation](https://zcode.z.ai/en/docs/mcp-services).
+
+### OpenCode (`opencode.jsonc`)
+
+Current OpenCode uses `mcp.rust`, with an array command and numeric timeout:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "rust": {
+      "type": "local",
+      "command": ["npx", "-y", "@agz-yazilim/agz-rust-mcp@latest"],
+      "enabled": true,
+      "timeout": 120000
+    }
+  }
+}
+```
+
+Use `~/.config/opencode/opencode.json` for a user-wide configuration, or
+`opencode.jsonc` in the project. See
+[OpenCode's MCP documentation](https://opencode.ai/docs/mcp-servers/).
+The OpenCode2 example below uses a different grouped configuration; choose the
+format your installed client accepts.
+
 ### OpenCode2 (`opencode.jsonc`)
 
 ```jsonc
@@ -218,7 +292,7 @@ widen it.
         "cwd": ".",
         "codemode": false,
         "timeout": {
-          "startup": 30000,
+          "startup": 120000,
           "catalog": 30000,
           "execution": 720000
         }
@@ -231,7 +305,7 @@ widen it.
 Wrapper-managed variant:
 
 ```jsonc
-"command": ["npx", "-y", "@agz-yazilim/agz-rust-mcp"],
+"command": ["npx", "-y", "@agz-yazilim/agz-rust-mcp@latest"],
 ```
 
 ### Codex (`~/.codex/config.toml`)
@@ -247,7 +321,9 @@ Wrapper-managed variant:
 ```toml
 [mcp_servers.rust]
 command = "npx"
-args = ["-y", "@agz-yazilim/agz-rust-mcp"]
+args = ["-y", "@agz-yazilim/agz-rust-mcp@latest"]
+startup_timeout_sec = 120
+tool_timeout_sec = 720
 ```
 
 Managed wrapper note: with the npm wrapper the client config never changes when

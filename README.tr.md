@@ -16,7 +16,7 @@ paketleri döndürür.
 
 ```bash
 # npm wrapper (Node.js gerekir; platforma uyan sürüm binary'sini bulur)
-npx -y @agz-yazilim/agz-rust-mcp --version
+npx -y @agz-yazilim/agz-rust-mcp@latest --version
 
 # kurulum betiği (Linux x86_64): install.sh ve SHA256SUMS dosyalarını en güncel
 # sürümden indirin, betiği doğrulayın, sonra çalıştırın
@@ -45,36 +45,17 @@ MCP gerekmez. Dosya tabanlı istemciler `agz-rust-mcp skills export` kullanabili
 [Paketli skilller](docs/install.tr.md#paketli-skilller-güncel-kaynak) bölümüne bakın.
 Paketli skilller `0.4.0` ile gelir; `0.3.0` binary'lerinde bulunmaz.
 
-Minimal OpenCode2 yapılandırması (`opencode.jsonc`):
+| İstemci | Yapılandırma | Rehber |
+| --- | --- | --- |
+| ZCode | `~/.zcode/cli/config.json` → `mcp.servers.rust` | [ZCode](docs/install.tr.md#zcode-zcodecliconfigjson) |
+| OpenCode | `opencode.jsonc` → `mcp.rust` | [OpenCode](docs/install.tr.md#opencode-opencodejsonc) |
+| OpenCode2 | `opencode.jsonc` → `mcp.servers.rust` | [OpenCode2](docs/install.tr.md#opencode2-opencodejsonc) |
+| Codex | `~/.codex/config.toml` → `mcp_servers.rust` | [Codex](docs/install.tr.md#codex-codexconfigtoml) |
 
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "servers": {
-      "rust": {
-        "type": "local",
-        "command": ["agz-rust-mcp"],
-        "cwd": ".",
-        "codemode": false,
-        "timeout": {
-          "startup": 30000,
-          "catalog": 30000,
-          "execution": 720000
-        }
-      }
-    }
-  }
-}
-```
-
-Minimal Codex yapılandırması (`~/.codex/config.toml`):
-
-```toml
-[mcp_servers.rust]
-command = "agz-rust-mcp"
-args = []
-```
+İstemcinize ait örneği kullanın; OpenCode ve OpenCode2'nin biçimleri farklıdır.
+Hepsi `npx -y @agz-yazilim/agz-rust-mcp@latest` başlatabilir. İlk indirme için
+bağlamadan önce komutu bir kez `--version` ile çalıştırın. Bu sürümü sabitlemek
+için `@0.4.0` kullanın. PATH'teki eski binary artık otomatik sürüm seçimini ezmez.
 
 Kanonik çalışma dizini varsayılan yetkili köktür. İstemci başka yerde
 başlatılıyorsa tekrarlanan `--allow-root` argümanlarıyla açık kökler ekleyin;

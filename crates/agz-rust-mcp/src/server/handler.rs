@@ -9,7 +9,7 @@ use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::tool::schema_for_input,
     model::{
-        CallToolRequestMethod, CallToolRequestParams, CallToolResponse, CallToolResult,
+        CacheScope, CallToolRequestMethod, CallToolRequestParams, CallToolResponse, CallToolResult,
         GetPromptRequestParams, GetPromptResponse, GetPromptResult, GetTaskResult, Implementation,
         ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult, ListToolsResult,
         PaginatedRequestParams, Prompt, PromptArgument, PromptMessage, ReadResourceRequestParams,
@@ -2645,9 +2645,13 @@ impl ServerHandler for RustMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult::with_all_items(tool_definitions(
-            self.state.config(),
-        )))
+        // Modern MCP clients require explicit cache metadata. Keep catalogs
+        // private and immediately stale; configuration can differ per server.
+        Ok(
+            ListToolsResult::with_all_items(tool_definitions(self.state.config()))
+                .with_ttl_ms(0)
+                .with_cache_scope(CacheScope::Private),
+        )
     }
 
     async fn get_prompt(
@@ -2674,7 +2678,9 @@ impl ServerHandler for RustMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListPromptsResult, McpError> {
-        Ok(ListPromptsResult::with_all_items(prompts()))
+        Ok(ListPromptsResult::with_all_items(prompts())
+            .with_ttl_ms(0)
+            .with_cache_scope(CacheScope::Private))
     }
 
     async fn list_resources(
@@ -2682,7 +2688,9 @@ impl ServerHandler for RustMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        Ok(ListResourcesResult::with_all_items(resources()))
+        Ok(ListResourcesResult::with_all_items(resources())
+            .with_ttl_ms(0)
+            .with_cache_scope(CacheScope::Private))
     }
 
     async fn list_resource_templates(
@@ -2690,7 +2698,9 @@ impl ServerHandler for RustMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
-        Ok(ListResourceTemplatesResult::with_all_items(Vec::new()))
+        Ok(ListResourceTemplatesResult::with_all_items(Vec::new())
+            .with_ttl_ms(0)
+            .with_cache_scope(CacheScope::Private))
     }
 
     async fn read_resource(
@@ -2701,14 +2711,16 @@ impl ServerHandler for RustMcpServer {
         let Some(text) = resource_text(&request.uri) else {
             return Err(McpError::resource_not_found("unknown resource", None));
         };
-        Ok(ReadResourceResponse::Complete(ReadResourceResult::new(
-            vec![ResourceContents::TextResourceContents {
+        Ok(ReadResourceResponse::Complete(
+            ReadResourceResult::new(vec![ResourceContents::TextResourceContents {
                 uri: request.uri,
                 mime_type: Some("text/markdown".to_owned()),
                 text: text.to_owned(),
                 meta: None,
-            }],
-        )))
+            }])
+            .with_ttl_ms(0)
+            .with_cache_scope(CacheScope::Private),
+        ))
     }
 
     fn on_roots_list_changed(
