@@ -20,7 +20,7 @@ characters). `resources/list` exposes the same content under
 Clients decide whether to discover/invoke prompts or filesystem skills; MCP
 resource availability alone does not enable automatic skill selection.
 
-For clients that discover filesystem skills, use a source-built binary:
+For clients that discover filesystem skills, use a `0.4.0` or later binary:
 
 ```bash
 agz-rust-mcp skills list

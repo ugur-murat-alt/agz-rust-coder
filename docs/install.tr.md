@@ -22,7 +22,7 @@ en fazla 4.000 karakter). `resources/list` aynı içeriği
 içeriğe yönlendirir. Prompt ya da dosya skilllerini keşfetme/çağırma davranışını
 istemci belirler; MCP kaynağının bulunması otomatik skill seçimini tek başına açmaz.
 
-Dosya tabanlı skill keşfi kullanan istemciler için kaynaktan derlenmiş binary ile:
+Dosya tabanlı skill keşfi kullanan istemciler için `0.4.0` veya daha yeni binary ile:
 
 ```bash
 agz-rust-mcp skills list
